@@ -1,0 +1,1919 @@
+-- discord https://discord.gg/gzBp5WCUpJ
+
+
+
+
+local ErrorText = Drawing.new("Text")
+ErrorText.Visible = false
+ErrorText.Size = 16
+ErrorText.Color = Color3.fromRGB(255, 0, 0)
+ErrorText.Position = Vector2.new(20, 20)
+local function ShowError(msg) ErrorText.Text = tostring(msg) ErrorText.Visible = true task.delay(3, function() ErrorText.Visible = false end) end
+local function HandleError(err) ShowError("⚠️ " .. tostring(err)) end
+
+--// Логи
+local ActiveLogs = {}
+local function AddLog(msg, color)
+    local settings = getgenv().AirHub.Logging
+    local text = Drawing.new("Text")
+    text.Text = msg
+    text.Size = settings.FontSize or 18
+    text.Color = color or Color3.fromRGB(255, 255, 255)
+    text.Center = true
+    text.Outline = true
+    text.Visible = true
+    text.Transparency = 0
+    local viewport = workspace.CurrentCamera.ViewportSize
+    local startX, startY = viewport.X / 2, viewport.Y / 2 + 60
+    for _, log in ipairs(ActiveLogs) do
+        log.text.Position = Vector2.new(log.text.Position.X, log.text.Position.Y - 24)
+    end
+    text.Position = Vector2.new(startX, startY)
+    table.insert(ActiveLogs, {text = text, created = tick(), duration = settings.Duration or 1})
+end
+
+if getgenv().AirHub then return end
+getgenv().AirHub = {}
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Camera = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local Lighting = game:GetService("Lighting")
+
+-- Звуки
+local Hitsound, Killsound
+local function LoadSound(id, volume)
+    local sound = Instance.new("Sound")
+    sound.SoundId = "rbxassetid://" .. tostring(id)
+    sound.Volume = volume
+    sound.Parent = Camera
+    return sound
+end
+
+local function PlayHitsound()
+    local s = getgenv().AirHub.Sound
+    if not s.HitsoundEnabled then return end
+    if not Hitsound or Hitsound.SoundId ~= "rbxassetid://"..s.HitsoundID then
+        if Hitsound then Hitsound:Destroy() end
+        Hitsound = LoadSound(s.HitsoundID, s.HitsoundVolume)
+    else
+        Hitsound.Volume = s.HitsoundVolume
+    end
+    Hitsound:Play()
+end
+
+local function PlayKillsound()
+    local s = getgenv().AirHub.Sound
+    if not s.KillsoundEnabled then return end
+    if not Killsound or Killsound.SoundId ~= "rbxassetid://"..s.KillsoundID then
+        if Killsound then Killsound:Destroy() end
+        Killsound = LoadSound(s.KillsoundID, s.KillsoundVolume)
+    else
+        Killsound.Volume = s.KillsoundVolume
+    end
+    Killsound:Play()
+end
+
+RunService.Heartbeat:Connect(function()
+    local now = tick()
+    for i = #ActiveLogs, 1, -1 do
+        local log = ActiveLogs[i]
+        if now - log.created >= log.duration then
+            log.text:Remove()
+            table.remove(ActiveLogs, i)
+        end
+    end
+end)
+
+local Running, Typing, LastShotTime = false, false, 0
+local OriginalSensitivity, MenuVisible = nil, true
+
+getgenv().AirHub.Logging = {
+    Enabled = true,
+    ShowHit = true,
+    ShowMiss = true,
+    Duration = 1,
+    FontSize = 18
+}
+
+getgenv().AirHub.Sound = {
+    HitsoundEnabled = false,
+    HitsoundID = 83717596220569,   -- gamesense
+    HitsoundVolume = 1,
+    KillsoundEnabled = false,
+    KillsoundID = 83717596220569,   -- gamesense
+    KillsoundVolume = 1
+}
+
+getgenv().AirHub.Character = {
+    Transparent = false,
+    Transparency = 0.5,
+    HatESP = {
+        Enabled = false,
+        Color = Color3.fromRGB(255, 223, 0),
+        Size = 1.5,
+        Height = 2.5
+    }
+}
+
+--====================================================================================
+--  Aimbot (исправлен Lock Part)
+--====================================================================================
+getgenv().AirHub.Aimbot = {
+    Settings = {
+        Enabled = false,
+        TeamCheck = { Enabled = true, Mode = "Enemies", TreatNeutralAsEnemy = true },
+        AliveCheck = true,
+        WallCheck = false,
+        AimSmoothingSpeed = 6.0,
+        AimPrediction = 0.0,
+        TriggerKey = "MouseButton2",
+        Toggle = false,
+        LockPart = "Head",
+        AimMethod = "Smooth",
+        SilentAim = false,
+        IgnoreFOV = false,
+        CheckFromPlayerOnTP = true,
+        AutoShoot = {
+            Enabled = false,
+            ShootKey = "MouseButton1",
+            FireRate = 0.05,
+            OnlyWhenAiming = true,
+            StrictWallCheck = false,
+            AutoStop = { Enabled = false, Time = 0.1 },
+            FireRateMode = "Manual"
+        }
+    },
+    FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
+    FOVCircle = Drawing.new("Circle"),
+    Locked = nil,
+    LockPartInstance = nil,
+    Internal = {}
+}
+local Aimbot = getgenv().AirHub.Aimbot
+
+local VISIBLE_PARTS = {"Head","HumanoidRootPart","UpperTorso","LowerTorso","Torso","Left Arm","Right Arm"}
+
+local function GetActualPartName(lockPart)
+    if lockPart == "Torso" then
+        return {"Torso", "UpperTorso", "LowerTorso"}
+    else
+        return {lockPart}
+    end
+end
+
+local function IsTargetValid(targetPlayer)
+    if targetPlayer == LocalPlayer then return false end
+    local char = targetPlayer.Character
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if Aimbot.Settings.AliveCheck and (not hum or hum.Health <= 0) then return false end
+    local tc = Aimbot.Settings.TeamCheck
+    if not tc.Enabled then return true end
+    local lt, tt = LocalPlayer.Team, targetPlayer.Team
+    local mode = tc.Mode
+    if mode == "All" then return true end
+    if mode == "Enemies" then
+        if lt and tt and lt == tt then return false end
+        if (not lt or not tt) and not tc.TreatNeutralAsEnemy then return false end
+        return true
+    elseif mode == "Allies" then
+        return (lt and tt and lt == tt)
+    elseif mode == "IgnoreNeutrals" then
+        if not lt or not tt then return false end
+        return lt ~= tt
+    end
+    return true
+end
+
+local function CancelLock()
+    Aimbot.Locked = nil
+    Aimbot.LockPartInstance = nil
+    Aimbot.FOVCircle.Color = Color3.fromRGB(255,255,255)
+    if OriginalSensitivity then UserInputService.MouseDeltaSensitivity = OriginalSensitivity end
+end
+
+local function GetVisiblePointOnPart(origin, part)
+    if not part or not part:IsA("BasePart") then return nil end
+    local targetCharacter = part.Parent
+    if not targetCharacter then return nil end
+    local localCharacter = LocalPlayer.Character
+    local ignoreList = {targetCharacter}
+    if localCharacter then table.insert(ignoreList, localCharacter) end
+    local params = RaycastParams.new()
+    params.FilterDescendantsInstances = ignoreList
+    params.FilterType = Enum.RaycastFilterType.Blacklist
+    local function isPointVisible(point)
+        local rayResult = workspace:Raycast(origin, point - origin, params)
+        return rayResult == nil
+    end
+    local center = part.Position
+    if isPointVisible(center) then return center end
+    local size = part.Size
+    local cf = part.CFrame
+    local half = size * 0.5
+    local testPoints = {
+        cf * Vector3.new(0, half.Y, 0),
+        cf * Vector3.new(0, -half.Y, 0),
+        cf * Vector3.new(half.X, 0, 0),
+        cf * Vector3.new(-half.X, 0, 0),
+        cf * Vector3.new(0, 0, half.Z),
+        cf * Vector3.new(0, 0, -half.Z)
+    }
+    for _, point in ipairs(testPoints) do
+        if isPointVisible(point) then return point end
+    end
+    return nil
+end
+
+local function FindVisiblePart(player, origin)
+    local char = player.Character
+    if not char then return nil end
+    for _, name in ipairs(VISIBLE_PARTS) do
+        local part = char:FindFirstChild(name)
+        if part and part:IsA("BasePart") and GetVisiblePointOnPart(origin, part) then
+            return part
+        end
+    end
+    return nil
+end
+
+local function GetClosestPlayer()
+    if Aimbot.Locked then
+        local target = Aimbot.Locked
+        if target and target.Character then
+            if not IsTargetValid(target) then CancelLock() return end
+            local visiblePart = FindVisiblePart(target, Camera.CFrame.Position)
+            if visiblePart then Aimbot.LockPartInstance = visiblePart else Aimbot.LockPartInstance = nil end
+            return
+        else
+            CancelLock()
+            return
+        end
+    end
+    local ignoreFOV = Aimbot.Settings.IgnoreFOV
+    local fovEnabled = Aimbot.FOVSettings.Enabled and not ignoreFOV
+    local required = fovEnabled and Aimbot.FOVSettings.Amount or 999999
+    local bestTarget, bestPart, bestDist = nil, nil, math.huge
+    local mousePos = UserInputService:GetMouseLocation()
+    local origin = Camera.CFrame.Position
+    if getgenv().AirHub.ThirdPerson and getgenv().AirHub.ThirdPerson.Settings.Enabled and Aimbot.Settings.CheckFromPlayerOnTP then
+        local char = LocalPlayer.Character
+        if char then
+            local head = char:FindFirstChild("Head")
+            if head then origin = head.Position else
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                if hrp then origin = hrp.Position end
+            end
+        end
+    end
+    for _, v in pairs(Players:GetPlayers()) do
+        if not IsTargetValid(v) then continue end
+        local charTarget = v.Character
+        if not charTarget then continue end
+
+        if Aimbot.Settings.LockPart == "Nearest" then
+            for _, pName in ipairs(VISIBLE_PARTS) do
+                local part = charTarget:FindFirstChild(pName)
+                if part and part:IsA("BasePart") then
+                    local point = GetVisiblePointOnPart(origin, part)
+                    if point then
+                        local vec, on = Camera:WorldToViewportPoint(point)
+                        local dist = ignoreFOV and (point - origin).Magnitude or (on and (mousePos - Vector2.new(vec.X, vec.Y)).Magnitude or math.huge)
+                        if dist < bestDist and (ignoreFOV or dist < required) then
+                            bestDist, bestTarget, bestPart = dist, v, part
+                        end
+                    end
+                end
+            end
+        else
+            local targetPartNames = GetActualPartName(Aimbot.Settings.LockPart)
+            local found = false
+            for _, pName in ipairs(targetPartNames) do
+                local part = charTarget:FindFirstChild(pName)
+                if part and part:IsA("BasePart") then
+                    local point = GetVisiblePointOnPart(origin, part)
+                    if point then
+                        local vec, on = Camera:WorldToViewportPoint(point)
+                        local dist = ignoreFOV and (point - origin).Magnitude or (on and (mousePos - Vector2.new(vec.X, vec.Y)).Magnitude or math.huge)
+                        if dist < bestDist and (ignoreFOV or dist < required) then
+                            bestDist, bestTarget, bestPart = dist, v, part
+                            found = true
+                        end
+                    end
+                end
+            end
+            if not found then
+                local anyPart = FindVisiblePart(v, origin)
+                if anyPart then
+                    local point = GetVisiblePointOnPart(origin, anyPart)
+                    if point then
+                        local vec, on = Camera:WorldToViewportPoint(point)
+                        local dist = ignoreFOV and (point - origin).Magnitude or (on and (mousePos - Vector2.new(vec.X, vec.Y)).Magnitude or math.huge)
+                        if dist < bestDist and (ignoreFOV or dist < required) then
+                            bestDist, bestTarget, bestPart = dist, v, anyPart
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if bestTarget and bestPart then
+        Aimbot.Locked = bestTarget
+        Aimbot.LockPartInstance = bestPart
+    else
+        CancelLock()
+    end
+end
+
+local function LogShot(targetPlayer, startHealth, hitPartName, wasVisible)
+    if not targetPlayer then return end
+    local char = targetPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    local endHealth = hum.Health
+    local hit = endHealth < startHealth
+
+    -- Звуки
+    if hit then
+        if hum.Health <= 0 then
+            PlayKillsound()
+        else
+            PlayHitsound()
+        end
+    end
+
+    if not getgenv().AirHub.Logging.Enabled then return end
+    if hit and not getgenv().AirHub.Logging.ShowHit then return end
+    if not hit and not getgenv().AirHub.Logging.ShowMiss then return end
+    local msg, color
+    if hit then
+        if hum.Health <= 0 then
+            msg = "💀 Killed " .. targetPlayer.Name .. " (" .. hitPartName .. ")"
+            color = Color3.fromRGB(255, 255, 0)
+        else
+            msg = "✅ Hit " .. targetPlayer.Name .. " (" .. hitPartName .. " - " .. math.floor(startHealth - endHealth) .. " dmg)"
+            color = Color3.fromRGB(0, 255, 0)
+        end
+    else
+        if not wasVisible then
+            msg = "❌ Missed (wall) " .. targetPlayer.Name
+        else
+            msg = "❌ Missed " .. targetPlayer.Name
+        end
+        color = Color3.fromRGB(255, 80, 80)
+    end
+    AddLog(msg, color)
+end
+
+local lastDelta = tick()
+local function LoadAimbot()
+    OriginalSensitivity = UserInputService.MouseDeltaSensitivity
+    local function PerformSilentShot(targetPart, btn, wasVisible)
+        if not targetPart then return end
+        local targetChar = targetPart.Parent
+        local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
+        if not targetPlayer then return end
+        local hum = targetChar:FindFirstChildOfClass("Humanoid")
+        if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
+        local startHealth = hum and hum.Health or 0
+        local origin = Camera.CFrame.Position
+        if getgenv().AirHub.ThirdPerson and getgenv().AirHub.ThirdPerson.Settings.Enabled and Aimbot.Settings.CheckFromPlayerOnTP then
+            local char = LocalPlayer.Character
+            if char then
+                local head = char:FindFirstChild("Head")
+                if head then origin = head.Position else
+                    local hrp = char:FindFirstChild("HumanoidRootPart")
+                    if hrp then origin = hrp.Position end
+                end
+            end
+        end
+        local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
+        if not visiblePoint then return end
+        local predPos = visiblePoint
+        if Aimbot.Settings.AimPrediction > 0 then
+            local vel = Vector3.new(0,0,0)
+            local root = targetPart.Parent:FindFirstChild("HumanoidRootPart")
+            if root then vel = root.Velocity end
+            predPos = predPos + vel * Aimbot.Settings.AimPrediction
+        end
+        local oldCF = Camera.CFrame
+        local tpState = getgenv().AirHub.ThirdPerson and getgenv().AirHub.ThirdPerson.Settings.Enabled
+        if tpState then
+            getgenv().AirHub.ThirdPerson.Settings.Enabled = false
+            task.wait(0.001)
+        end
+        local newCF = CFrame.new(oldCF.Position, predPos)
+        Camera.CFrame = newCF
+        local mousePos = UserInputService:GetMouseLocation()
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
+        task.wait(0.001)
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+        Camera.CFrame = oldCF
+        if tpState then getgenv().AirHub.ThirdPerson.Settings.Enabled = true end
+        task.delay(0.15, function()
+            LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible)
+        end)
+    end
+
+    RunService.RenderStepped:Connect(function()
+        local now = tick()
+        local dt = math.min(0.033, now - lastDelta)
+        lastDelta = now
+        if Aimbot.FOVSettings.Enabled and Aimbot.Settings.Enabled and not Aimbot.Settings.IgnoreFOV then
+            Aimbot.FOVCircle.Radius = Aimbot.FOVSettings.Amount
+            Aimbot.FOVCircle.Thickness = 1
+            Aimbot.FOVCircle.Filled = false
+            Aimbot.FOVCircle.Transparency = 0.5
+            Aimbot.FOVCircle.Visible = Aimbot.FOVSettings.Visible
+            Aimbot.FOVCircle.Position = UserInputService:GetMouseLocation()
+        else
+            Aimbot.FOVCircle.Visible = false
+        end
+        local shouldScan = Aimbot.Settings.Enabled and Running
+        if shouldScan then
+            GetClosestPlayer()
+            if Aimbot.Locked then
+                local targetPart = Aimbot.LockPartInstance
+                if targetPart then
+                    local origin = Camera.CFrame.Position
+                    if getgenv().AirHub.ThirdPerson and getgenv().AirHub.ThirdPerson.Settings.Enabled and Aimbot.Settings.CheckFromPlayerOnTP then
+                        local char = LocalPlayer.Character
+                        if char then
+                            local head = char:FindFirstChild("Head")
+                            if head then origin = head.Position else
+                                local hrp = char:FindFirstChild("HumanoidRootPart")
+                                if hrp then origin = hrp.Position end
+                            end
+                        end
+                    end
+                    local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
+                    if visiblePoint then
+                        local predPos = visiblePoint
+                        if Aimbot.Settings.AimPrediction > 0 then
+                            local vel = Vector3.new(0,0,0)
+                            local root = targetPart.Parent:FindFirstChild("HumanoidRootPart")
+                            if root then vel = root.Velocity end
+                            predPos = predPos + vel * Aimbot.Settings.AimPrediction
+                        end
+                        if not Aimbot.Settings.SilentAim then
+                            local aimCF = CFrame.new(Camera.CFrame.Position, predPos)
+                            local instant = (Aimbot.Settings.AimMethod == "Instant")
+                            local aimSpeed = Aimbot.Settings.AimSmoothingSpeed
+                            if instant or aimSpeed == 0 then
+                                Camera.CFrame = aimCF
+                            else
+                                if aimSpeed > 0 then
+                                    local factor = 1 - math.exp(-aimSpeed * dt)
+                                    Camera.CFrame = Camera.CFrame:Lerp(aimCF, factor)
+                                else
+                                    Camera.CFrame = aimCF
+                                end
+                            end
+                            UserInputService.MouseDeltaSensitivity = 0
+                            Aimbot.FOVCircle.Color = Color3.fromRGB(255,70,70)
+                        else
+                            Aimbot.FOVCircle.Color = Color3.fromRGB(255,200,70)
+                        end
+                    end
+                end
+            else
+                if not Aimbot.Settings.SilentAim and UserInputService.MouseDeltaSensitivity ~= OriginalSensitivity then
+                    UserInputService.MouseDeltaSensitivity = OriginalSensitivity
+                end
+            end
+        else
+            if not Aimbot.Settings.SilentAim and UserInputService.MouseDeltaSensitivity ~= OriginalSensitivity then
+                UserInputService.MouseDeltaSensitivity = OriginalSensitivity
+            end
+        end
+    end)
+
+    UserInputService.InputBegan:Connect(function(inp)
+        if Typing then return end
+        local triggerKey = Aimbot.Settings.TriggerKey
+        local keyPressed = false
+        if inp.UserInputType == Enum.UserInputType.Keyboard then
+            keyPressed = inp.KeyCode == Enum.KeyCode[triggerKey]
+        elseif inp.UserInputType == Enum.UserInputType[triggerKey] then
+            keyPressed = true
+        end
+        if keyPressed then
+            if Aimbot.Settings.Toggle then
+                Running = not Running
+                if not Running then CancelLock() end
+            else
+                Running = true
+            end
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(inp)
+        if Typing or Aimbot.Settings.Toggle then return end
+        local triggerKey = Aimbot.Settings.TriggerKey
+        local keyReleased = false
+        if inp.UserInputType == Enum.UserInputType.Keyboard then
+            keyReleased = inp.KeyCode == Enum.KeyCode[triggerKey]
+        elseif inp.UserInputType == Enum.UserInputType[triggerKey] then
+            keyReleased = true
+        end
+        if keyReleased then
+            Running = false
+            CancelLock()
+        end
+    end)
+
+    UserInputService.InputBegan:Connect(function(inp)
+        if Typing then return end
+        if not Aimbot.Settings.Enabled or not Aimbot.Settings.SilentAim then return end
+        if not Running or not Aimbot.Locked then return end
+        local btn = nil
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then btn = 0
+        elseif inp.UserInputType == Enum.UserInputType.MouseButton2 then btn = 1 end
+        if btn == nil then return end
+        if btn == 1 and Aimbot.Settings.TriggerKey == "MouseButton2" then return end
+        if Aimbot.Settings.AutoShoot.Enabled then return end
+        local targetPart = Aimbot.LockPartInstance
+        if targetPart then
+            local origin = Camera.CFrame.Position
+            local wasVisible = GetVisiblePointOnPart(origin, targetPart) ~= nil
+            PerformSilentShot(targetPart, btn, wasVisible)
+        end
+    end)
+
+    local function GetWeaponFireRate()
+        local char = LocalPlayer.Character
+        if not char then return 0.05 end
+        for _, child in ipairs(char:GetChildren()) do
+            if child:IsA("Tool") then
+                local rate = child:FindFirstChild("FireRate")
+                if rate and rate:IsA("NumberValue") then return math.clamp(rate.Value, 0.01, 1) end
+                local attr = child:GetAttribute("FireRate")
+                if attr and type(attr) == "number" then return math.clamp(attr, 0.01, 1) end
+            end
+        end
+        return 0.05
+    end
+
+    local function ProcessAutoShoot()
+        while task.wait(0.01) do
+            xpcall(function()
+                if not Aimbot.Settings.AutoShoot.Enabled then return end
+                if Aimbot.Settings.AutoShoot.OnlyWhenAiming and not Running then return end
+                if not Aimbot.Locked or not Aimbot.LockPartInstance then return end
+                local nowt = tick()
+                local minDelay
+                local mode = Aimbot.Settings.AutoShoot.FireRateMode
+                if mode == "MaxSpeed" then minDelay = 0.01
+                elseif mode == "WeaponRate" then minDelay = GetWeaponFireRate()
+                else minDelay = Aimbot.Settings.AutoShoot.FireRate end
+                if nowt - LastShotTime < minDelay then return end
+                local targetPart = Aimbot.LockPartInstance
+                if not targetPart then return end
+                local targetChar = targetPart.Parent
+                local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
+                if not targetPlayer then return end
+                local hum = targetChar:FindFirstChildOfClass("Humanoid")
+                if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then CancelLock() return end
+                local startHealth = hum and hum.Health or 0
+                local origin = Camera.CFrame.Position
+                if getgenv().AirHub.ThirdPerson and getgenv().AirHub.ThirdPerson.Settings.Enabled and Aimbot.Settings.CheckFromPlayerOnTP then
+                    local char = LocalPlayer.Character
+                    if char then
+                        local head = char:FindFirstChild("Head")
+                        if head then origin = head.Position else
+                            local hrp = char:FindFirstChild("HumanoidRootPart")
+                            if hrp then origin = hrp.Position end
+                        end
+                    end
+                end
+                local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
+                local wasVisible = visiblePoint ~= nil
+                if not visiblePoint and Aimbot.Settings.AutoShoot.StrictWallCheck then return end
+                if Aimbot.Settings.AutoShoot.AutoStop.Enabled then
+                    local char = LocalPlayer.Character
+                    if char then
+                        local humObj = char:FindFirstChildOfClass("Humanoid")
+                        if humObj then
+                            local savedSpeed = humObj.WalkSpeed
+                            humObj.WalkSpeed = 0
+                            task.wait(Aimbot.Settings.AutoShoot.AutoStop.Time)
+                            humObj.WalkSpeed = savedSpeed
+                        end
+                    end
+                end
+                local shootBtn = Aimbot.Settings.AutoShoot.ShootKey == "MouseButton1" and 0 or 1
+                if Aimbot.Settings.SilentAim then
+                    PerformSilentShot(targetPart, shootBtn, wasVisible)
+                else
+                    local mousePos = UserInputService:GetMouseLocation()
+                    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, shootBtn, true, game, 1)
+                    task.wait(0.005)
+                    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, shootBtn, false, game, 1)
+                    task.delay(0.15, function() LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible) end)
+                end
+                LastShotTime = nowt
+            end, HandleError)
+        end
+    end
+    coroutine.wrap(ProcessAutoShoot)()
+end
+
+UserInputService.TextBoxFocused:Connect(function() Typing = true end)
+UserInputService.TextBoxFocusReleased:Connect(function() Typing = false end)
+LoadAimbot()
+
+--====================================================================================
+--  AntiAim (Movement horizontal only, works first person)
+--====================================================================================
+getgenv().AirHub.AntiAim = {
+    Settings = {
+        Enabled = false, Mode = "Static",
+        Body = {Reference = "Camera", Yaw = 0, Pitch = 0, Roll = 0, SpinSpeed = 0, JitterAmount = 5, JitterSpeed = 10, IgnoreMoving = false, MoveSpeedThreshold = 0.5},
+        Head = {Enabled = false, Yaw = 0, Pitch = 0, Roll = 0},
+        Smoothness = 10
+    },
+    Internal = {BodyCurrentCF = nil, BodyLastUpdate = 0, BodyJitterTime = 0, BodyJitterOffset = {0,0,0}, NeckMotor = nil, OriginalC0 = nil}
+}
+local AntiAim = getgenv().AirHub.AntiAim
+
+local function GetBaseAngles(reference, char)
+    if reference == "Camera" then
+        local look = Camera.CFrame.LookVector
+        local flat = Vector3.new(look.X, 0, look.Z)
+        if flat.Magnitude > 0.001 then return math.atan2(flat.X, flat.Z), 0 else return 0,0 end
+    elseif reference == "Movement" then
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local vel = hrp.Velocity
+            local horizontal = Vector3.new(vel.X, 0, vel.Z)
+            if horizontal.Magnitude > 0.5 then return math.atan2(horizontal.X, horizontal.Z), 0 end
+        end
+        local look = Camera.CFrame.LookVector
+        local flat = Vector3.new(look.X, 0, look.Z)
+        if flat.Magnitude > 0.001 then return math.atan2(flat.X, flat.Z), 0 else return 0,0 end
+    elseif reference == "Player" then
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local look = hrp.CFrame.LookVector
+            local flat = Vector3.new(look.X, 0, look.Z)
+            if flat.Magnitude > 0.001 then return math.atan2(flat.X, flat.Z), math.atan2(look.Y, flat.Magnitude) end
+        end
+        return 0,0
+    end
+    return 0,0
+end
+
+local function ApplyAntiAim()
+    if not AntiAim.Settings.Enabled then
+        if AntiAim.Internal.NeckMotor and AntiAim.Internal.OriginalC0 then
+            AntiAim.Internal.NeckMotor.C0 = AntiAim.Internal.OriginalC0
+            AntiAim.Internal.NeckMotor = nil
+            AntiAim.Internal.OriginalC0 = nil
+        end
+        return
+    end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local now = tick()
+    local dt = math.min(0.033, now - AntiAim.Internal.BodyLastUpdate)
+    AntiAim.Internal.BodyLastUpdate = now
+    if AntiAim.Settings.Head.Enabled then
+        local neck = char:FindFirstChild("Neck")
+        if not neck or not neck:IsA("Motor6D") then
+            for _, v in pairs(char:GetDescendants()) do
+                if v:IsA("Motor6D") and v.Name:lower():find("neck") then neck = v; break end
+            end
+        end
+        if neck then
+            if not AntiAim.Internal.OriginalC0 then AntiAim.Internal.OriginalC0 = neck.C0 end
+            AntiAim.Internal.NeckMotor = neck
+            local headSet = AntiAim.Settings.Head
+            neck.C0 = AntiAim.Internal.OriginalC0 * CFrame.Angles(math.rad(headSet.Pitch), math.rad(headSet.Yaw), math.rad(headSet.Roll))
+        end
+    else
+        if AntiAim.Internal.NeckMotor and AntiAim.Internal.OriginalC0 then
+            AntiAim.Internal.NeckMotor.C0 = AntiAim.Internal.OriginalC0
+            AntiAim.Internal.NeckMotor = nil
+            AntiAim.Internal.OriginalC0 = nil
+        end
+    end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local bodySet = AntiAim.Settings.Body
+    local mode = AntiAim.Settings.Mode
+    local shouldApply = true
+    if bodySet.IgnoreMoving then
+        local vel = root.Velocity
+        if vel.Magnitude > bodySet.MoveSpeedThreshold then shouldApply = false; AntiAim.Internal.BodyCurrentCF = nil end
+    end
+    if shouldApply then
+        local baseYaw, basePitch = GetBaseAngles(bodySet.Reference, char)
+        local yaw, pitch, roll = 0,0,0
+        if mode == "Static" then
+            yaw = baseYaw + math.rad(bodySet.Yaw)
+            pitch = basePitch + math.rad(bodySet.Pitch)
+            roll = math.rad(bodySet.Roll)
+        elseif mode == "Spin" then
+            local angle = (now * bodySet.SpinSpeed) % 360
+            yaw = baseYaw + math.rad(angle + bodySet.Yaw)
+            pitch = basePitch + math.rad(bodySet.Pitch)
+            roll = math.rad(bodySet.Roll)
+        elseif mode == "Jitter" then
+            if now - AntiAim.Internal.BodyJitterTime > 1 / bodySet.JitterSpeed then
+                AntiAim.Internal.BodyJitterTime = now
+                AntiAim.Internal.BodyJitterOffset = { (math.random()-0.5)*2*bodySet.JitterAmount, (math.random()-0.5)*2*bodySet.JitterAmount, (math.random()-0.5)*2*bodySet.JitterAmount }
+            end
+            yaw = baseYaw + math.rad(bodySet.Yaw + AntiAim.Internal.BodyJitterOffset[1])
+            pitch = basePitch + math.rad(bodySet.Pitch + AntiAim.Internal.BodyJitterOffset[2])
+            roll = math.rad(bodySet.Roll + AntiAim.Internal.BodyJitterOffset[3])
+        elseif mode == "Dynamic" then
+            yaw = baseYaw + math.rad(bodySet.Yaw + 45 * math.sin(now * 0.5))
+            pitch = basePitch + math.rad(bodySet.Pitch + 30 * math.sin(now * 0.7 + 1))
+            roll = math.rad(bodySet.Roll + 20 * math.sin(now * 0.3 + 2))
+        end
+        local rotation = CFrame.Angles(pitch, yaw, roll)
+        local targetCF = CFrame.new(root.Position) * rotation
+        local smooth = AntiAim.Settings.Smoothness
+        if smooth > 0 and AntiAim.Internal.BodyCurrentCF then
+            local factor = 1 - math.exp(-smooth * dt)
+            root.CFrame = AntiAim.Internal.BodyCurrentCF:Lerp(targetCF, factor)
+            AntiAim.Internal.BodyCurrentCF = root.CFrame
+        else
+            root.CFrame = targetCF
+            AntiAim.Internal.BodyCurrentCF = targetCF
+        end
+    else
+        AntiAim.Internal.BodyCurrentCF = nil
+    end
+end
+RunService.RenderStepped:Connect(function() xpcall(ApplyAntiAim, HandleError) end)
+AntiAim.Functions = {
+    Exit = function() if AntiAim.Internal.NeckMotor and AntiAim.Internal.OriginalC0 then AntiAim.Internal.NeckMotor.C0 = AntiAim.Internal.OriginalC0 end end,
+    ResetSettings = function()
+        AntiAim.Settings = {
+            Enabled = false, Mode = "Static",
+            Body = {Reference = "Camera", Yaw = 0, Pitch = 0, Roll = 0, SpinSpeed = 0, JitterAmount = 5, JitterSpeed = 10, IgnoreMoving = false, MoveSpeedThreshold = 0.5},
+            Head = {Enabled = false, Yaw = 0, Pitch = 0, Roll = 0},
+            Smoothness = 10
+        }
+        if AntiAim.Internal.NeckMotor and AntiAim.Internal.OriginalC0 then AntiAim.Internal.NeckMotor.C0 = AntiAim.Internal.OriginalC0 end
+        AntiAim.Internal = {BodyCurrentCF = nil, BodyLastUpdate = 0, BodyJitterTime = 0, BodyJitterOffset = {0,0,0}, NeckMotor = nil, OriginalC0 = nil}
+    end
+}
+
+--====================================================================================
+--  WallHack + Glow + RTX
+--====================================================================================
+getgenv().AirHub.WallHack = {
+    Settings = {Enabled = false, TeamCheck = false, AliveCheck = true},
+    Visuals = {
+        BoxSettings = {Enabled = true, Type = 1, Color = Color3.fromRGB(255,255,255), TargetColor = Color3.fromRGB(255,0,0), Transparency = 0.7, Thickness = 1, Filled = false, Increase = 1},
+        GlowSettings = {Enabled = true, Color = Color3.fromRGB(0, 255, 255), Transparency = 0.5, Thickness = 2}
+    },
+    RTX = {
+        Enabled = false,
+        Settings = {
+            GlobalShadows = true, EnvironmentDiffuseScale = 1.2, EnvironmentSpecularScale = 1.5, Brightness = 3, ExposureCompensation = 0.2, ShadowSoftness = 0.3,
+            ClockTime = 14, OutdoorAmbient = Color3.fromRGB(100, 100, 120), FogEnd = 1000, FogStart = 0, Technology = "Compatibility",
+            ColorCorrection = {Enabled = false, Brightness = 0, Contrast = 0, Saturation = 0, TintColor = Color3.fromRGB(255,255,255)},
+            Bloom = {Enabled = false, Intensity = 1, Size = 24, Threshold = 0.9},
+            SunRays = {Enabled = false, Intensity = 0.5, Spread = 0.5},
+            DepthOfField = {Enabled = false, FarDistance = 100, NearDistance = 0}
+        },
+        OriginalLighting = {}, Objects = {}
+    },
+    WrappedPlayers = {}
+}
+local WallHack = getgenv().AirHub.WallHack
+
+local WHConnections = {}
+local function GetPlayerTable(plr)
+    for _, v in pairs(WallHack.WrappedPlayers) do if v.Name == plr.Name then return v end end
+end
+
+local function ApplyGlowForPlayer(plr)
+    local data = GetPlayerTable(plr)
+    if not data then return end
+    if WallHack.Settings.Enabled and WallHack.Visuals.GlowSettings.Enabled then
+        local char = plr.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if char and hum and hum.Health > 0 then
+            if not data.Glow then
+                local highlight = Instance.new("Highlight")
+                highlight.Name = "AirHub_Glow"
+                highlight.Adornee = char
+                highlight.Parent = char
+                data.Glow = highlight
+            end
+            local gs = WallHack.Visuals.GlowSettings
+            data.Glow.FillColor = gs.Color
+            data.Glow.OutlineColor = gs.Color
+            data.Glow.FillTransparency = gs.Transparency
+            data.Glow.OutlineTransparency = gs.Transparency
+            data.Glow.OutlineThickness = gs.Thickness
+        elseif data.Glow then
+            data.Glow:Destroy()
+            data.Glow = nil
+        end
+    elseif data.Glow then
+        data.Glow:Destroy()
+        data.Glow = nil
+    end
+end
+
+local function ApplyGlowToAll()
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then ApplyGlowForPlayer(plr) end
+    end
+end
+
+local function ApplyRTXEffects()
+    local s = WallHack.RTX.Settings
+    local objs = WallHack.RTX.Objects
+    if s.ColorCorrection.Enabled then
+        if not objs.ColorCorrection then objs.ColorCorrection = Instance.new("ColorCorrectionEffect") objs.ColorCorrection.Parent = Lighting end
+        objs.ColorCorrection.Brightness = s.ColorCorrection.Brightness
+        objs.ColorCorrection.Contrast = s.ColorCorrection.Contrast
+        objs.ColorCorrection.Saturation = s.ColorCorrection.Saturation
+        objs.ColorCorrection.TintColor = s.ColorCorrection.TintColor
+    elseif objs.ColorCorrection then objs.ColorCorrection:Destroy(); objs.ColorCorrection = nil end
+    if s.Bloom.Enabled then
+        if not objs.Bloom then objs.Bloom = Instance.new("BloomEffect") objs.Bloom.Parent = Lighting end
+        objs.Bloom.Intensity = s.Bloom.Intensity
+        objs.Bloom.Size = s.Bloom.Size
+        objs.Bloom.Threshold = s.Bloom.Threshold
+    elseif objs.Bloom then objs.Bloom:Destroy(); objs.Bloom = nil end
+    if s.SunRays.Enabled then
+        if not objs.SunRays then objs.SunRays = Instance.new("SunRaysEffect") objs.SunRays.Parent = Lighting end
+        objs.SunRays.Intensity = s.SunRays.Intensity
+        objs.SunRays.Spread = s.SunRays.Spread
+    elseif objs.SunRays then objs.SunRays:Destroy(); objs.SunRays = nil end
+    if s.DepthOfField.Enabled then
+        if not objs.DepthOfField then objs.DepthOfField = Instance.new("DepthOfFieldEffect") objs.DepthOfField.Parent = Lighting end
+        objs.DepthOfField.FarDistance = s.DepthOfField.FarDistance
+        objs.DepthOfField.NearDistance = s.DepthOfField.NearDistance
+    elseif objs.DepthOfField then objs.DepthOfField:Destroy(); objs.DepthOfField = nil end
+end
+
+local function ApplyRTXSettings()
+    if WallHack.RTX.Enabled then
+        local s = WallHack.RTX.Settings
+        Lighting.GlobalShadows = s.GlobalShadows
+        Lighting.EnvironmentDiffuseScale = s.EnvironmentDiffuseScale
+        Lighting.EnvironmentSpecularScale = s.EnvironmentSpecularScale
+        Lighting.Brightness = s.Brightness
+        Lighting.ExposureCompensation = s.ExposureCompensation
+        Lighting.ShadowSoftness = s.ShadowSoftness
+        Lighting.ClockTime = s.ClockTime
+        Lighting.OutdoorAmbient = s.OutdoorAmbient
+        Lighting.FogEnd = s.FogEnd
+        Lighting.FogStart = s.FogStart
+        if s.Technology then
+            local tech = Enum.Technology[s.Technology]
+            if tech then Lighting.Technology = tech end
+        end
+        ApplyRTXEffects()
+    end
+end
+
+local function EnableRTX()
+    if WallHack.RTX.Enabled then return end
+    WallHack.RTX.OriginalLighting = {
+        GlobalShadows = Lighting.GlobalShadows, EnvironmentDiffuseScale = Lighting.EnvironmentDiffuseScale, EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale,
+        Brightness = Lighting.Brightness, ExposureCompensation = Lighting.ExposureCompensation, ShadowSoftness = Lighting.ShadowSoftness,
+        ClockTime = Lighting.ClockTime, OutdoorAmbient = Lighting.OutdoorAmbient, FogEnd = Lighting.FogEnd, FogStart = Lighting.FogStart,
+        Technology = tostring(Lighting.Technology)
+    }
+    WallHack.RTX.Enabled = true
+    ApplyRTXSettings()
+end
+
+local function DisableRTX()
+    if not WallHack.RTX.Enabled then return end
+    for k, v in pairs(WallHack.RTX.OriginalLighting) do
+        if k == "Technology" then
+            local tech = Enum.Technology[v]
+            if tech then Lighting.Technology = tech end
+        else
+            Lighting[k] = v
+        end
+    end
+    for _, obj in pairs(WallHack.RTX.Objects) do if obj then obj:Destroy() end end
+    WallHack.RTX.Objects = {}
+    WallHack.RTX.Enabled = false
+end
+
+local function AddBox(plr)
+    local t = GetPlayerTable(plr)
+    t.Box = {
+        Square = Drawing.new("Square"),
+        TopLeftLine = Drawing.new("Line"), TopRightLine = Drawing.new("Line"),
+        BottomLeftLine = Drawing.new("Line"), BottomRightLine = Drawing.new("Line")
+    }
+    t.Connections.Box = RunService.RenderStepped:Connect(function()
+        if not WallHack.Settings.Enabled or not WallHack.Visuals.BoxSettings.Enabled then
+            for _, v in pairs(t.Box) do v.Visible = false end
+            return
+        end
+        local char = plr.Character
+        if not char or not char:FindFirstChild("HumanoidRootPart") or not char:FindFirstChild("Head") then
+            for _, v in pairs(t.Box) do v.Visible = false end
+            return
+        end
+        local vec, onScreen = Camera:WorldToViewportPoint(char.HumanoidRootPart.Position)
+        if not onScreen or not t.Checks.Alive or not t.Checks.Team then
+            for _, v in pairs(t.Box) do v.Visible = false end
+            return
+        end
+        local isTarget = (Aimbot.Locked == plr)
+        local boxColor = isTarget and WallHack.Visuals.BoxSettings.TargetColor or WallHack.Visuals.BoxSettings.Color
+        local hrpCF = char.HumanoidRootPart.CFrame
+        local size = char.HumanoidRootPart.Size * WallHack.Visuals.BoxSettings.Increase
+        local posTL = Camera:WorldToViewportPoint((hrpCF * CFrame.new(size.X, size.Y, 0)).Position)
+        local posTR = Camera:WorldToViewportPoint((hrpCF * CFrame.new(-size.X, size.Y, 0)).Position)
+        local posBL = Camera:WorldToViewportPoint((hrpCF * CFrame.new(size.X, -size.Y - 0.5, 0)).Position)
+        local posBR = Camera:WorldToViewportPoint((hrpCF * CFrame.new(-size.X, -size.Y - 0.5, 0)).Position)
+        if WallHack.Visuals.BoxSettings.Type == 2 then
+            t.Box.Square.Visible = true
+            for k, v in pairs(t.Box) do if k ~= "Square" then v.Visible = false end end
+            t.Box.Square.Thickness = WallHack.Visuals.BoxSettings.Thickness
+            t.Box.Square.Color = boxColor
+            t.Box.Square.Transparency = WallHack.Visuals.BoxSettings.Transparency
+            t.Box.Square.Filled = WallHack.Visuals.BoxSettings.Filled
+            local headY = Camera:WorldToViewportPoint(char.Head.Position + Vector3.new(0, 0.5, 0)).Y
+            local legY = Camera:WorldToViewportPoint(char.HumanoidRootPart.Position - Vector3.new(0, 3, 0)).Y
+            t.Box.Square.Size = Vector2.new(2000 / vec.Z, headY - legY)
+            t.Box.Square.Position = Vector2.new(vec.X - t.Box.Square.Size.X / 2, vec.Y - t.Box.Square.Size.Y / 2)
+        else
+            t.Box.Square.Visible = false
+            for _, ln in pairs({"TopLeftLine","TopRightLine","BottomLeftLine","BottomRightLine"}) do
+                t.Box[ln].Visible = true
+                t.Box[ln].Thickness = WallHack.Visuals.BoxSettings.Thickness
+                t.Box[ln].Transparency = WallHack.Visuals.BoxSettings.Transparency
+                t.Box[ln].Color = boxColor
+            end
+            t.Box.TopLeftLine.From, t.Box.TopLeftLine.To = Vector2.new(posTL.X, posTL.Y), Vector2.new(posTR.X, posTR.Y)
+            t.Box.TopRightLine.From, t.Box.TopRightLine.To = Vector2.new(posTR.X, posTR.Y), Vector2.new(posBR.X, posBR.Y)
+            t.Box.BottomLeftLine.From, t.Box.BottomLeftLine.To = Vector2.new(posBL.X, posBL.Y), Vector2.new(posTL.X, posTL.Y)
+            t.Box.BottomRightLine.From, t.Box.BottomRightLine.To = Vector2.new(posBR.X, posBR.Y), Vector2.new(posBL.X, posBL.Y)
+        end
+    end)
+end
+
+local function InitChecks(plr)
+    local t = GetPlayerTable(plr)
+    t.Connections.UpdateChecks = RunService.RenderStepped:Connect(function()
+        local char = plr.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if char and hum then
+            t.Checks.Alive = WallHack.Settings.AliveCheck and hum.Health > 0 or not WallHack.Settings.AliveCheck
+            t.Checks.Team = not WallHack.Settings.TeamCheck or (LocalPlayer.Team and plr.Team and LocalPlayer.Team ~= plr.Team)
+        else
+            t.Checks.Alive = false
+            t.Checks.Team = false
+        end
+        ApplyGlowForPlayer(plr)
+    end)
+end
+
+local function AssignRigType(plr)
+    local t = GetPlayerTable(plr)
+    task.wait()
+    repeat task.wait() until plr.Character
+    if plr.Character:FindFirstChild("Torso") and not plr.Character:FindFirstChild("LowerTorso") then
+        t.RigType = "R6"
+    elseif plr.Character:FindFirstChild("LowerTorso") then
+        t.RigType = "R15"
+    else
+        AssignRigType(plr)
+    end
+end
+
+local function Wrap(plr)
+    if not GetPlayerTable(plr) then
+        local val = { Name = plr.Name, Checks = { Alive = true, Team = true }, Connections = {}, Box = {} }
+        WallHack.WrappedPlayers[#WallHack.WrappedPlayers + 1] = val
+        AssignRigType(plr)
+        InitChecks(plr)
+        AddBox(plr)
+        ApplyGlowForPlayer(plr)
+        plr.CharacterAdded:Connect(function() ApplyGlowForPlayer(plr) end)
+    end
+end
+
+local function UnWrap(plr)
+    for i, v in pairs(WallHack.WrappedPlayers) do
+        if v.Name == plr.Name then
+            for _, c in pairs(v.Connections) do c:Disconnect() end
+            for _, b in pairs(v.Box) do if b and b.Remove then b:Remove() end end
+            if v.Glow then v.Glow:Destroy() end
+            WallHack.WrappedPlayers[i] = nil
+            break
+        end
+    end
+end
+
+local function LoadWH()
+    WHConnections.PlayerAdded = Players.PlayerAdded:Connect(Wrap)
+    WHConnections.PlayerRemoving = Players.PlayerRemoving:Connect(UnWrap)
+    WHConnections.ReWrap = RunService.RenderStepped:Connect(function()
+        for _, v in pairs(Players:GetPlayers()) do if v ~= LocalPlayer then Wrap(v) end end
+        task.wait(30)
+    end)
+end
+LoadWH()
+
+WallHack.Functions = {
+    Exit = function()
+        for _, v in pairs(WHConnections) do v:Disconnect() end
+        for _, v in pairs(Players:GetPlayers()) do if v ~= LocalPlayer then UnWrap(v) end end
+        DisableRTX()
+    end,
+    Restart = function() for _, v in pairs(WHConnections) do v:Disconnect() end LoadWH() end,
+    ResetSettings = function()
+        WallHack.Settings = {Enabled = false, TeamCheck = false, AliveCheck = true}
+        WallHack.Visuals.BoxSettings = {Enabled = true, Type = 1, Color = Color3.fromRGB(255,255,255), TargetColor = Color3.fromRGB(255,0,0), Transparency = 0.7, Thickness = 1, Filled = false, Increase = 1}
+        WallHack.Visuals.GlowSettings = {Enabled = true, Color = Color3.fromRGB(0, 255, 255), Transparency = 0.5, Thickness = 2}
+        DisableRTX()
+        WallHack.RTX.Settings = {
+            GlobalShadows = true, EnvironmentDiffuseScale = 1.2, EnvironmentSpecularScale = 1.5, Brightness = 3,
+            ExposureCompensation = 0.2, ShadowSoftness = 0.3, ClockTime = 14, OutdoorAmbient = Color3.fromRGB(100, 100, 120),
+            FogEnd = 1000, FogStart = 0, Technology = "Compatibility",
+            ColorCorrection = {Enabled = false, Brightness = 0, Contrast = 0, Saturation = 0, TintColor = Color3.fromRGB(255,255,255)},
+            Bloom = {Enabled = false, Intensity = 1, Size = 24, Threshold = 0.9},
+            SunRays = {Enabled = false, Intensity = 0.5, Spread = 0.5},
+            DepthOfField = {Enabled = false, FarDistance = 100, NearDistance = 0}
+        }
+        ApplyGlowToAll()
+    end
+}
+
+--====================================================================================
+--  Fly
+--====================================================================================
+getgenv().AirHub.Fly = {
+    Settings = {Enabled = false, ToggleKey = "F", Speed = 30, UpSpeed = 20, Smoothness = 0.5, UseKeys = true},
+    Internal = {BodyVelocity = nil, Active = false}
+}
+local Fly = getgenv().AirHub.Fly
+local function CreateFlyBody()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    if not Fly.Internal.BodyVelocity then
+        local bv = Instance.new("BodyVelocity")
+        bv.MaxForce = Vector3.new(4000, 4000, 4000)
+        bv.Velocity = Vector3.new(0,0,0)
+        bv.Parent = hrp
+        Fly.Internal.BodyVelocity = bv
+    end
+    Fly.Internal.Active = true
+end
+local function RemoveFlyBody()
+    if Fly.Internal.BodyVelocity then Fly.Internal.BodyVelocity:Destroy(); Fly.Internal.BodyVelocity = nil end
+    Fly.Internal.Active = false
+end
+local function UpdateFly()
+    if not Fly.Settings.Enabled then
+        if Fly.Internal.Active then RemoveFlyBody() end
+        return
+    end
+    local char = LocalPlayer.Character
+    if not char then if Fly.Internal.Active then RemoveFlyBody() end return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then if Fly.Internal.Active then RemoveFlyBody() end return end
+    if not Fly.Internal.BodyVelocity then CreateFlyBody() end
+    local moveDir = Vector3.new(0,0,0)
+    if Fly.Settings.UseKeys then
+        local forward = Camera.CFrame.LookVector
+        local right = Camera.CFrame.RightVector
+        local up = Vector3.new(0,1,0)
+        local forwardFlat = Vector3.new(forward.X, 0, forward.Z).Unit
+        local rightFlat = Vector3.new(right.X, 0, right.Z).Unit
+        local w = UserInputService:IsKeyDown(Enum.KeyCode.W)
+        local s = UserInputService:IsKeyDown(Enum.KeyCode.S)
+        local a = UserInputService:IsKeyDown(Enum.KeyCode.A)
+        local d = UserInputService:IsKeyDown(Enum.KeyCode.D)
+        local space = UserInputService:IsKeyDown(Enum.KeyCode.Space)
+        local ctrl = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
+        if w then moveDir = moveDir + forwardFlat end
+        if s then moveDir = moveDir - forwardFlat end
+        if a then moveDir = moveDir - rightFlat end
+        if d then moveDir = moveDir + rightFlat end
+        if space then moveDir = moveDir + up end
+        if ctrl then moveDir = moveDir - up end
+    end
+    if moveDir.Magnitude > 0 then moveDir = moveDir.Unit end
+    local targetVel = moveDir * Fly.Settings.Speed
+    if moveDir.Y ~= 0 then targetVel = Vector3.new(targetVel.X, moveDir.Y * Fly.Settings.UpSpeed, targetVel.Z)
+    else targetVel = Vector3.new(targetVel.X, 0, targetVel.Z) end
+    local currentVel = Fly.Internal.BodyVelocity.Velocity
+    local newVel = currentVel:Lerp(targetVel, Fly.Settings.Smoothness)
+    Fly.Internal.BodyVelocity.Velocity = newVel
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then hum.PlatformStand = true end
+end
+RunService.RenderStepped:Connect(function() xpcall(UpdateFly, HandleError) end)
+UserInputService.InputBegan:Connect(function(inp)
+    if Typing then return end
+    if inp.UserInputType == Enum.UserInputType.Keyboard and inp.KeyCode == Enum.KeyCode[Fly.Settings.ToggleKey] then
+        Fly.Settings.Enabled = not Fly.Settings.Enabled
+        ShowError("Fly: " .. (Fly.Settings.Enabled and "ON" or "OFF"))
+        if not Fly.Settings.Enabled and Fly.Internal.Active then
+            RemoveFlyBody()
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hum.PlatformStand = false end
+            end
+        end
+    end
+end)
+Fly.Functions = {
+    ResetSettings = function()
+        Fly.Settings = {Enabled = false, ToggleKey = "F", Speed = 30, UpSpeed = 20, Smoothness = 0.5, UseKeys = true}
+        if Fly.Internal.Active then RemoveFlyBody() end
+    end
+}
+
+--====================================================================================
+--  BunnyHop
+--====================================================================================
+getgenv().AirHub.BunnyHop = {
+    Settings = {Enabled = false, Mode = "Auto", Key = "Space", SpeedMultiplier = 1.0},
+    Internal = {KeyHeld = false, LastJumpTime = 0, Active = false, WasGrounded = false, OriginalWalkSpeed = 16}
+}
+local BHop = getgenv().AirHub.BunnyHop
+local function IsGrounded(character)
+    if not character then return false end
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    if hum and hum.FloorMaterial ~= Enum.Material.Air then return true end
+    local params = RaycastParams.new()
+    params.FilterDescendantsInstances = {character}
+    params.FilterType = Enum.RaycastFilterType.Blacklist
+    local ray = workspace:Raycast(hrp.Position, Vector3.new(0, -2.2, 0), params)
+    return ray ~= nil
+end
+local function BHopLoop()
+    while task.wait(0.033) do
+        if not BHop.Settings.Enabled then
+            if BHop.Internal.Active then
+                BHop.Internal.Active = false
+                local char = LocalPlayer.Character
+                if char then
+                    local hum = char:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.WalkSpeed ~= BHop.Internal.OriginalWalkSpeed then hum.WalkSpeed = BHop.Internal.OriginalWalkSpeed end
+                end
+            end
+            continue
+        end
+        local char = LocalPlayer.Character
+        if not char then continue end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum then continue end
+        if BHop.Internal.OriginalWalkSpeed == 16 and hum.WalkSpeed ~= 16 then BHop.Internal.OriginalWalkSpeed = hum.WalkSpeed end
+        local grounded = IsGrounded(char)
+        local now = tick()
+        local keyHeld = BHop.Internal.KeyHeld
+        local mult = BHop.Settings.SpeedMultiplier
+        local targetSpeed = BHop.Internal.OriginalWalkSpeed * mult
+        if hum.WalkSpeed ~= targetSpeed and mult ~= 1 then hum.WalkSpeed = targetSpeed end
+        local shouldJump = false
+        if BHop.Settings.Mode == "Auto" or BHop.Settings.Mode == "Hold" then
+            shouldJump = keyHeld and grounded and (now - BHop.Internal.LastJumpTime >= (0.05 + math.random() * 0.07))
+        end
+        if shouldJump and math.random() < 0.08 then shouldJump = false end
+        if shouldJump and hum:GetState() ~= Enum.HumanoidStateType.Jumping then
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+            BHop.Internal.LastJumpTime = now
+        end
+        BHop.Internal.WasGrounded = grounded
+        BHop.Internal.Active = true
+    end
+end
+UserInputService.InputBegan:Connect(function(inp)
+    if Typing then return end
+    if inp.UserInputType == Enum.UserInputType.Keyboard and inp.KeyCode == Enum.KeyCode[BHop.Settings.Key] then BHop.Internal.KeyHeld = true end
+end)
+UserInputService.InputEnded:Connect(function(inp)
+    if inp.UserInputType == Enum.UserInputType.Keyboard and inp.KeyCode == Enum.KeyCode[BHop.Settings.Key] then BHop.Internal.KeyHeld = false end
+end)
+coroutine.wrap(BHopLoop)()
+BHop.Functions = {
+    ResetSettings = function()
+        BHop.Settings = {Enabled = false, Mode = "Auto", Key = "Space", SpeedMultiplier = 1.0}
+        BHop.Internal = {KeyHeld = false, LastJumpTime = 0, Active = false, WasGrounded = false, OriginalWalkSpeed = 16}
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.WalkSpeed ~= 16 then hum.WalkSpeed = 16 end
+        end
+    end
+}
+
+--====================================================================================
+--  Back Teleport
+--====================================================================================
+getgenv().AirHub.BackTeleport = {
+    Settings = {Enabled = false, Hotkey = "T", Distance = 4, HeightOffset = 1, AutoAim = true, Mode = "Single", StickInterval = 0.1},
+    Internal = {Active = false, Coroutine = nil}
+}
+local BackTeleport = getgenv().AirHub.BackTeleport
+local function PerformBackTeleport(target)
+    if not target or not target.Character then return false end
+    local root = target.Character:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    local behind = root.Position - root.CFrame.LookVector * BackTeleport.Settings.Distance
+    behind = behind + Vector3.new(0, BackTeleport.Settings.HeightOffset, 0)
+    hrp.CFrame = CFrame.new(behind, root.Position)
+    if BackTeleport.Settings.AutoAim then
+        local head = target.Character:FindFirstChild("Head")
+        if head then Camera.CFrame = CFrame.new(Camera.CFrame.Position, head.Position) end
+    end
+    return true
+end
+local function GetTarget()
+    if Aimbot.Locked and Aimbot.Locked.Character then return Aimbot.Locked end
+    local bestDist = math.huge
+    local bestTarget = nil
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+            if IsTargetValid(plr) then
+                local dist = (plr.Character.HumanoidRootPart.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude
+                if dist < bestDist then bestDist = dist; bestTarget = plr end
+            end
+        end
+    end
+    return bestTarget
+end
+local function StickLoop()
+    while BackTeleport.Internal.Active do
+        local target = GetTarget()
+        if target then PerformBackTeleport(target) end
+        task.wait(BackTeleport.Settings.StickInterval)
+    end
+end
+UserInputService.InputBegan:Connect(function(inp)
+    if Typing then return end
+    if not BackTeleport.Settings.Enabled then return end
+    if inp.UserInputType == Enum.UserInputType.Keyboard and inp.KeyCode == Enum.KeyCode[BackTeleport.Settings.Hotkey] then
+        if BackTeleport.Settings.Mode == "Single" then
+            local target = GetTarget()
+            if target then PerformBackTeleport(target) else ShowError("No target found") end
+        elseif BackTeleport.Settings.Mode == "Stick" then
+            BackTeleport.Internal.Active = not BackTeleport.Internal.Active
+            ShowError("Stick mode " .. (BackTeleport.Internal.Active and "ON" or "OFF"))
+            if BackTeleport.Internal.Active then
+                BackTeleport.Internal.Coroutine = coroutine.wrap(StickLoop)
+                BackTeleport.Internal.Coroutine()
+            end
+        end
+    end
+end)
+BackTeleport.Functions = {
+    ResetSettings = function()
+        BackTeleport.Settings = {Enabled = false, Hotkey = "T", Distance = 4, HeightOffset = 1, AutoAim = true, Mode = "Single", StickInterval = 0.1}
+        BackTeleport.Internal.Active = false
+        BackTeleport.Internal.Coroutine = nil
+    end
+}
+
+--====================================================================================
+--  Dash Teleport
+--====================================================================================
+getgenv().AirHub.DashTeleport = {
+    Settings = {Enabled = false, Key = "Q", Distance = 10, HeightOffset = 0, Direction = "Camera"}
+}
+local DashTeleport = getgenv().AirHub.DashTeleport
+UserInputService.InputBegan:Connect(function(inp)
+    if Typing then return end
+    if not DashTeleport.Settings.Enabled then return end
+    if inp.UserInputType == Enum.UserInputType.Keyboard and inp.KeyCode == Enum.KeyCode[DashTeleport.Settings.Key] then
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local dir = Vector3.new(0,0,0)
+        local mode = DashTeleport.Settings.Direction
+        if mode == "Camera" then dir = Camera.CFrame.LookVector
+        elseif mode == "Player" then dir = hrp.CFrame.LookVector
+        elseif mode == "Movement" then
+            local vel = hrp.Velocity
+            if vel.Magnitude > 0.5 then dir = vel.Unit else dir = Camera.CFrame.LookVector end
+        end
+        local newPos = hrp.Position + dir * DashTeleport.Settings.Distance
+        newPos = newPos + Vector3.new(0, DashTeleport.Settings.HeightOffset, 0)
+        hrp.CFrame = CFrame.new(newPos)
+    end
+end)
+DashTeleport.Functions = {
+    ResetSettings = function()
+        DashTeleport.Settings = {Enabled = false, Key = "Q", Distance = 10, HeightOffset = 0, Direction = "Camera"}
+    end
+}
+
+--====================================================================================
+--  Third Person
+--====================================================================================
+getgenv().AirHub.ThirdPerson = {
+    Settings = {Enabled = false, ToggleKey = "V", Distance = 8, Height = 2, Sensitivity = 0.5, InvertY = false, LockCursor = true, Smoothness = 0.1},
+    Internal = {Active = false, Yaw = 0, Pitch = -20, TargetYaw = 0, TargetPitch = -20, LastMousePos = nil, IsRotating = false, OriginalCameraType = Enum.CameraType.Custom}
+}
+local ThirdPerson = getgenv().AirHub.ThirdPerson
+local function UpdateThirdPerson()
+    if not ThirdPerson.Settings.Enabled then
+        if ThirdPerson.Internal.Active then
+            Camera.CameraType = ThirdPerson.Internal.OriginalCameraType
+            ThirdPerson.Internal.Active = false
+        end
+        return
+    end
+    local char = LocalPlayer.Character
+    if not char then
+        if ThirdPerson.Internal.Active then Camera.CameraType = ThirdPerson.Internal.OriginalCameraType; ThirdPerson.Internal.Active = false end
+        return
+    end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        if ThirdPerson.Internal.Active then Camera.CameraType = ThirdPerson.Internal.OriginalCameraType; ThirdPerson.Internal.Active = false end
+        return
+    end
+    if not ThirdPerson.Internal.Active then
+        ThirdPerson.Internal.OriginalCameraType = Camera.CameraType
+        Camera.CameraType = Enum.CameraType.Scriptable
+        ThirdPerson.Internal.Active = true
+    end
+    local smooth = ThirdPerson.Settings.Smoothness
+    if smooth > 0 then
+        ThirdPerson.Internal.Yaw = ThirdPerson.Internal.Yaw + (ThirdPerson.Internal.TargetYaw - ThirdPerson.Internal.Yaw) * math.min(1, smooth * 2)
+        ThirdPerson.Internal.Pitch = ThirdPerson.Internal.Pitch + (ThirdPerson.Internal.TargetPitch - ThirdPerson.Internal.Pitch) * math.min(1, smooth * 2)
+    else
+        ThirdPerson.Internal.Yaw = ThirdPerson.Internal.TargetYaw
+        ThirdPerson.Internal.Pitch = ThirdPerson.Internal.TargetPitch
+    end
+    ThirdPerson.Internal.Pitch = math.clamp(ThirdPerson.Internal.Pitch, -80, 80)
+    local dist = ThirdPerson.Settings.Distance
+    local height = ThirdPerson.Settings.Height
+    local pitchRad = math.rad(ThirdPerson.Internal.Pitch)
+    local yawRad = math.rad(ThirdPerson.Internal.Yaw)
+    local offset = Vector3.new(math.sin(yawRad)*math.cos(pitchRad)*dist, math.sin(pitchRad)*dist + height, -math.cos(yawRad)*math.cos(pitchRad)*dist)
+    local targetPos = hrp.Position + offset
+    local lookAt = hrp.Position + Vector3.new(0, height, 0)
+    Camera.CFrame = CFrame.new(targetPos, lookAt)
+end
+UserInputService.InputBegan:Connect(function(inp)
+    if Typing then return end
+    if not ThirdPerson.Settings.Enabled then return end
+    if inp.UserInputType == Enum.UserInputType.MouseButton2 then
+        ThirdPerson.Internal.IsRotating = true
+        ThirdPerson.Internal.LastMousePos = UserInputService:GetMouseLocation()
+        if ThirdPerson.Settings.LockCursor then UserInputService.MouseBehavior = Enum.MouseBehavior.LockCurrentPosition end
+    elseif inp.UserInputType == Enum.UserInputType.MouseWheel then
+        local zoom = inp.Position.Z
+        ThirdPerson.Settings.Distance = math.clamp(ThirdPerson.Settings.Distance - zoom, 1, 30)
+    elseif inp.UserInputType == Enum.UserInputType.Keyboard and inp.KeyCode == Enum.KeyCode[ThirdPerson.Settings.ToggleKey] then
+        ThirdPerson.Settings.Enabled = not ThirdPerson.Settings.Enabled
+        ShowError("Third Person: " .. (ThirdPerson.Settings.Enabled and "ON" or "OFF"))
+        if not ThirdPerson.Settings.Enabled then
+            if ThirdPerson.Internal.Active then Camera.CameraType = ThirdPerson.Internal.OriginalCameraType; ThirdPerson.Internal.Active = false end
+            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        end
+    end
+end)
+UserInputService.InputEnded:Connect(function(inp)
+    if inp.UserInputType == Enum.UserInputType.MouseButton2 then
+        ThirdPerson.Internal.IsRotating = false
+        if ThirdPerson.Settings.LockCursor then UserInputService.MouseBehavior = Enum.MouseBehavior.Default end
+    end
+end)
+UserInputService.InputChanged:Connect(function(inp)
+    if not ThirdPerson.Settings.Enabled or not ThirdPerson.Internal.IsRotating then return end
+    if inp.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+    local delta = inp.Delta
+    local sens = ThirdPerson.Settings.Sensitivity
+    local invert = ThirdPerson.Settings.InvertY and -1 or 1
+    ThirdPerson.Internal.TargetYaw = ThirdPerson.Internal.TargetYaw + delta.X * sens * 0.5
+    ThirdPerson.Internal.TargetPitch = ThirdPerson.Internal.TargetPitch + delta.Y * sens * 0.5 * invert
+end)
+RunService.RenderStepped:Connect(function() xpcall(UpdateThirdPerson, HandleError) end)
+ThirdPerson.Functions = {
+    ResetSettings = function()
+        ThirdPerson.Settings = {Enabled = false, ToggleKey = "V", Distance = 8, Height = 2, Sensitivity = 0.5, InvertY = false, LockCursor = true, Smoothness = 0.1}
+        ThirdPerson.Internal = {Active = false, Yaw = 0, Pitch = -20, TargetYaw = 0, TargetPitch = -20, LastMousePos = nil, IsRotating = false, OriginalCameraType = Enum.CameraType.Custom}
+        if Camera.CameraType ~= Enum.CameraType.Custom then Camera.CameraType = Enum.CameraType.Custom end
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+    end
+}
+
+--====================================================================================
+--  Character: прозрачность + ESP шляпа
+--====================================================================================
+local function UpdateCharacterTransparency()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local transparent = getgenv().AirHub.Character.Transparent
+    local alpha = transparent and getgenv().AirHub.Character.Transparency or 0
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") and not part:IsA("Tool") and part.Parent ~= nil and not part.Parent:IsA("Tool") then
+            if not part.Parent:IsA("Accessory") then
+                part.Transparency = alpha
+            end
+        end
+    end
+    for _, v in ipairs({"Head","Torso","Left Arm","Right Arm","Left Leg","Right Leg","HumanoidRootPart"}) do
+        local part = char:FindFirstChild(v)
+        if part and part:IsA("BasePart") then
+            part.Transparency = alpha
+        end
+    end
+end
+
+-- ESP шляпа (конус с полями)
+local HatCone, HatBrim
+local function UpdateHatESP()
+    local settings = getgenv().AirHub.Character.HatESP
+    if not settings.Enabled then
+        if HatCone then HatCone:Remove() HatCone = nil end
+        if HatBrim then HatBrim:Remove() HatBrim = nil end
+        return
+    end
+    local char = LocalPlayer.Character
+    if not char then
+        if HatCone then HatCone.Visible = false end
+        if HatBrim then HatBrim.Visible = false end
+        return
+    end
+    local head = char:FindFirstChild("Head")
+    if not head then
+        if HatCone then HatCone.Visible = false end
+        if HatBrim then HatBrim.Visible = false end
+        return
+    end
+
+    local height = settings.Height
+    local size = settings.Size
+    local basePos = head.Position + Vector3.new(0, height, 0)
+    local apexPos = head.Position + Vector3.new(0, height + size, 0)
+
+    local baseScreen, onBase = Camera:WorldToViewportPoint(basePos)
+    local apexScreen, onApex = Camera:WorldToViewportPoint(apexPos)
+    local leftPos = basePos - Vector3.new(size * 0.6, 0, 0)
+    local rightPos = basePos + Vector3.new(size * 0.6, 0, 0)
+    local leftScreen, onLeft = Camera:WorldToViewportPoint(leftPos)
+    local rightScreen, onRight = Camera:WorldToViewportPoint(rightPos)
+
+    if not onBase or not onApex or not onLeft or not onRight then
+        if HatCone then HatCone.Visible = false end
+        if HatBrim then HatBrim.Visible = false end
+        return
+    end
+
+    if not HatCone then
+        HatCone = Drawing.new("Triangle")
+        HatCone.Visible = true
+        HatCone.Filled = true
+    end
+    if not HatBrim then
+        HatBrim = Drawing.new("Line")
+        HatBrim.Visible = true
+        HatBrim.Thickness = 2
+    end
+
+    HatCone.PointA = Vector2.new(leftScreen.X, leftScreen.Y)
+    HatCone.PointB = Vector2.new(rightScreen.X, rightScreen.Y)
+    HatCone.PointC = Vector2.new(apexScreen.X, apexScreen.Y)
+    HatCone.Color = settings.Color
+    HatCone.Transparency = 0.3
+
+    local brimOffset = 4
+    HatBrim.From = Vector2.new(leftScreen.X, leftScreen.Y + brimOffset)
+    HatBrim.To = Vector2.new(rightScreen.X, rightScreen.Y + brimOffset)
+    HatBrim.Color = settings.Color
+    HatBrim.Transparency = 0
+end
+
+RunService.RenderStepped:Connect(function()
+    UpdateHatESP()
+end)
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+    UpdateCharacterTransparency()
+    if HatCone then HatCone:Remove() HatCone = nil end
+    if HatBrim then HatBrim:Remove() HatBrim = nil end
+end)
+
+--====================================================================================
+--  UI
+--====================================================================================
+task.delay(math.random(1,3), function()
+    local Library = loadstring(game:GetObjects("rbxassetid://7657867786")[1].Source)()
+    local teamModes = {"Enemies","Allies","All","IgnoreNeutrals"}
+    local dashModes = {"Camera", "Player", "Movement"}
+    local aaModes = {"Static", "Spin", "Jitter", "Dynamic"}
+    local refModes = {"Camera", "Movement", "Player"}
+    local bhopModes = {"Auto", "Hold"}
+    local teleModes = {"Single", "Stick"}
+    local fireRateModes = {"Manual", "MaxSpeed", "WeaponRate"}
+    local soundIDs = { gamesense = 83717596220569, neverlose = 139452805868562, crit = 122699784909910, primordial = 97511223764004 }
+
+    local function SaveConfig()
+        local cfg = {
+            Aimbot = Aimbot.Settings, FOV = Aimbot.FOVSettings,
+            WallHack = WallHack.Settings, Box = WallHack.Visuals.BoxSettings,
+            Glow = WallHack.Visuals.GlowSettings,
+            AntiAim = AntiAim.Settings,
+            Fly = Fly.Settings,
+            BunnyHop = BHop.Settings,
+            BackTeleport = BackTeleport.Settings,
+            DashTeleport = DashTeleport.Settings,
+            ThirdPerson = ThirdPerson.Settings,
+            RTX = WallHack.RTX.Enabled,
+            RTXSettings = WallHack.RTX.Settings,
+            Logging = getgenv().AirHub.Logging,
+            Sound = getgenv().AirHub.Sound,
+            Character = getgenv().AirHub.Character,
+        }
+        setclipboard(HttpService:JSONEncode(cfg))
+        ShowError("✅ Config saved")
+    end
+
+    local function LoadConfig()
+        local json = getclipboard()
+        if not json or json == "" then ShowError("❌ Clipboard empty") return end
+        local ok, cfg = pcall(HttpService.JSONDecode, HttpService, json)
+        if not ok then ShowError("❌ Invalid config") return end
+        if cfg.Aimbot then
+            for k, v in pairs(cfg.Aimbot) do
+                if type(v) == "table" then
+                    for k2, v2 in pairs(v) do Aimbot.Settings[k][k2] = v2 end
+                else Aimbot.Settings[k] = v end
+            end
+        end
+        if cfg.FOV then for k, v in pairs(cfg.FOV) do Aimbot.FOVSettings[k] = v end end
+        if cfg.WallHack then for k, v in pairs(cfg.WallHack) do WallHack.Settings[k] = v end end
+        if cfg.Box then for k, v in pairs(cfg.Box) do WallHack.Visuals.BoxSettings[k] = v end end
+        if cfg.Glow then for k, v in pairs(cfg.Glow) do WallHack.Visuals.GlowSettings[k] = v end end
+        if cfg.AntiAim then
+            for k, v in pairs(cfg.AntiAim) do
+                if type(v) == "table" then
+                    for k2, v2 in pairs(v) do AntiAim.Settings[k][k2] = v2 end
+                else AntiAim.Settings[k] = v end
+            end
+        end
+        if cfg.Fly then for k, v in pairs(cfg.Fly) do Fly.Settings[k] = v end end
+        if cfg.BunnyHop then for k, v in pairs(cfg.BunnyHop) do BHop.Settings[k] = v end end
+        if cfg.BackTeleport then for k, v in pairs(cfg.BackTeleport) do BackTeleport.Settings[k] = v end end
+        if cfg.DashTeleport then for k, v in pairs(cfg.DashTeleport) do DashTeleport.Settings[k] = v end end
+        if cfg.ThirdPerson then for k, v in pairs(cfg.ThirdPerson) do ThirdPerson.Settings[k] = v end end
+        if cfg.RTX ~= nil then
+            WallHack.RTX.Enabled = cfg.RTX
+            if cfg.RTX then EnableRTX() else DisableRTX() end
+        end
+        if cfg.RTXSettings then
+            for k, v in pairs(cfg.RTXSettings) do
+                if k == "ColorCorrection" or k == "Bloom" or k == "SunRays" or k == "DepthOfField" then
+                    for k2, v2 in pairs(v) do WallHack.RTX.Settings[k][k2] = v2 end
+                else
+                    WallHack.RTX.Settings[k] = v
+                end
+            end
+            if WallHack.RTX.Enabled then ApplyRTXSettings() end
+        end
+        if cfg.Logging then
+            for k, v in pairs(cfg.Logging) do
+                getgenv().AirHub.Logging[k] = v
+            end
+        end
+        if cfg.Sound then
+            for k, v in pairs(cfg.Sound) do
+                getgenv().AirHub.Sound[k] = v
+            end
+        end
+        if cfg.Character then
+            if cfg.Character.HatESP then
+                for k, v in pairs(cfg.Character.HatESP) do
+                    getgenv().AirHub.Character.HatESP[k] = v
+                end
+            end
+            getgenv().AirHub.Character.Transparent = cfg.Character.Transparent
+            getgenv().AirHub.Character.Transparency = cfg.Character.Transparency
+        end
+        Library.ResetAll()
+        ApplyGlowToAll()
+        UpdateCharacterTransparency()
+        UpdateHatESP()
+        ShowError("✅ Config loaded")
+    end
+
+    local function Rejoin() TeleportService:Teleport(game.PlaceId, LocalPlayer) end
+    local function ServerHop()
+        local data = HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/"..game.PlaceId.."/servers/Public?limit=100"))
+        local servers = {}
+        for _, v in ipairs(data.data) do
+            if v.playing and v.id ~= game.JobId then servers[#servers+1] = v.id end
+        end
+        if #servers > 0 then TeleportService:TeleportToPlaceInstance(game.PlaceId, servers[math.random(1, #servers)], LocalPlayer)
+        else ShowError("No other servers") end
+    end
+
+    UserInputService.InputBegan:Connect(function(inp)
+        if inp.KeyCode == Enum.KeyCode.RightShift then
+            MenuVisible = not MenuVisible
+            if MenuVisible then Library:Show() else Library:Hide() end
+        end
+    end)
+
+    Library.UnloadCallback = function()
+        Aimbot.FOVCircle:Remove()
+        WallHack.Functions.Exit()
+        AntiAim.Functions.Exit()
+        if Fly.Internal.Active then
+            Fly.Internal.BodyVelocity:Destroy()
+            Fly.Internal.BodyVelocity = nil
+            Fly.Internal.Active = false
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hum.PlatformStand = false end
+            end
+        end
+        BackTeleport.Internal.Active = false
+        ErrorText:Remove()
+        for _, log in ipairs(ActiveLogs) do log.text:Remove() end
+        ActiveLogs = {}
+        if Hitsound then Hitsound:Destroy() end
+        if Killsound then Killsound:Destroy() end
+        if HatCone then HatCone:Remove() HatCone = nil end
+        if HatBrim then HatBrim:Remove() HatBrim = nil end
+        getgenv().AirHub = nil
+    end
+
+    local MainFrame = Library:CreateWindow({
+        Name = "AirHub",
+        Themeable = { Image = "96742921028995", Info = "360° Aimbot + Sounds | ESP Hat | WeaponRate | RTX | Logs", Credit = false }
+    })
+    local AimbotTab = MainFrame:CreateTab({ Name = "Aimbot" })
+    local VisualsTab = MainFrame:CreateTab({ Name = "Visuals" })
+    local AntiTab = MainFrame:CreateTab({ Name = "Anti-Aim" })
+    local MovementTab = MainFrame:CreateTab({ Name = "Movement" })
+    local CharacterTab = MainFrame:CreateTab({ Name = "Character" })
+    local RTXTab = MainFrame:CreateTab({ Name = "RTX" })
+    local SettingsTab = MainFrame:CreateTab({ Name = "Settings" })
+
+    -- Aimbot UI
+    local secA = AimbotTab:CreateSection({ Name = "Main" })
+    secA:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.Enabled, Callback = function(v) Aimbot.Settings.Enabled = v end })
+    secA:AddToggle({ Name = "Toggle", Value = Aimbot.Settings.Toggle, Callback = function(v) Aimbot.Settings.Toggle = v end })
+    secA:AddToggle({ Name = "Silent Aim", Value = Aimbot.Settings.SilentAim, Callback = function(v) Aimbot.Settings.SilentAim = v end })
+    secA:AddToggle({ Name = "360° (Ignore FOV)", Value = Aimbot.Settings.IgnoreFOV, Callback = function(v) Aimbot.Settings.IgnoreFOV = v end })
+    secA:AddToggle({ Name = "Check visibility from player on TP", Value = Aimbot.Settings.CheckFromPlayerOnTP, Callback = function(v) Aimbot.Settings.CheckFromPlayerOnTP = v end })
+    secA:AddDropdown({ Name = "Lock Part", Value = Aimbot.Settings.LockPart, List = {"Head","Torso","Nearest"}, Callback = function(v) Aimbot.Settings.LockPart = v end })
+    secA:AddTextbox({ Name = "Aim Key", Value = Aimbot.Settings.TriggerKey, Callback = function(v) Aimbot.Settings.TriggerKey = v end })
+    secA:AddDropdown({ Name = "Aim Method", Value = Aimbot.Settings.AimMethod, List = {"Smooth","Instant"}, Callback = function(v) Aimbot.Settings.AimMethod = v end })
+    secA:AddSlider({ Name = "Smoothing Speed", Value = Aimbot.Settings.AimSmoothingSpeed, Min = 1, Max = 20, Callback = function(v) Aimbot.Settings.AimSmoothingSpeed = v end })
+    secA:AddSlider({ Name = "Prediction", Value = Aimbot.Settings.AimPrediction, Min = 0, Max = 1, Decimals = 2, Callback = function(v) Aimbot.Settings.AimPrediction = v end })
+
+    local secW = AimbotTab:CreateSection({ Name = "Visibility", Side = "Right" })
+    secW:AddToggle({ Name = "WallCheck", Value = Aimbot.Settings.WallCheck, Callback = function(v) Aimbot.Settings.WallCheck = v end })
+    secW:AddToggle({ Name = "Alive Check", Value = Aimbot.Settings.AliveCheck, Callback = function(v) Aimbot.Settings.AliveCheck = v end })
+    secW:AddToggle({ Name = "Team Check", Value = Aimbot.Settings.TeamCheck.Enabled, Callback = function(v) Aimbot.Settings.TeamCheck.Enabled = v end })
+    secW:AddDropdown({ Name = "Team Mode", Value = Aimbot.Settings.TeamCheck.Mode, List = teamModes, Callback = function(v) Aimbot.Settings.TeamCheck.Mode = v end })
+    secW:AddToggle({ Name = "Treat Neutrals as Enemies", Value = Aimbot.Settings.TeamCheck.TreatNeutralAsEnemy, Callback = function(v) Aimbot.Settings.TeamCheck.TreatNeutralAsEnemy = v end })
+
+    local secD = AimbotTab:CreateSection({ Name = "Auto Shoot", Side = "Right" })
+    secD:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.AutoShoot.Enabled, Callback = function(v) Aimbot.Settings.AutoShoot.Enabled = v end })
+    secD:AddToggle({ Name = "Only when aiming", Value = Aimbot.Settings.AutoShoot.OnlyWhenAiming, Callback = function(v) Aimbot.Settings.AutoShoot.OnlyWhenAiming = v end })
+    secD:AddDropdown({ Name = "FireRate Mode", Value = Aimbot.Settings.AutoShoot.FireRateMode, List = fireRateModes, Callback = function(v) Aimbot.Settings.AutoShoot.FireRateMode = v end })
+    secD:AddTextbox({ Name = "Manual delay (s)", Value = tostring(Aimbot.Settings.AutoShoot.FireRate), Callback = function(v)
+        local num = tonumber(v)
+        if num then Aimbot.Settings.AutoShoot.FireRate = math.clamp(num, 0.001, 1) end
+    end })
+    secD:AddDropdown({ Name = "Shoot Key", Value = "Left Click", List = {"Left Click","Right Click"}, Callback = function(v) Aimbot.Settings.AutoShoot.ShootKey = (v=="Left Click") and "MouseButton1" or "MouseButton2" end })
+    secD:AddToggle({ Name = "Strict WallCheck", Value = Aimbot.Settings.AutoShoot.StrictWallCheck, Callback = function(v) Aimbot.Settings.AutoShoot.StrictWallCheck = v end })
+    secD:AddToggle({ Name = "AutoStop", Value = Aimbot.Settings.AutoShoot.AutoStop.Enabled, Callback = function(v) Aimbot.Settings.AutoShoot.AutoStop.Enabled = v end })
+    secD:AddSlider({ Name = "Stop time (s)", Value = Aimbot.Settings.AutoShoot.AutoStop.Time, Min = 0.01, Max = 0.5, Decimals = 2, Callback = function(v) Aimbot.Settings.AutoShoot.AutoStop.Time = v end })
+
+    local secE = AimbotTab:CreateSection({ Name = "FOV" })
+    secE:AddToggle({ Name = "Enabled", Value = Aimbot.FOVSettings.Enabled, Callback = function(v) Aimbot.FOVSettings.Enabled = v end })
+    secE:AddToggle({ Name = "Visible", Value = Aimbot.FOVSettings.Visible, Callback = function(v) Aimbot.FOVSettings.Visible = v end })
+    secE:AddSlider({ Name = "Radius", Value = Aimbot.FOVSettings.Amount, Min = 10, Max = 300, Callback = function(v) Aimbot.FOVSettings.Amount = v end })
+
+    -- Visuals
+    local vis1 = VisualsTab:CreateSection({ Name = "WallHack" })
+    vis1:AddToggle({ Name = "Enabled", Value = WallHack.Settings.Enabled, Callback = function(v) WallHack.Settings.Enabled = v; ApplyGlowToAll() end })
+    vis1:AddToggle({ Name = "Team Check", Value = WallHack.Settings.TeamCheck, Callback = function(v) WallHack.Settings.TeamCheck = v end })
+    vis1:AddToggle({ Name = "Alive Check", Value = WallHack.Settings.AliveCheck, Callback = function(v) WallHack.Settings.AliveCheck = v end })
+
+    local visBox = VisualsTab:CreateSection({ Name = "Boxes" })
+    visBox:AddToggle({ Name = "Enabled", Value = WallHack.Visuals.BoxSettings.Enabled, Callback = function(v) WallHack.Visuals.BoxSettings.Enabled = v end })
+    visBox:AddDropdown({ Name = "Type", Value = (WallHack.Visuals.BoxSettings.Type == 1 and "3D" or "2D"), List = {"3D","2D"}, Callback = function(v) WallHack.Visuals.BoxSettings.Type = (v == "3D") and 1 or 2 end })
+    visBox:AddColorpicker({ Name = "Color", Value = WallHack.Visuals.BoxSettings.Color, Callback = function(v) WallHack.Visuals.BoxSettings.Color = v end })
+    visBox:AddColorpicker({ Name = "Target Color", Value = WallHack.Visuals.BoxSettings.TargetColor, Callback = function(v) WallHack.Visuals.BoxSettings.TargetColor = v end })
+    visBox:AddSlider({ Name = "Transparency", Value = WallHack.Visuals.BoxSettings.Transparency, Min = 0, Max = 1, Decimals = 2, Callback = function(v) WallHack.Visuals.BoxSettings.Transparency = v end })
+    visBox:AddSlider({ Name = "Thickness", Value = WallHack.Visuals.BoxSettings.Thickness, Min = 1, Max = 5, Callback = function(v) WallHack.Visuals.BoxSettings.Thickness = v end })
+    visBox:AddToggle({ Name = "Filled (2D)", Value = WallHack.Visuals.BoxSettings.Filled, Callback = function(v) WallHack.Visuals.BoxSettings.Filled = v end })
+    visBox:AddSlider({ Name = "Scale (3D)", Value = WallHack.Visuals.BoxSettings.Increase, Min = 1, Max = 5, Callback = function(v) WallHack.Visuals.BoxSettings.Increase = v end })
+
+    local glowSec = VisualsTab:CreateSection({ Name = "Glow" })
+    glowSec:AddToggle({ Name = "Enabled", Value = WallHack.Visuals.GlowSettings.Enabled, Callback = function(v) WallHack.Visuals.GlowSettings.Enabled = v; ApplyGlowToAll() end })
+    glowSec:AddColorpicker({ Name = "Color", Value = WallHack.Visuals.GlowSettings.Color, Callback = function(v) WallHack.Visuals.GlowSettings.Color = v; ApplyGlowToAll() end })
+    glowSec:AddSlider({ Name = "Transparency", Value = WallHack.Visuals.GlowSettings.Transparency, Min = 0, Max = 1, Decimals = 2, Callback = function(v) WallHack.Visuals.GlowSettings.Transparency = v; ApplyGlowToAll() end })
+    glowSec:AddSlider({ Name = "Thickness", Value = WallHack.Visuals.GlowSettings.Thickness, Min = 1, Max = 10, Callback = function(v) WallHack.Visuals.GlowSettings.Thickness = v; ApplyGlowToAll() end })
+
+    -- Anti-Aim UI
+    local aaMain = AntiTab:CreateSection({ Name = "Body (Server)" })
+    aaMain:AddToggle({ Name = "Enabled", Value = AntiAim.Settings.Enabled, Callback = function(v) AntiAim.Settings.Enabled = v end })
+    aaMain:AddDropdown({ Name = "Mode", Value = AntiAim.Settings.Mode, List = aaModes, Callback = function(v) AntiAim.Settings.Mode = v end })
+    aaMain:AddDropdown({ Name = "Reference", Value = AntiAim.Settings.Body.Reference, List = refModes, Callback = function(v) AntiAim.Settings.Body.Reference = v end })
+    aaMain:AddSlider({ Name = "Yaw", Value = AntiAim.Settings.Body.Yaw, Min = -180, Max = 180, Callback = function(v) AntiAim.Settings.Body.Yaw = v end })
+    aaMain:AddSlider({ Name = "Pitch", Value = AntiAim.Settings.Body.Pitch, Min = -90, Max = 90, Callback = function(v) AntiAim.Settings.Body.Pitch = v end })
+    aaMain:AddSlider({ Name = "Roll", Value = AntiAim.Settings.Body.Roll, Min = -180, Max = 180, Callback = function(v) AntiAim.Settings.Body.Roll = v end })
+    aaMain:AddSlider({ Name = "Spin Speed", Value = AntiAim.Settings.Body.SpinSpeed, Min = 0, Max = 5000, Callback = function(v) AntiAim.Settings.Body.SpinSpeed = v end })
+    aaMain:AddSlider({ Name = "Jitter Amount", Value = AntiAim.Settings.Body.JitterAmount, Min = 0, Max = 30, Callback = function(v) AntiAim.Settings.Body.JitterAmount = v end })
+    aaMain:AddSlider({ Name = "Jitter Speed", Value = AntiAim.Settings.Body.JitterSpeed, Min = 1, Max = 60, Callback = function(v) AntiAim.Settings.Body.JitterSpeed = v end })
+    aaMain:AddToggle({ Name = "Ignore when moving", Value = AntiAim.Settings.Body.IgnoreMoving, Callback = function(v) AntiAim.Settings.Body.IgnoreMoving = v end })
+    aaMain:AddSlider({ Name = "Move speed threshold", Value = AntiAim.Settings.Body.MoveSpeedThreshold, Min = 0.1, Max = 5, Decimals = 2, Callback = function(v) AntiAim.Settings.Body.MoveSpeedThreshold = v end })
+    aaMain:AddSlider({ Name = "Smoothness", Value = AntiAim.Settings.Smoothness, Min = 0, Max = 30, Callback = function(v) AntiAim.Settings.Smoothness = v end })
+
+    local aaHead = AntiTab:CreateSection({ Name = "Head (Local)", Side = "Right" })
+    aaHead:AddToggle({ Name = "Enable", Value = AntiAim.Settings.Head.Enabled, Callback = function(v) AntiAim.Settings.Head.Enabled = v end })
+    aaHead:AddSlider({ Name = "Yaw", Value = AntiAim.Settings.Head.Yaw, Min = -180, Max = 180, Callback = function(v) AntiAim.Settings.Head.Yaw = v end })
+    aaHead:AddSlider({ Name = "Pitch", Value = AntiAim.Settings.Head.Pitch, Min = -90, Max = 90, Callback = function(v) AntiAim.Settings.Head.Pitch = v end })
+    aaHead:AddSlider({ Name = "Roll", Value = AntiAim.Settings.Head.Roll, Min = -180, Max = 180, Callback = function(v) AntiAim.Settings.Head.Roll = v end })
+
+    -- Movement UI
+    local bhopSec = MovementTab:CreateSection({ Name = "Bunny Hop" })
+    bhopSec:AddToggle({ Name = "Enabled", Value = BHop.Settings.Enabled, Callback = function(v) BHop.Settings.Enabled = v end })
+    bhopSec:AddDropdown({ Name = "Mode", Value = BHop.Settings.Mode, List = bhopModes, Callback = function(v) BHop.Settings.Mode = v end })
+    bhopSec:AddTextbox({ Name = "Key", Value = BHop.Settings.Key, Callback = function(v) BHop.Settings.Key = v end })
+    bhopSec:AddSlider({ Name = "Speed Multiplier", Value = BHop.Settings.SpeedMultiplier, Min = 0.5, Max = 3, Decimals = 1, Callback = function(v) BHop.Settings.SpeedMultiplier = v end })
+
+    local dashSec = MovementTab:CreateSection({ Name = "Dash Teleport" })
+    dashSec:AddToggle({ Name = "Enabled", Value = DashTeleport.Settings.Enabled, Callback = function(v) DashTeleport.Settings.Enabled = v end })
+    dashSec:AddTextbox({ Name = "Key", Value = DashTeleport.Settings.Key, Callback = function(v) DashTeleport.Settings.Key = v end })
+    dashSec:AddDropdown({ Name = "Direction", Value = DashTeleport.Settings.Direction, List = dashModes, Callback = function(v) DashTeleport.Settings.Direction = v end })
+    dashSec:AddSlider({ Name = "Distance", Value = DashTeleport.Settings.Distance, Min = 1, Max = 30, Callback = function(v) DashTeleport.Settings.Distance = v end })
+    dashSec:AddSlider({ Name = "Height Offset", Value = DashTeleport.Settings.HeightOffset, Min = -5, Max = 5, Callback = function(v) DashTeleport.Settings.HeightOffset = v end })
+
+    local backSec = MovementTab:CreateSection({ Name = "Back Teleport" })
+    backSec:AddToggle({ Name = "Enabled", Value = BackTeleport.Settings.Enabled, Callback = function(v) BackTeleport.Settings.Enabled = v end })
+    backSec:AddTextbox({ Name = "Hotkey", Value = BackTeleport.Settings.Hotkey, Callback = function(v) BackTeleport.Settings.Hotkey = v end })
+    backSec:AddDropdown({ Name = "Mode", Value = BackTeleport.Settings.Mode, List = teleModes, Callback = function(v) BackTeleport.Settings.Mode = v; if v == "Stick" then BackTeleport.Internal.Active = false end end })
+    backSec:AddSlider({ Name = "Distance", Value = BackTeleport.Settings.Distance, Min = 1, Max = 15, Callback = function(v) BackTeleport.Settings.Distance = v end })
+    backSec:AddSlider({ Name = "Height Offset", Value = BackTeleport.Settings.HeightOffset, Min = -5, Max = 5, Callback = function(v) BackTeleport.Settings.HeightOffset = v end })
+    backSec:AddToggle({ Name = "Auto Aim", Value = BackTeleport.Settings.AutoAim, Callback = function(v) BackTeleport.Settings.AutoAim = v end })
+    backSec:AddSlider({ Name = "Stick Interval", Value = BackTeleport.Settings.StickInterval, Min = 0.05, Max = 0.5, Decimals = 2, Callback = function(v) BackTeleport.Settings.StickInterval = v end })
+
+    local flySec = MovementTab:CreateSection({ Name = "Fly", Side = "Right" })
+    flySec:AddToggle({ Name = "Enabled (Toggle)", Value = Fly.Settings.Enabled, Callback = function(v) Fly.Settings.Enabled = v end })
+    flySec:AddTextbox({ Name = "Toggle Key", Value = Fly.Settings.ToggleKey, Callback = function(v) Fly.Settings.ToggleKey = v end })
+    flySec:AddSlider({ Name = "Speed", Value = Fly.Settings.Speed, Min = 1, Max = 100, Callback = function(v) Fly.Settings.Speed = v end })
+    flySec:AddSlider({ Name = "Up/Down Speed", Value = Fly.Settings.UpSpeed, Min = 1, Max = 100, Callback = function(v) Fly.Settings.UpSpeed = v end })
+    flySec:AddSlider({ Name = "Smoothness", Value = Fly.Settings.Smoothness, Min = 0.1, Max = 1, Decimals = 2, Callback = function(v) Fly.Settings.Smoothness = v end })
+    flySec:AddToggle({ Name = "Use WASD + Space/Ctrl", Value = Fly.Settings.UseKeys, Callback = function(v) Fly.Settings.UseKeys = v end })
+
+    local tpSec = MovementTab:CreateSection({ Name = "Third Person", Side = "Right" })
+    tpSec:AddToggle({ Name = "Enabled", Value = ThirdPerson.Settings.Enabled, Callback = function(v) ThirdPerson.Settings.Enabled = v end })
+    tpSec:AddTextbox({ Name = "Toggle Key", Value = ThirdPerson.Settings.ToggleKey, Callback = function(v) ThirdPerson.Settings.ToggleKey = v end })
+    tpSec:AddSlider({ Name = "Distance", Value = ThirdPerson.Settings.Distance, Min = 1, Max = 30, Callback = function(v) ThirdPerson.Settings.Distance = v end })
+    tpSec:AddSlider({ Name = "Height", Value = ThirdPerson.Settings.Height, Min = -5, Max = 15, Callback = function(v) ThirdPerson.Settings.Height = v end })
+    tpSec:AddSlider({ Name = "Sensitivity", Value = ThirdPerson.Settings.Sensitivity, Min = 0.1, Max = 3, Decimals = 1, Callback = function(v) ThirdPerson.Settings.Sensitivity = v end })
+    tpSec:AddToggle({ Name = "Invert Y", Value = ThirdPerson.Settings.InvertY, Callback = function(v) ThirdPerson.Settings.InvertY = v end })
+    tpSec:AddToggle({ Name = "Lock Cursor", Value = ThirdPerson.Settings.LockCursor, Callback = function(v) ThirdPerson.Settings.LockCursor = v end })
+    tpSec:AddSlider({ Name = "Smoothness", Value = ThirdPerson.Settings.Smoothness, Min = 0, Max = 1, Decimals = 2, Callback = function(v) ThirdPerson.Settings.Smoothness = v end })
+
+    -- Character Tab
+    local charSec = CharacterTab:CreateSection({ Name = "Transparency" })
+    charSec:AddToggle({ Name = "Transparent", Value = getgenv().AirHub.Character.Transparent, Callback = function(v)
+        getgenv().AirHub.Character.Transparent = v
+        UpdateCharacterTransparency()
+    end })
+    charSec:AddSlider({ Name = "Transparency", Value = getgenv().AirHub.Character.Transparency, Min = 0, Max = 1, Decimals = 2, Callback = function(v)
+        getgenv().AirHub.Character.Transparency = v
+        if getgenv().AirHub.Character.Transparent then UpdateCharacterTransparency() end
+    end })
+
+    local hatSec = CharacterTab:CreateSection({ Name = "China Hat ESP" })
+    hatSec:AddToggle({ Name = "Enabled", Value = getgenv().AirHub.Character.HatESP.Enabled, Callback = function(v)
+        getgenv().AirHub.Character.HatESP.Enabled = v
+        UpdateHatESP()
+    end })
+    hatSec:AddColorpicker({ Name = "Color", Value = getgenv().AirHub.Character.HatESP.Color, Callback = function(v)
+        getgenv().AirHub.Character.HatESP.Color = v
+        UpdateHatESP()
+    end })
+    hatSec:AddSlider({ Name = "Size", Value = getgenv().AirHub.Character.HatESP.Size, Min = 0.5, Max = 3, Decimals = 1, Callback = function(v)
+        getgenv().AirHub.Character.HatESP.Size = v
+        UpdateHatESP()
+    end })
+    hatSec:AddSlider({ Name = "Height", Value = getgenv().AirHub.Character.HatESP.Height, Min = 1, Max = 4, Decimals = 1, Callback = function(v)
+        getgenv().AirHub.Character.HatESP.Height = v
+        UpdateHatESP()
+    end })
+
+    -- RTX Tab
+    local rtxMain = RTXTab:CreateSection({ Name = "General" })
+    rtxMain:AddToggle({ Name = "RTX Enabled", Value = WallHack.RTX.Enabled, Callback = function(v) if v then EnableRTX() else DisableRTX() end end })
+    rtxMain:AddToggle({ Name = "Global Shadows", Value = WallHack.RTX.Settings.GlobalShadows, Callback = function(v) WallHack.RTX.Settings.GlobalShadows = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    rtxMain:AddSlider({ Name = "Brightness", Value = WallHack.RTX.Settings.Brightness, Min = 0, Max = 10, Decimals = 1, Callback = function(v) WallHack.RTX.Settings.Brightness = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    rtxMain:AddSlider({ Name = "Exposure", Value = WallHack.RTX.Settings.ExposureCompensation, Min = -1, Max = 1, Decimals = 2, Callback = function(v) WallHack.RTX.Settings.ExposureCompensation = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    rtxMain:AddSlider({ Name = "Shadow Softness", Value = WallHack.RTX.Settings.ShadowSoftness, Min = 0, Max = 1, Decimals = 2, Callback = function(v) WallHack.RTX.Settings.ShadowSoftness = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    rtxMain:AddSlider({ Name = "Diffuse Scale", Value = WallHack.RTX.Settings.EnvironmentDiffuseScale, Min = 0, Max = 2, Decimals = 2, Callback = function(v) WallHack.RTX.Settings.EnvironmentDiffuseScale = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    rtxMain:AddSlider({ Name = "Specular Scale", Value = WallHack.RTX.Settings.EnvironmentSpecularScale, Min = 0, Max = 3, Decimals = 2, Callback = function(v) WallHack.RTX.Settings.EnvironmentSpecularScale = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    rtxMain:AddSlider({ Name = "Clock Time", Value = WallHack.RTX.Settings.ClockTime, Min = 0, Max = 24, Decimals = 1, Callback = function(v) WallHack.RTX.Settings.ClockTime = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    rtxMain:AddColorpicker({ Name = "Outdoor Ambient", Value = WallHack.RTX.Settings.OutdoorAmbient, Callback = function(v) WallHack.RTX.Settings.OutdoorAmbient = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    rtxMain:AddSlider({ Name = "Fog End", Value = WallHack.RTX.Settings.FogEnd, Min = 0, Max = 10000, Callback = function(v) WallHack.RTX.Settings.FogEnd = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    rtxMain:AddSlider({ Name = "Fog Start", Value = WallHack.RTX.Settings.FogStart, Min = 0, Max = 10000, Callback = function(v) WallHack.RTX.Settings.FogStart = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    rtxMain:AddDropdown({ Name = "Technology", Value = WallHack.RTX.Settings.Technology, List = {"Compatibility", "Voxel", "ShadowMap", "Future"}, Callback = function(v) WallHack.RTX.Settings.Technology = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+
+    local ccSec = RTXTab:CreateSection({ Name = "Color Correction" })
+    ccSec:AddToggle({ Name = "Enabled", Value = WallHack.RTX.Settings.ColorCorrection.Enabled, Callback = function(v) WallHack.RTX.Settings.ColorCorrection.Enabled = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    ccSec:AddSlider({ Name = "Brightness", Value = WallHack.RTX.Settings.ColorCorrection.Brightness, Min = -1, Max = 1, Decimals = 2, Callback = function(v) WallHack.RTX.Settings.ColorCorrection.Brightness = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    ccSec:AddSlider({ Name = "Contrast", Value = WallHack.RTX.Settings.ColorCorrection.Contrast, Min = -1, Max = 1, Decimals = 2, Callback = function(v) WallHack.RTX.Settings.ColorCorrection.Contrast = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    ccSec:AddSlider({ Name = "Saturation", Value = WallHack.RTX.Settings.ColorCorrection.Saturation, Min = -1, Max = 1, Decimals = 2, Callback = function(v) WallHack.RTX.Settings.ColorCorrection.Saturation = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    ccSec:AddColorpicker({ Name = "Tint Color", Value = WallHack.RTX.Settings.ColorCorrection.TintColor, Callback = function(v) WallHack.RTX.Settings.ColorCorrection.TintColor = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+
+    local bloomSec = RTXTab:CreateSection({ Name = "Bloom" })
+    bloomSec:AddToggle({ Name = "Enabled", Value = WallHack.RTX.Settings.Bloom.Enabled, Callback = function(v) WallHack.RTX.Settings.Bloom.Enabled = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    bloomSec:AddSlider({ Name = "Intensity", Value = WallHack.RTX.Settings.Bloom.Intensity, Min = 0, Max = 10, Decimals = 1, Callback = function(v) WallHack.RTX.Settings.Bloom.Intensity = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    bloomSec:AddSlider({ Name = "Size", Value = WallHack.RTX.Settings.Bloom.Size, Min = 0, Max = 50, Callback = function(v) WallHack.RTX.Settings.Bloom.Size = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    bloomSec:AddSlider({ Name = "Threshold", Value = WallHack.RTX.Settings.Bloom.Threshold, Min = 0, Max = 1, Decimals = 2, Callback = function(v) WallHack.RTX.Settings.Bloom.Threshold = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+
+    local sunSec = RTXTab:CreateSection({ Name = "SunRays" })
+    sunSec:AddToggle({ Name = "Enabled", Value = WallHack.RTX.Settings.SunRays.Enabled, Callback = function(v) WallHack.RTX.Settings.SunRays.Enabled = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    sunSec:AddSlider({ Name = "Intensity", Value = WallHack.RTX.Settings.SunRays.Intensity, Min = 0, Max = 1, Decimals = 2, Callback = function(v) WallHack.RTX.Settings.SunRays.Intensity = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    sunSec:AddSlider({ Name = "Spread", Value = WallHack.RTX.Settings.SunRays.Spread, Min = 0, Max = 1, Decimals = 2, Callback = function(v) WallHack.RTX.Settings.SunRays.Spread = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+
+    local dofSec = RTXTab:CreateSection({ Name = "Depth of Field" })
+    dofSec:AddToggle({ Name = "Enabled", Value = WallHack.RTX.Settings.DepthOfField.Enabled, Callback = function(v) WallHack.RTX.Settings.DepthOfField.Enabled = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    dofSec:AddSlider({ Name = "Far Distance", Value = WallHack.RTX.Settings.DepthOfField.FarDistance, Min = 0, Max = 1000, Callback = function(v) WallHack.RTX.Settings.DepthOfField.FarDistance = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+    dofSec:AddSlider({ Name = "Near Distance", Value = WallHack.RTX.Settings.DepthOfField.NearDistance, Min = 0, Max = 100, Callback = function(v) WallHack.RTX.Settings.DepthOfField.NearDistance = v; if WallHack.RTX.Enabled then ApplyRTXSettings() end end })
+
+    -- Settings (Shot Logs & Sounds)
+    local logSec = SettingsTab:CreateSection({ Name = "Shot Logs & Sounds" })
+    logSec:AddToggle({ Name = "Logs Enabled", Value = getgenv().AirHub.Logging.Enabled, Callback = function(v) getgenv().AirHub.Logging.Enabled = v end })
+    logSec:AddToggle({ Name = "Show Hits", Value = getgenv().AirHub.Logging.ShowHit, Callback = function(v) getgenv().AirHub.Logging.ShowHit = v end })
+    logSec:AddToggle({ Name = "Show Misses", Value = getgenv().AirHub.Logging.ShowMiss, Callback = function(v) getgenv().AirHub.Logging.ShowMiss = v end })
+    logSec:AddSlider({ Name = "Duration (s)", Value = getgenv().AirHub.Logging.Duration, Min = 0.5, Max = 5, Decimals = 1, Callback = function(v) getgenv().AirHub.Logging.Duration = v end })
+    logSec:AddSlider({ Name = "Font Size", Value = getgenv().AirHub.Logging.FontSize, Min = 12, Max = 30, Callback = function(v) getgenv().AirHub.Logging.FontSize = v end })
+
+    logSec:AddToggle({ Name = "Hitsound Enabled", Value = getgenv().AirHub.Sound.HitsoundEnabled, Callback = function(v) getgenv().AirHub.Sound.HitsoundEnabled = v end })
+    logSec:AddDropdown({ Name = "Hitsound", Value = "gamesense", List = {"gamesense","neverlose","crit","primordial"}, Callback = function(v)
+        getgenv().AirHub.Sound.HitsoundID = soundIDs[v]
+    end })
+    logSec:AddSlider({ Name = "Hitsound Volume", Value = getgenv().AirHub.Sound.HitsoundVolume, Min = 0, Max = 10, Decimals = 1, Callback = function(v) getgenv().AirHub.Sound.HitsoundVolume = v end })
+
+    logSec:AddToggle({ Name = "Killsound Enabled", Value = getgenv().AirHub.Sound.KillsoundEnabled, Callback = function(v) getgenv().AirHub.Sound.KillsoundEnabled = v end })
+    logSec:AddDropdown({ Name = "Killsound", Value = "gamesense", List = {"gamesense","neverlose","crit","primordial"}, Callback = function(v)
+        getgenv().AirHub.Sound.KillsoundID = soundIDs[v]
+    end })
+    logSec:AddSlider({ Name = "Killsound Volume", Value = getgenv().AirHub.Sound.KillsoundVolume, Min = 0, Max = 10, Decimals = 1, Callback = function(v) getgenv().AirHub.Sound.KillsoundVolume = v end })
+
+    local cfgSec = SettingsTab:CreateSection({ Name = "Config" })
+    cfgSec:AddButton({ Name = "Save Config", Callback = SaveConfig })
+    cfgSec:AddButton({ Name = "Load Config", Callback = LoadConfig })
+    cfgSec:AddButton({ Name = "Reset All", Callback = function()
+        Aimbot.Settings = {
+            Enabled = false, TeamCheck = {Enabled = true, Mode = "Enemies", TreatNeutralAsEnemy = true},
+            AliveCheck = true, WallCheck = false, AimSmoothingSpeed = 6, AimPrediction = 0,
+            TriggerKey = "MouseButton2", Toggle = false, LockPart = "Head", AimMethod = "Smooth",
+            SilentAim = false, IgnoreFOV = false, CheckFromPlayerOnTP = true,
+            AutoShoot = {Enabled = false, ShootKey = "MouseButton1", FireRate = 0.05, OnlyWhenAiming = true, StrictWallCheck = false, AutoStop = {Enabled = false, Time = 0.1}, FireRateMode = "Manual"}
+        }
+        Aimbot.FOVSettings = {Enabled = true, Visible = true, Amount = 90}
+        WallHack.Functions.ResetSettings()
+        AntiAim.Functions.ResetSettings()
+        Fly.Functions.ResetSettings()
+        BHop.Functions.ResetSettings()
+        BackTeleport.Functions.ResetSettings()
+        DashTeleport.Functions.ResetSettings()
+        ThirdPerson.Functions.ResetSettings()
+        getgenv().AirHub.Logging = {Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18}
+        getgenv().AirHub.Sound = {
+            HitsoundEnabled = false, HitsoundID = 83717596220569, HitsoundVolume = 1,
+            KillsoundEnabled = false, KillsoundID = 83717596220569, KillsoundVolume = 1
+        }
+        getgenv().AirHub.Character = {Transparent = false, Transparency = 0.5, HatESP = {Enabled = false, Color = Color3.fromRGB(255, 223, 0), Size = 1.5, Height = 2.5}}
+        Library.ResetAll()
+        UpdateCharacterTransparency()
+        UpdateHatESP()
+        ShowError("All settings reset")
+    end })
+    cfgSec:AddButton({ Name = "Rejoin", Callback = Rejoin })
+    cfgSec:AddButton({ Name = "Server Hop", Callback = ServerHop })
+    cfgSec:AddButton({ Name = "Exit", Callback = Library.Unload })
+
+    ShowError("AirHub | Sounds + Lock Part Torso | ESP Hat | WeaponRate | Logs")
+end)
