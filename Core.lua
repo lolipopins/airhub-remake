@@ -90,17 +90,13 @@ end)
 Running, Typing, LastShotTime = false, false, 0
 OriginalSensitivity, MenuVisible = nil, true
 
--- Default settings
+-- Default settings (только Logging и Sound, Character удалён)
 getgenv().AirHub.Logging = {
     Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18
 }
 getgenv().AirHub.Sound = {
     HitsoundEnabled = false, HitsoundID = 83717596220569, HitsoundVolume = 1,
     KillsoundEnabled = false, KillsoundID = 83717596220569, KillsoundVolume = 1
-}
-getgenv().AirHub.Character = {
-    Transparent = false, Transparency = 0.5,
-    HatESP = { Enabled = false, Color = Color3.fromRGB(255,223,0), Size = 1.5, Height = 2.5, Segments = 8 }
 }
 
 UserInputService.TextBoxFocused:Connect(function() Typing = true end)
