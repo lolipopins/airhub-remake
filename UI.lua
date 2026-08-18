@@ -1,4 +1,4 @@
--- UI.lua – графический интерфейс, конфиги, кнопки
+-- UI.lua – графический интерфейс, конфиги, кнопки (без Character)
 task.delay(math.random(1,3), function()
     local Library = loadstring(game:GetObjects("rbxassetid://7657867786")[1].Source)()
     local teamModes = {"Enemies","Allies","All","IgnoreNeutrals"}
@@ -34,8 +34,7 @@ task.delay(math.random(1,3), function()
             RTX = WallHack.RTX.Enabled,
             RTXSettings = WallHack.RTX.Settings,
             Logging = getgenv().AirHub.Logging,
-            Sound = getgenv().AirHub.Sound,
-            Character = getgenv().AirHub.Character,
+            Sound = getgenv().AirHub.Sound
         }
         setclipboard(HttpService:JSONEncode(cfg))
         ShowError("✅ Config saved")
@@ -73,15 +72,8 @@ task.delay(math.random(1,3), function()
         end
         if cfg.Logging then for k, v in pairs(cfg.Logging) do getgenv().AirHub.Logging[k] = v end end
         if cfg.Sound then for k, v in pairs(cfg.Sound) do getgenv().AirHub.Sound[k] = v end end
-        if cfg.Character then
-            if cfg.Character.HatESP then for k, v in pairs(cfg.Character.HatESP) do getgenv().AirHub.Character.HatESP[k] = v end end
-            getgenv().AirHub.Character.Transparent = cfg.Character.Transparent
-            getgenv().AirHub.Character.Transparency = cfg.Character.Transparency
-        end
         if Library.ResetAll then Library.ResetAll() end
         ApplyGlowToAll()
-        UpdateCharacterTransparency()
-        UpdateHatESP()
         ShowError("✅ Config loaded")
     end
 
@@ -123,22 +115,17 @@ task.delay(math.random(1,3), function()
         ActiveLogs = {}
         if Hitsound then Hitsound:Destroy() end
         if Killsound then Killsound:Destroy() end
-        for _, obj in ipairs(HatLines) do
-            pcall(function() obj:Remove() end)
-        end
-        HatLines = {}
         getgenv().AirHub = nil
     end
 
     local MainFrame = Library:CreateWindow({
         Name = "AirHub",
-        Themeable = { Image = "96742921028995", Info = "360° Aimbot + Sounds | Hat ESP (цилиндр) | WeaponRate | RTX | Logs | Silent Aim", Credit = false }
+        Themeable = { Image = "96742921028995", Info = "360° Aimbot + Sounds | WeaponRate | RTX | Logs | Silent Aim", Credit = false }
     })
     local AimbotTab = MainFrame:CreateTab({ Name = "Aimbot" })
     local VisualsTab = MainFrame:CreateTab({ Name = "Visuals" })
     local AntiTab = MainFrame:CreateTab({ Name = "Anti-Aim" })
     local MovementTab = MainFrame:CreateTab({ Name = "Movement" })
-    local CharacterTab = MainFrame:CreateTab({ Name = "Character" })
     local RTXTab = MainFrame:CreateTab({ Name = "RTX" })
     local SettingsTab = MainFrame:CreateTab({ Name = "Settings" })
 
@@ -262,39 +249,6 @@ task.delay(math.random(1,3), function()
     tpSec:AddToggle({ Name = "Lock Cursor", Value = ThirdPerson.Settings.LockCursor, Callback = function(v) ThirdPerson.Settings.LockCursor = v end })
     tpSec:AddSlider({ Name = "Smoothness", Value = ThirdPerson.Settings.Smoothness, Min = 0, Max = 1, Decimals = 2, Callback = function(v) ThirdPerson.Settings.Smoothness = v end })
 
-    -- Character Tab
-    local charSec = CharacterTab:CreateSection({ Name = "Transparency" })
-    charSec:AddToggle({ Name = "Transparent", Value = getgenv().AirHub.Character.Transparent, Callback = function(v)
-        getgenv().AirHub.Character.Transparent = v
-        UpdateCharacterTransparency()
-    end })
-    charSec:AddSlider({ Name = "Transparency", Value = getgenv().AirHub.Character.Transparency, Min = 0, Max = 1, Decimals = 2, Callback = function(v)
-        getgenv().AirHub.Character.Transparency = v
-        if getgenv().AirHub.Character.Transparent then UpdateCharacterTransparency() end
-    end })
-
-    local hatSec = CharacterTab:CreateSection({ Name = "China Hat ESP (цилиндр)" })
-    hatSec:AddToggle({ Name = "Enabled", Value = getgenv().AirHub.Character.HatESP.Enabled, Callback = function(v)
-        getgenv().AirHub.Character.HatESP.Enabled = v
-        UpdateHatESP()
-    end })
-    hatSec:AddColorpicker({ Name = "Color", Value = getgenv().AirHub.Character.HatESP.Color, Callback = function(v)
-        getgenv().AirHub.Character.HatESP.Color = v
-        UpdateHatESP()
-    end })
-    hatSec:AddSlider({ Name = "Size", Value = getgenv().AirHub.Character.HatESP.Size, Min = 0.5, Max = 3, Decimals = 1, Callback = function(v)
-        getgenv().AirHub.Character.HatESP.Size = v
-        UpdateHatESP()
-    end })
-    hatSec:AddSlider({ Name = "Height", Value = getgenv().AirHub.Character.HatESP.Height, Min = 1, Max = 4, Decimals = 1, Callback = function(v)
-        getgenv().AirHub.Character.HatESP.Height = v
-        UpdateHatESP()
-    end })
-    hatSec:AddSlider({ Name = "Segments", Value = getgenv().AirHub.Character.HatESP.Segments, Min = 4, Max = 16, Decimals = 0, Callback = function(v)
-        getgenv().AirHub.Character.HatESP.Segments = math.floor(v)
-        UpdateHatESP()
-    end })
-
     -- RTX Tab
     local rtxMain = RTXTab:CreateSection({ Name = "General" })
     rtxMain:AddToggle({ Name = "RTX Enabled", Value = WallHack.RTX.Enabled, Callback = function(v) if v then EnableRTX() else DisableRTX() end end })
@@ -371,15 +325,13 @@ task.delay(math.random(1,3), function()
         ThirdPerson.Functions.ResetSettings()
         getgenv().AirHub.Logging = {Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18}
         getgenv().AirHub.Sound = {HitsoundEnabled = false, HitsoundID = 83717596220569, HitsoundVolume = 1, KillsoundEnabled = false, KillsoundID = 83717596220569, KillsoundVolume = 1}
-        getgenv().AirHub.Character = {Transparent = false, Transparency = 0.5, HatESP = {Enabled = false, Color = Color3.fromRGB(255,223,0), Size = 1.5, Height = 2.5, Segments = 8}}
         if Library.ResetAll then Library.ResetAll() end
-        UpdateCharacterTransparency()
-        UpdateHatESP()
+        ApplyGlowToAll()
         ShowError("All settings reset")
     end })
     cfgSec:AddButton({ Name = "Rejoin", Callback = Rejoin })
     cfgSec:AddButton({ Name = "Server Hop", Callback = ServerHop })
     cfgSec:AddButton({ Name = "Exit", Callback = Library.Unload })
 
-    ShowError("AirHub | Silent Aim (Camera) | Smart Lock Parts | Glow Modes | Hat ESP (цилиндр)")
+    ShowError("AirHub | Silent Aim (Camera) | Smart Lock Parts | Glow Modes | No Character")
 end)
