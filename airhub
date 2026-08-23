@@ -5,11 +5,11 @@
     - Lock Part: Head, Torso, Nearest (Torso целится в Torso/UpperTorso/LowerTorso)
     - Звуки: Hitsound и Killsound (gamesense, neverlose, crit, primordial) с регулировкой громкости
     - Аимбот: 360°, Instant/Smooth, авто‑шут с ручной скорострельностью (Manual)
+    - Silent Aim: 4 режима – CameraCFrame, GunHandler (перехват Shoot), RayHook (метаметод), MouseHit (подмена GetMouse)
     - Логи: столбик в центре, настраиваемые
     - WallHack: Boxes + Glow (4 режима: Outline, Fill, Both, Pulse) с глубиной AlwaysOnTop
     - Anti‑Aim: работает от первого лица, Movement reference только горизонтальный (без Head)
-    - Fly, Bhop (авто-прыжок), Speed (одна настройка скорости для WalkSpeed/CFrame/Velocity)
-    - Silent Aim только через CameraCFrame (всегда включён)
+    - Fly, Bhop (авто-прыжок), Speed (WalkSpeed/CFrame/Velocity, In Air Only), Noclip
     - Умный Lock Part: если выбранная часть не видна, переключается на видимую
 ]]
 
@@ -55,6 +55,7 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Звуки
 local Hitsound, Killsound
@@ -122,7 +123,7 @@ getgenv().AirHub.Sound = {
 }
 
 --====================================================================================
---  Aimbot (исправлен Lock Part + умное переключение + Silent Aim всегда включён)
+--  Aimbot (исправлен Lock Part + умное переключение + Silent Aim 4 режима)
 --====================================================================================
 getgenv().AirHub.Aimbot = {
     Settings = {
@@ -137,6 +138,7 @@ getgenv().AirHub.Aimbot = {
         LockPart = "Head",
         AimMethod = "Smooth",
         SilentAim = true,
+        SilentAimMode = "Camera", -- "Camera", "GunHandler", "RayHook", "MouseHit"
         IgnoreFOV = false,
         CheckFromPlayerOnTP = true,
         AutoShoot = {
@@ -381,7 +383,7 @@ end
 local lastDelta = tick()
 
 -- ====================================================================================
---  SILENT AIM через CameraCFrame (всегда включён)
+--  SILENT AIM (4 режима)
 -- ====================================================================================
 local function PerformSilentShot(targetPart, btn, wasVisible)
     if not targetPart then return end
@@ -392,6 +394,39 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
     local startHealth = hum and hum.Health or 0
 
+    if Aimbot.Settings.SilentAimMode == "GunHandler" then
+        -- Режим GunHandler: перехватчик сам подменит позицию
+        local mousePos = UserInputService:GetMouseLocation()
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
+        task.wait(0.001)
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+        task.delay(0.15, function()
+            LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible)
+        end)
+        return
+    elseif Aimbot.Settings.SilentAimMode == "RayHook" then
+        -- Режим RayHook: Ray.new метаметод перенаправляет выстрел
+        local mousePos = UserInputService:GetMouseLocation()
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
+        task.wait(0.001)
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+        task.delay(0.15, function()
+            LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible)
+        end)
+        return
+    elseif Aimbot.Settings.SilentAimMode == "MouseHit" then
+        -- Режим MouseHit: подмена GetMouse().Hit
+        local mousePos = UserInputService:GetMouseLocation()
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
+        task.wait(0.001)
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+        task.delay(0.15, function()
+            LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible)
+        end)
+        return
+    end
+
+    -- Режим Camera (дефолтный)
     local origin = Camera.CFrame.Position
     if getgenv().AirHub.ThirdPerson and getgenv().AirHub.ThirdPerson.Settings.Enabled and Aimbot.Settings.CheckFromPlayerOnTP then
         local char = LocalPlayer.Character
@@ -421,6 +456,117 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     task.delay(0.15, function()
         LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible)
     end)
+end
+
+-- Перехват GunHandler.Shoot для режима GunHandler
+local GunHandlerHooked = false
+local function SetupGunHandlerHook()
+    if GunHandlerHooked then return end
+    local success, GunHandler = pcall(require, ReplicatedStorage.Modules.Guns.GunHandler)
+    if not success or not GunHandler then
+        return
+    end
+    if not GunHandler.Shoot then return end
+    local oldShoot = GunHandler.Shoot
+    GunHandler.Shoot = function(p1, p2, p3, p4, p5, p6, p7, p8)
+        if Aimbot.Settings.Enabled and Aimbot.Settings.SilentAimMode == "GunHandler" and Running and Aimbot.Locked and Aimbot.LockPartInstance then
+            if p1 == LocalPlayer then
+                p4 = Aimbot.LockPartInstance.Position
+            end
+        end
+        return oldShoot(p1, p2, p3, p4, p5, p6, p7, p8)
+    end
+    GunHandlerHooked = true
+end
+task.spawn(SetupGunHandlerHook)
+
+-- Перехват Ray.new для режима RayHook
+local RayHookActive = false
+local oldRayIndex = nil
+local function GetClosestTargetRay()
+    local target, dist = nil, math.huge 
+    local mousePos = Camera.ViewportSize / 2 
+    for _, player in next, Players:GetPlayers() do 
+        if player ~= LocalPlayer and player.Character and player:GetAttribute('Team') ~= LocalPlayer:GetAttribute('Team') then 
+            local head = player.Character:FindFirstChild('Head')
+            local hum = player.Character:FindFirstChildOfClass('Humanoid')    
+            if head and hum and hum.Health > 0 then 
+                local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+                if onScreen then 
+                    local headPos = Vector2.new(screenPos.X, screenPos.Y)
+                    local mag = (mousePos - headPos).magnitude 
+                    if mag < dist then 
+                        dist = mag 
+                        target = head 
+                    end 
+                end 
+            end         
+        end 
+    end 
+    return target
+end
+
+local function SetupRayHook()
+    if RayHookActive then return end
+    local success, mt = pcall(getrawmetatable, Ray.new())
+    if not success or not mt then return end
+    local old = mt.__index
+    mt.__index = function(t, k)
+        if k == 'Direction' and Aimbot.Settings.Enabled and Aimbot.Settings.SilentAimMode == "RayHook" and Running then
+            local target = GetClosestTargetRay()
+            if target then
+                local origin = old(t, 'Origin')
+                local dir = (target.Position - origin).Unit
+                return dir
+            end
+        end
+        return old(t, k)
+    end
+    oldRayIndex = old
+    RayHookActive = true
+end
+
+local function RemoveRayHook()
+    if not RayHookActive then return end
+    local success, mt = pcall(getrawmetatable, Ray.new())
+    if success and mt then
+        mt.__index = oldRayIndex
+    end
+    RayHookActive = false
+end
+
+-- Перехват GetMouse для режима MouseHit
+local MouseHitHooked = false
+local originalGetMouse = nil
+local function SetupMouseHitHook()
+    if MouseHitHooked then return end
+    originalGetMouse = LocalPlayer.GetMouse
+    LocalPlayer.GetMouse = function()
+        local realMouse = originalGetMouse(LocalPlayer)
+        local fakeMouse = setmetatable({}, {
+            __index = function(t, k)
+                if k == "Hit" then
+                    if Aimbot.Settings.Enabled and Aimbot.Settings.SilentAimMode == "MouseHit" and Running and Aimbot.LockPartInstance then
+                        return Aimbot.LockPartInstance.Position
+                    end
+                end
+                return realMouse[k]
+            end,
+            __newindex = function(t, k, v)
+                realMouse[k] = v
+            end
+        })
+        return fakeMouse
+    end
+    MouseHitHooked = true
+end
+
+local function RemoveMouseHitHook()
+    if not MouseHitHooked then return end
+    if originalGetMouse then
+        LocalPlayer.GetMouse = originalGetMouse
+    end
+    MouseHitHooked = false
 end
 
 local function LoadAimbot()
@@ -463,6 +609,17 @@ local function LoadAimbot()
                     end
                 end
             end
+        end
+        -- Manage hooks based on mode
+        if Aimbot.Settings.SilentAimMode == "RayHook" and Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim then
+            SetupRayHook()
+        else
+            RemoveRayHook()
+        end
+        if Aimbot.Settings.SilentAimMode == "MouseHit" and Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim then
+            SetupMouseHitHook()
+        else
+            RemoveMouseHitHook()
         end
     end)
 
@@ -973,7 +1130,6 @@ end
 RunService.RenderStepped:Connect(function() xpcall(UpdateFly, HandleError) end)
 UserInputService.InputBegan:Connect(function(inp)
     if Typing then return end
-    -- Кейбинд работает только если Fly уже включен (нельзя включить с клавиши)
     if not Fly.Settings.Enabled then return end
     if inp.UserInputType == Enum.UserInputType.Keyboard and inp.KeyCode == Enum.KeyCode[Fly.Settings.ToggleKey] then
         Fly.Settings.Enabled = false
@@ -1061,17 +1217,31 @@ Bhop.Functions = {
 }
 
 --====================================================================================
---  Speed (одна настройка скорости, методы WalkSpeed/CFrame/Velocity)
+--  Speed (одна настройка скорости, методы WalkSpeed/CFrame/Velocity, In Air Only)
 --====================================================================================
 getgenv().AirHub.Speed = {
     Settings = {
         Enabled = false,
         Method = "WalkSpeed",   -- "WalkSpeed", "CFrame", "Velocity"
-        SpeedValue = 30          -- единая скорость для всех методов
+        SpeedValue = 30,         -- единая скорость для всех методов
+        InAirOnly = false        -- применять только в воздухе
     },
     Internal = {Active = false, OriginalWalkSpeed = 16}
 }
 local Speed = getgenv().AirHub.Speed
+
+local function IsGrounded(character)
+    if not character then return false end
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    if hum and hum.FloorMaterial ~= Enum.Material.Air then return true end
+    local params = RaycastParams.new()
+    params.FilterDescendantsInstances = {character}
+    params.FilterType = Enum.RaycastFilterType.Blacklist
+    local ray = workspace:Raycast(hrp.Position, Vector3.new(0, -2.2, 0), params)
+    return ray ~= nil
+end
 
 local function GetMoveDirection()
     local char = LocalPlayer.Character
@@ -1124,6 +1294,17 @@ local function SpeedLoop()
         end
         local method = Speed.Settings.Method
         local spd = Speed.Settings.SpeedValue
+
+        if Speed.Settings.InAirOnly then
+            local grounded = IsGrounded(char)
+            if grounded then
+                if method == "WalkSpeed" and hum.WalkSpeed ~= Speed.Internal.OriginalWalkSpeed then
+                    hum.WalkSpeed = Speed.Internal.OriginalWalkSpeed
+                end
+                continue
+            end
+        end
+
         if method == "WalkSpeed" then
             if hum.WalkSpeed ~= spd then
                 hum.WalkSpeed = spd
@@ -1148,13 +1329,66 @@ Speed.Functions = {
         Speed.Settings = {
             Enabled = false,
             Method = "WalkSpeed",
-            SpeedValue = 30
+            SpeedValue = 30,
+            InAirOnly = false
         }
         Speed.Internal = {Active = false, OriginalWalkSpeed = 16}
         local char = LocalPlayer.Character
         if char then
             local hum = char:FindFirstChildOfClass("Humanoid")
             if hum and hum.WalkSpeed ~= 16 then hum.WalkSpeed = 16 end
+        end
+    end
+}
+
+--====================================================================================
+--  Noclip (прохождение сквозь стены)
+--====================================================================================
+getgenv().AirHub.Noclip = {
+    Settings = { Enabled = false },
+    Internal = { Active = false }
+}
+local Noclip = getgenv().AirHub.Noclip
+
+local function NoclipLoop()
+    while task.wait(0.1) do
+        if not Noclip.Settings.Enabled then
+            if Noclip.Internal.Active then
+                Noclip.Internal.Active = false
+                local char = LocalPlayer.Character
+                if char then
+                    for _, part in ipairs(char:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            part.CanCollide = true
+                        end
+                    end
+                end
+            end
+            continue
+        end
+        Noclip.Internal.Active = true
+        local char = LocalPlayer.Character
+        if char then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
+                end
+            end
+        end
+    end
+end
+coroutine.wrap(NoclipLoop)()
+Noclip.Functions = {
+    ResetSettings = function()
+        Noclip.Settings = { Enabled = false }
+        Noclip.Internal = { Active = false }
+        local char = LocalPlayer.Character
+        if char then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = true
+                end
+            end
         end
     end
 }
@@ -1170,64 +1404,8 @@ task.delay(math.random(1,3), function()
     local bhopKeys = {"Space", "LeftControl", "LeftShift", "C", "X", "Z"}
     local speedMethods = {"WalkSpeed", "CFrame", "Velocity"}
     local glowModes = {"Outline", "Fill", "Both", "Pulse"}
+    local silentAimModes = {"Camera", "GunHandler", "RayHook", "MouseHit"}
     local soundIDs = { gamesense = 83717596220569, neverlose = 139452805868562, crit = 122699784909910, primordial = 97511223764004 }
-
-    local function SaveConfig()
-        local cfg = {
-            Aimbot = Aimbot.Settings, FOV = Aimbot.FOVSettings,
-            WallHack = WallHack.Settings, Box = WallHack.Visuals.BoxSettings,
-            Glow = WallHack.Visuals.GlowSettings,
-            AntiAim = AntiAim.Settings,
-            Fly = Fly.Settings,
-            Bhop = Bhop.Settings,
-            Speed = Speed.Settings,
-            Logging = getgenv().AirHub.Logging,
-            Sound = getgenv().AirHub.Sound,
-        }
-        setclipboard(HttpService:JSONEncode(cfg))
-        ShowError("✅ Config saved")
-    end
-
-    local function LoadConfig()
-        local json = getclipboard()
-        if not json or json == "" then ShowError("❌ Clipboard empty") return end
-        local ok, cfg = pcall(HttpService.JSONDecode, HttpService, json)
-        if not ok then ShowError("❌ Invalid config") return end
-        if cfg.Aimbot then
-            for k, v in pairs(cfg.Aimbot) do
-                if type(v) == "table" then
-                    for k2, v2 in pairs(v) do Aimbot.Settings[k][k2] = v2 end
-                else Aimbot.Settings[k] = v end
-            end
-        end
-        if cfg.FOV then for k, v in pairs(cfg.FOV) do Aimbot.FOVSettings[k] = v end end
-        if cfg.WallHack then for k, v in pairs(cfg.WallHack) do WallHack.Settings[k] = v end end
-        if cfg.Box then for k, v in pairs(cfg.Box) do WallHack.Visuals.BoxSettings[k] = v end end
-        if cfg.Glow then for k, v in pairs(cfg.Glow) do WallHack.Visuals.GlowSettings[k] = v end end
-        if cfg.AntiAim then
-            for k, v in pairs(cfg.AntiAim) do
-                if type(v) == "table" then
-                    for k2, v2 in pairs(v) do AntiAim.Settings[k][k2] = v2 end
-                else AntiAim.Settings[k] = v end
-            end
-        end
-        if cfg.Fly then for k, v in pairs(cfg.Fly) do Fly.Settings[k] = v end end
-        if cfg.Bhop then for k, v in pairs(cfg.Bhop) do Bhop.Settings[k] = v end end
-        if cfg.Speed then for k, v in pairs(cfg.Speed) do Speed.Settings[k] = v end end
-        if cfg.Logging then
-            for k, v in pairs(cfg.Logging) do
-                getgenv().AirHub.Logging[k] = v
-            end
-        end
-        if cfg.Sound then
-            for k, v in pairs(cfg.Sound) do
-                getgenv().AirHub.Sound[k] = v
-            end
-        end
-        if Library.ResetAll then Library.ResetAll() end
-        ApplyGlowToAll()
-        ShowError("✅ Config loaded")
-    end
 
     local function Rejoin() TeleportService:Teleport(game.PlaceId, LocalPlayer) end
     local function ServerHop()
@@ -1269,6 +1447,18 @@ task.delay(math.random(1,3), function()
                 end
             end
         end
+        if Noclip.Internal.Active then
+            local char = LocalPlayer.Character
+            if char then
+                for _, part in ipairs(char:GetDescendants()) do
+                    if part:IsA("BasePart") then
+                        part.CanCollide = true
+                    end
+                end
+            end
+        end
+        RemoveRayHook()
+        RemoveMouseHitHook()
         ErrorText:Remove()
         for _, log in ipairs(ActiveLogs) do log.text:Remove() end
         ActiveLogs = {}
@@ -1306,16 +1496,24 @@ task.delay(math.random(1,3), function()
     secW:AddDropdown({ Name = "Team Mode", Value = Aimbot.Settings.TeamCheck.Mode, List = teamModes, Callback = function(v) Aimbot.Settings.TeamCheck.Mode = v end })
     secW:AddToggle({ Name = "Treat Neutrals as Enemies", Value = Aimbot.Settings.TeamCheck.TreatNeutralAsEnemy, Callback = function(v) Aimbot.Settings.TeamCheck.TreatNeutralAsEnemy = v end })
 
-    local secD = AimbotTab:CreateSection({ Name = "Auto Shoot", Side = "Right" })
-    secD:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.AutoShoot.Enabled, Callback = function(v) Aimbot.Settings.AutoShoot.Enabled = v end })
-    secD:AddToggle({ Name = "Only when aiming", Value = Aimbot.Settings.AutoShoot.OnlyWhenAiming, Callback = function(v) Aimbot.Settings.AutoShoot.OnlyWhenAiming = v end })
-    secD:AddTextbox({ Name = "Manual delay (s)", Value = tostring(Aimbot.Settings.AutoShoot.FireRate), Callback = function(v)
+    local secD = AimbotTab:CreateSection({ Name = "Silent Aim", Side = "Right" })
+    secD:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.SilentAim, Callback = function(v) Aimbot.Settings.SilentAim = v end })
+    secD:AddDropdown({ Name = "Mode", Value = Aimbot.Settings.SilentAimMode, List = silentAimModes, Callback = function(v)
+        Aimbot.Settings.SilentAimMode = v
+        if v ~= "RayHook" then RemoveRayHook() end
+        if v ~= "MouseHit" then RemoveMouseHitHook() end
+    end })
+
+    local secAS = AimbotTab:CreateSection({ Name = "Auto Shoot", Side = "Right" })
+    secAS:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.AutoShoot.Enabled, Callback = function(v) Aimbot.Settings.AutoShoot.Enabled = v end })
+    secAS:AddToggle({ Name = "Only when aiming", Value = Aimbot.Settings.AutoShoot.OnlyWhenAiming, Callback = function(v) Aimbot.Settings.AutoShoot.OnlyWhenAiming = v end })
+    secAS:AddTextbox({ Name = "Manual delay (s)", Value = tostring(Aimbot.Settings.AutoShoot.FireRate), Callback = function(v)
         local num = tonumber(v)
         if num then Aimbot.Settings.AutoShoot.FireRate = math.clamp(num, 0.001, 1) end
     end })
-    secD:AddDropdown({ Name = "Shoot Key", Value = "Left Click", List = {"Left Click","Right Click"}, Callback = function(v) Aimbot.Settings.AutoShoot.ShootKey = (v=="Left Click") and "MouseButton1" or "MouseButton2" end })
-    secD:AddToggle({ Name = "AutoStop", Value = Aimbot.Settings.AutoShoot.AutoStop.Enabled, Callback = function(v) Aimbot.Settings.AutoShoot.AutoStop.Enabled = v end })
-    secD:AddSlider({ Name = "Stop time (s)", Value = Aimbot.Settings.AutoShoot.AutoStop.Time, Min = 0.01, Max = 0.5, Decimals = 2, Callback = function(v) Aimbot.Settings.AutoShoot.AutoStop.Time = v end })
+    secAS:AddDropdown({ Name = "Shoot Key", Value = "Left Click", List = {"Left Click","Right Click"}, Callback = function(v) Aimbot.Settings.AutoShoot.ShootKey = (v=="Left Click") and "MouseButton1" or "MouseButton2" end })
+    secAS:AddToggle({ Name = "AutoStop", Value = Aimbot.Settings.AutoShoot.AutoStop.Enabled, Callback = function(v) Aimbot.Settings.AutoShoot.AutoStop.Enabled = v end })
+    secAS:AddSlider({ Name = "Stop time (s)", Value = Aimbot.Settings.AutoShoot.AutoStop.Time, Min = 0.01, Max = 0.5, Decimals = 2, Callback = function(v) Aimbot.Settings.AutoShoot.AutoStop.Time = v end })
 
     local secE = AimbotTab:CreateSection({ Name = "FOV" })
     secE:AddToggle({ Name = "Enabled", Value = Aimbot.FOVSettings.Enabled, Callback = function(v) Aimbot.FOVSettings.Enabled = v end })
@@ -1361,7 +1559,7 @@ task.delay(math.random(1,3), function()
     aaMain:AddSlider({ Name = "Move speed threshold", Value = AntiAim.Settings.Body.MoveSpeedThreshold, Min = 0.1, Max = 5, Decimals = 2, Callback = function(v) AntiAim.Settings.Body.MoveSpeedThreshold = v end })
     aaMain:AddSlider({ Name = "Smoothness", Value = AntiAim.Settings.Smoothness, Min = 0, Max = 30, Callback = function(v) AntiAim.Settings.Smoothness = v end })
 
-    -- Movement UI (Bhop, Speed, Fly)
+    -- Movement UI (Bhop, Speed, Fly, Noclip)
     local bhopSec = MovementTab:CreateSection({ Name = "Bhop (Auto-Jump)" })
     bhopSec:AddToggle({ Name = "Enabled", Value = Bhop.Settings.Enabled, Callback = function(v) Bhop.Settings.Enabled = v end })
     bhopSec:AddDropdown({ Name = "Jump Key", Value = Bhop.Settings.AutoJumpKey, List = bhopKeys, Callback = function(v) Bhop.Settings.AutoJumpKey = v end })
@@ -1372,6 +1570,7 @@ task.delay(math.random(1,3), function()
     speedSec:AddToggle({ Name = "Enabled", Value = Speed.Settings.Enabled, Callback = function(v) Speed.Settings.Enabled = v end })
     speedSec:AddDropdown({ Name = "Method", Value = Speed.Settings.Method, List = speedMethods, Callback = function(v) Speed.Settings.Method = v end })
     speedSec:AddSlider({ Name = "Speed Value", Value = Speed.Settings.SpeedValue, Min = 1, Max = 200, Callback = function(v) Speed.Settings.SpeedValue = v end })
+    speedSec:AddToggle({ Name = "In Air Only", Value = Speed.Settings.InAirOnly, Callback = function(v) Speed.Settings.InAirOnly = v end })
 
     local flySec = MovementTab:CreateSection({ Name = "Fly", Side = "Right" })
     flySec:AddToggle({ Name = "Enabled (Toggle)", Value = Fly.Settings.Enabled, Callback = function(v) Fly.Settings.Enabled = v end })
@@ -1380,6 +1579,9 @@ task.delay(math.random(1,3), function()
     flySec:AddSlider({ Name = "Up/Down Speed", Value = Fly.Settings.UpSpeed, Min = 1, Max = 100, Callback = function(v) Fly.Settings.UpSpeed = v end })
     flySec:AddSlider({ Name = "Smoothness", Value = Fly.Settings.Smoothness, Min = 0.1, Max = 1, Decimals = 2, Callback = function(v) Fly.Settings.Smoothness = v end })
     flySec:AddToggle({ Name = "Use WASD + Space/Ctrl", Value = Fly.Settings.UseKeys, Callback = function(v) Fly.Settings.UseKeys = v end })
+
+    local noclipSec = MovementTab:CreateSection({ Name = "Noclip" })
+    noclipSec:AddToggle({ Name = "Enabled", Value = Noclip.Settings.Enabled, Callback = function(v) Noclip.Settings.Enabled = v end })
 
     -- Settings (Shot Logs & Sounds)
     local logSec = SettingsTab:CreateSection({ Name = "Shot Logs & Sounds" })
@@ -1402,15 +1604,13 @@ task.delay(math.random(1,3), function()
     logSec:AddSlider({ Name = "Killsound Volume", Value = getgenv().AirHub.Sound.KillsoundVolume, Min = 0, Max = 10, Decimals = 1, Callback = function(v) getgenv().AirHub.Sound.KillsoundVolume = v end })
 
     local cfgSec = SettingsTab:CreateSection({ Name = "Config" })
-    cfgSec:AddButton({ Name = "Save Config", Callback = SaveConfig })
-    cfgSec:AddButton({ Name = "Load Config", Callback = LoadConfig })
     cfgSec:AddButton({ Name = "Reset All", Callback = function()
         Aimbot.Settings = {
             Enabled = false, TeamCheck = {Enabled = true, Mode = "Enemies", TreatNeutralAsEnemy = true},
             AliveCheck = true, WallCheck = false, FallbackToVisible = false,
             AimSmoothingSpeed = 6,
             TriggerKey = "MouseButton2", Toggle = false, LockPart = "Head", AimMethod = "Smooth",
-            SilentAim = true, IgnoreFOV = false, CheckFromPlayerOnTP = true,
+            SilentAim = true, SilentAimMode = "Camera", IgnoreFOV = false, CheckFromPlayerOnTP = true,
             AutoShoot = {Enabled = false, ShootKey = "MouseButton1", FireRate = 0.05, OnlyWhenAiming = true, AutoStop = {Enabled = false, Time = 0.1}}
         }
         Aimbot.FOVSettings = {Enabled = true, Visible = true, Amount = 90}
@@ -1419,6 +1619,7 @@ task.delay(math.random(1,3), function()
         Fly.Functions.ResetSettings()
         Bhop.Functions.ResetSettings()
         Speed.Functions.ResetSettings()
+        Noclip.Functions.ResetSettings()
         getgenv().AirHub.Logging = {Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18}
         getgenv().AirHub.Sound = {
             HitsoundEnabled = false, HitsoundID = 83717596220569, HitsoundVolume = 1,
@@ -1432,5 +1633,5 @@ task.delay(math.random(1,3), function()
     cfgSec:AddButton({ Name = "Server Hop", Callback = ServerHop })
     cfgSec:AddButton({ Name = "Exit", Callback = Library.Unload })
 
-    ShowError("AirHub | Silent Aim (Camera) | Smart Lock Parts | Glow Modes | Bhop & Speed")
+    ShowError("AirHub | Silent Aim: Camera/GunHandler/RayHook/MouseHit | Noclip | Bhop & Speed")
 end)
