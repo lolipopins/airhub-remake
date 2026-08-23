@@ -1,18 +1,5 @@
 -- WARNING: For educational/testing purposes only
 
---[[
-    AirHub – полная версия (исправлен Lock Part Torso, добавлены Hit/Kill звуки)
-    - Lock Part: Head, Torso, Nearest (Torso целится в Torso/UpperTorso/LowerTorso)
-    - Звуки: Hitsound и Killsound (gamesense, neverlose, crit, primordial) с регулировкой громкости
-    - Аимбот: 360°, Instant/Smooth, авто‑шут с ручной скорострельностью (Manual)
-    - Silent Aim: 4 режима – CameraCFrame, GunHandler (перехват Shoot), RayHook (метаметод), MouseHit (подмена GetMouse)
-    - Логи: столбик в центре, настраиваемые
-    - WallHack: Boxes + Glow (4 режима: Outline, Fill, Both, Pulse) с глубиной AlwaysOnTop
-    - Anti‑Aim: работает от первого лица, Movement reference только горизонтальный (без Head)
-    - Fly, Bhop (авто-прыжок), Speed (WalkSpeed/CFrame/Velocity, In Air Only), Noclip
-    - Умный Lock Part: если выбранная часть не видна, переключается на видимую
-]]
-
 --// Error handling
 local ErrorText = Drawing.new("Text")
 ErrorText.Visible = false
