@@ -277,16 +277,7 @@ local function GetClosestPlayer()
     local bestTarget, bestPart, bestDist = nil, nil, math.huge
     local mousePos = UserInputService:GetMouseLocation()
     local origin = Camera.CFrame.Position
-    if getgenv().AirHub.ThirdPerson and getgenv().AirHub.ThirdPerson.Settings.Enabled and Aimbot.Settings.CheckFromPlayerOnTP then
-        local char = LocalPlayer.Character
-        if char then
-            local head = char:FindFirstChild("Head")
-            if head then origin = head.Position else
-                local hrp = char:FindFirstChild("HumanoidRootPart")
-                if hrp then origin = hrp.Position end
-            end
-        end
-    end
+    -- удалены ссылки на ThirdPerson
 
     for _, v in pairs(Players:GetPlayers()) do
         if not IsTargetValid(v) then continue end
@@ -413,16 +404,8 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 
     -- Camera режим
     local origin = Camera.CFrame.Position
-    if getgenv().AirHub.ThirdPerson and getgenv().AirHub.ThirdPerson.Settings.Enabled and Aimbot.Settings.CheckFromPlayerOnTP then
-        local char = LocalPlayer.Character
-        if char then
-            local head = char:FindFirstChild("Head")
-            if head then origin = head.Position else
-                local hrp = char:FindFirstChild("HumanoidRootPart")
-                if hrp then origin = hrp.Position end
-            end
-        end
-    end
+    -- удалены ссылки на ThirdPerson
+
     local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
     if not visiblePoint then return end
     local predPos = visiblePoint
@@ -578,16 +561,8 @@ local function LoadAimbot()
                 local targetPart = Aimbot.LockPartInstance
                 if targetPart then
                     local origin = Camera.CFrame.Position
-                    if getgenv().AirHub.ThirdPerson and getgenv().AirHub.ThirdPerson.Settings.Enabled and Aimbot.Settings.CheckFromPlayerOnTP then
-                        local char = LocalPlayer.Character
-                        if char then
-                            local head = char:FindFirstChild("Head")
-                            if head then origin = head.Position else
-                                local hrp = char:FindFirstChild("HumanoidRootPart")
-                                if hrp then origin = hrp.Position end
-                            end
-                        end
-                    end
+                    -- удалены ссылки на ThirdPerson
+
                     local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
                     if visiblePoint then
                         Aimbot.FOVCircle.Color = Color3.fromRGB(255,200,70)
@@ -696,16 +671,8 @@ local function LoadAimbot()
                 if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then CancelLock() return end
                 local startHealth = hum and hum.Health or 0
                 local origin = Camera.CFrame.Position
-                if getgenv().AirHub.ThirdPerson and getgenv().AirHub.ThirdPerson.Settings.Enabled and Aimbot.Settings.CheckFromPlayerOnTP then
-                    local char = LocalPlayer.Character
-                    if char then
-                        local head = char:FindFirstChild("Head")
-                        if head then origin = head.Position else
-                            local hrp = char:FindFirstChild("HumanoidRootPart")
-                            if hrp then origin = hrp.Position end
-                        end
-                    end
-                end
+                -- удалены ссылки на ThirdPerson
+
                 local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
                 local wasVisible = visiblePoint ~= nil
                 if not visiblePoint then return end
@@ -742,13 +709,13 @@ UserInputService.TextBoxFocusReleased:Connect(function() Typing = false end)
 LoadAimbot()
 
 --====================================================================================
---  AntiAim (только Yaw, режимы Static/Spin/Jitter/Sway, методы: CFrame, BodyGyro, Motor6D)
+--  AntiAim (только Yaw, режимы Static/Spin/Jitter/Sway, методы: CFrame, BodyGyro, Motor6D, AlignOrientation, AngularVelocity)
 --====================================================================================
 getgenv().AirHub.AntiAim = {
     Settings = {
         Enabled = false,
         Mode = "Static",          -- Static, Spin, Jitter, Sway
-        Method = "CFrame",        -- "CFrame", "BodyGyro", "Motor6D"
+        Method = "CFrame",        -- "CFrame", "BodyGyro", "Motor6D", "AlignOrientation", "AngularVelocity"
         Body = {
             Reference = "Camera",  -- Camera, Movement, Player
             Yaw = 0,
@@ -761,7 +728,29 @@ getgenv().AirHub.AntiAim = {
             MoveSpeedThreshold = 0.5
         }
     },
-    Internal = {BodyLastUpdate = 0, BodyJitterTime = 0, BodyJitterOffset = 0, BodyGyro = nil, CurrentMotor = nil, OriginalC0 = nil}
+    Desync = {
+        Settings = {
+            Enabled = false,
+            RadiusX = 5,
+            RadiusY = 5,
+            RadiusZ = 5
+        },
+        Internal = {
+            Connection = nil,
+            RenderBindName = "AirHubDesync"
+        }
+    },
+    Internal = {
+        BodyLastUpdate = 0,
+        BodyJitterTime = 0,
+        BodyJitterOffset = 0,
+        BodyGyro = nil,
+        AlignOrientation = nil,
+        Attachment = nil,
+        AngularVelocity = nil,
+        CurrentMotor = nil,
+        OriginalC0 = nil
+    }
 }
 local AntiAim = getgenv().AirHub.AntiAim
 
@@ -792,16 +781,73 @@ local function GetBaseYaw(reference, char)
     return 0
 end
 
+local function RandomOffset(radius)
+    if radius == 0 then return 0 end
+    if radius > 0 then
+        return math.random(1, radius)
+    else
+        return -math.random(1, -radius)
+    end
+end
+
+local function StartDesync()
+    local desync = AntiAim.Desync
+    if desync.Internal.Connection then return end
+    desync.Internal.Connection = RunService.Heartbeat:Connect(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local oldcf = hrp.CFrame
+        local oldvel = hrp.Velocity
+        local oldrotvel = hrp.RotVelocity
+        local randomness = CFrame.new(Vector3.new(
+            RandomOffset(desync.Settings.RadiusX),
+            RandomOffset(desync.Settings.RadiusY),
+            RandomOffset(desync.Settings.RadiusZ)
+        ))
+        hrp.CFrame = hrp.CFrame * randomness
+        RunService:BindToRenderStep(desync.Internal.RenderBindName, 101, function()
+            hrp.CFrame = oldcf
+            hrp.Velocity = oldvel
+            hrp.RotVelocity = oldrotvel
+            RunService:UnbindFromRenderStep(desync.Internal.RenderBindName)
+        end)
+    end)
+end
+
+local function StopDesync()
+    local desync = AntiAim.Desync
+    if desync.Internal.Connection then
+        desync.Internal.Connection:Disconnect()
+        desync.Internal.Connection = nil
+    end
+    RunService:UnbindFromRenderStep(desync.Internal.RenderBindName)
+end
+
 local function CleanupAntiAim()
     if AntiAim.Internal.BodyGyro then
         AntiAim.Internal.BodyGyro:Destroy()
         AntiAim.Internal.BodyGyro = nil
+    end
+    if AntiAim.Internal.AlignOrientation then
+        AntiAim.Internal.AlignOrientation:Destroy()
+        AntiAim.Internal.AlignOrientation = nil
+    end
+    if AntiAim.Internal.Attachment then
+        AntiAim.Internal.Attachment:Destroy()
+        AntiAim.Internal.Attachment = nil
+    end
+    if AntiAim.Internal.AngularVelocity then
+        AntiAim.Internal.AngularVelocity:Destroy()
+        AntiAim.Internal.AngularVelocity = nil
     end
     if AntiAim.Internal.CurrentMotor and AntiAim.Internal.OriginalC0 then
         AntiAim.Internal.CurrentMotor.C0 = AntiAim.Internal.OriginalC0
         AntiAim.Internal.CurrentMotor = nil
         AntiAim.Internal.OriginalC0 = nil
     end
+    -- Desync intentionally NOT stopped here; it has its own toggle
 end
 
 local function ApplyAntiAim()
@@ -850,11 +896,10 @@ local function ApplyAntiAim()
         end
 
         if method == "CFrame" then
-            CleanupAntiAim() -- убираем BodyGyro и Motor6D если были
+            CleanupAntiAim()
             root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
         elseif method == "BodyGyro" then
-            if AntiAim.Internal.CurrentMotor then
-                -- сбросить мотор
+            if AntiAim.Internal.AlignOrientation or AntiAim.Internal.AngularVelocity or AntiAim.Internal.CurrentMotor then
                 CleanupAntiAim()
             end
             if not AntiAim.Internal.BodyGyro then
@@ -867,10 +912,9 @@ local function ApplyAntiAim()
             end
             AntiAim.Internal.BodyGyro.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
         elseif method == "Motor6D" then
-            if AntiAim.Internal.BodyGyro then
+            if AntiAim.Internal.BodyGyro or AntiAim.Internal.AlignOrientation or AntiAim.Internal.AngularVelocity then
                 CleanupAntiAim()
             end
-            -- Ищем мотор (Neck или Waist)
             local motor
             for _, child in ipairs(char:GetDescendants()) do
                 if child:IsA("Motor6D") and (child.Name == "Neck" or child.Name == "Waist" or child.Name:lower():find("neck") or child.Name:lower():find("waist")) then
@@ -890,6 +934,45 @@ local function ApplyAntiAim()
             else
                 CleanupAntiAim()
             end
+        elseif method == "AlignOrientation" then
+            if AntiAim.Internal.BodyGyro or AntiAim.Internal.AngularVelocity or AntiAim.Internal.CurrentMotor then
+                CleanupAntiAim()
+            end
+            if not AntiAim.Internal.Attachment then
+                local attachment = Instance.new("Attachment")
+                attachment.Parent = root
+                AntiAim.Internal.Attachment = attachment
+            end
+            if not AntiAim.Internal.AlignOrientation then
+                local align = Instance.new("AlignOrientation")
+                align.MaxTorque = 4000
+                align.MaxAngularVelocity = math.huge
+                align.Responsiveness = 50
+                align.Parent = root
+                align.Attachment0 = AntiAim.Internal.Attachment
+                align.RigidityEnabled = false
+                AntiAim.Internal.AlignOrientation = align
+            end
+            local targetCF = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+            AntiAim.Internal.AlignOrientation.CFrame = targetCF
+            AntiAim.Internal.AlignOrientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
+            AntiAim.Internal.AlignOrientation.RigidityEnabled = false
+        elseif method == "AngularVelocity" then
+            if AntiAim.Internal.BodyGyro or AntiAim.Internal.AlignOrientation or AntiAim.Internal.CurrentMotor then
+                CleanupAntiAim()
+            end
+            if not AntiAim.Internal.AngularVelocity then
+                local av = Instance.new("AngularVelocity")
+                av.MaxTorque = Vector3.new(0, 4000, 0)
+                av.AngularVelocity = Vector3.new(0, 0, 0)
+                av.Parent = root
+                AntiAim.Internal.AngularVelocity = av
+            end
+            local spinSpeed = 0
+            if mode == "Spin" then
+                spinSpeed = math.rad(bodySet.SpinSpeed)
+            end
+            AntiAim.Internal.AngularVelocity.AngularVelocity = Vector3.new(0, spinSpeed, 0)
         end
     else
         CleanupAntiAim()
@@ -914,8 +997,20 @@ AntiAim.Functions = {
                 MoveSpeedThreshold = 0.5
             }
         }
-        AntiAim.Internal = {BodyLastUpdate = 0, BodyJitterTime = 0, BodyJitterOffset = 0, BodyGyro = nil, CurrentMotor = nil, OriginalC0 = nil}
+        AntiAim.Desync.Settings = { Enabled = false, RadiusX = 5, RadiusY = 5, RadiusZ = 5 }
+        AntiAim.Internal = {
+            BodyLastUpdate = 0,
+            BodyJitterTime = 0,
+            BodyJitterOffset = 0,
+            BodyGyro = nil,
+            AlignOrientation = nil,
+            Attachment = nil,
+            AngularVelocity = nil,
+            CurrentMotor = nil,
+            OriginalC0 = nil
+        }
         CleanupAntiAim()
+        StopDesync() -- Explicitly stop desync on full reset
     end
 }
 
@@ -1140,6 +1235,188 @@ WallHack.Functions = {
         ApplyGlowToAll()
     end
 }
+
+--====================================================================================
+--  Server Position (Ghost parts)
+--====================================================================================
+getgenv().AirHub.ServerPosition = {
+    Settings = {
+        Enabled = false,
+        RGB = true,
+        Strength = 1,
+        MaxLimb = 6
+    },
+    Internal = {
+        Connection = nil,
+        Ghosts = {}
+    }
+}
+local ServerPosition = getgenv().AirHub.ServerPosition
+
+local part_names = {
+    "HumanoidRootPart","Head","Left Arm","Right Arm","Left Leg","Right Leg",
+    "LeftUpperArm","RightUpperArm","LeftLowerArm","RightLowerArm",
+    "LeftHand","RightHand","LeftUpperLeg","RightUpperLeg",
+    "LeftLowerLeg","RightLowerLeg","LeftFoot","RightFoot"
+}
+
+local function rgb(t)
+    return Color3.fromHSV((t%5)/5,1,1)
+end
+
+local function make_ghost(real)
+    local g = Instance.new("Part")
+    g.Name = real.Name.."_ghost"
+    g.Size = real.Size
+    g.Anchored = true
+    g.CanCollide = false
+    g.Transparency = 1
+    g.CFrame = real.CFrame
+    g.Parent = workspace
+    local b = Instance.new("SelectionBox")
+    b.Adornee = g
+    b.LineThickness = 0.04
+    b.Parent = g
+    return {real = real, ghost = g, box = b}
+end
+
+local function is_replicate(p)
+    return p and not p.Anchored
+end
+
+local function is_owner(p)
+    return p and p.ReceiveAge == 0
+end
+
+local function StartServerPosition()
+    if ServerPosition.Internal.Connection then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildWhichIsA("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp then return end
+
+    -- Clean old ghosts
+    for _, g in pairs(ServerPosition.Internal.Ghosts) do
+        if g.ghost then g.ghost:Destroy() end
+    end
+    ServerPosition.Internal.Ghosts = {}
+
+    for _, n in ipairs(part_names) do
+        local p = char:FindFirstChild(n)
+        if p and p:IsA("BasePart") then
+            ServerPosition.Internal.Ghosts[n] = make_ghost(p)
+        end
+    end
+
+    local server_cf = hrp.CFrame
+    local lin_vel = Vector3.new(0,0,0)
+    local last = os.clock()
+    local acc = 0
+    local frames = {}
+
+    ServerPosition.Internal.Connection = RunService.Heartbeat:Connect(function(dt)
+        if not hrp or not hrp.Parent then
+            -- Character destroyed
+            for _, g in pairs(ServerPosition.Internal.Ghosts) do
+                if g.ghost then g.ghost:Destroy() end
+            end
+            ServerPosition.Internal.Ghosts = {}
+            ServerPosition.Internal.Connection:Disconnect()
+            ServerPosition.Internal.Connection = nil
+            return
+        end
+
+        local now = os.clock()
+        local delta = now - last
+        last = now
+
+        local ping = LocalPlayer.GetNetworkPing and LocalPlayer:GetNetworkPing() or 0.08
+
+        if is_replicate(hrp) then
+            if is_owner(hrp) then
+                lin_vel = hrp.AssemblyLinearVelocity
+            else
+                lin_vel = -hrp.AssemblyLinearVelocity
+            end
+            if acc >= ping then
+                server_cf = hrp.CFrame
+                acc = 0
+            else
+                acc = acc + delta
+            end
+        end
+
+        local hrp_cf = server_cf
+        local hrp_pos = hrp_cf.Position
+        local rel = {}
+        for n, g in pairs(ServerPosition.Internal.Ghosts) do
+            if g.real and g.real.Parent then
+                rel[n] = hrp_cf:ToObjectSpace(g.real.CFrame)
+            end
+        end
+
+        table.insert(frames, {t = now, cf = hrp_cf, pos = hrp_pos, vel = lin_vel, rel = rel})
+        if #frames > 240 then
+            for i = 1, 60 do table.remove(frames, 1) end
+        end
+
+        local target_t = now - ping
+        local f
+        for i = #frames, 1, -1 do
+            if frames[i].t <= target_t then
+                f = frames[i]
+                break
+            end
+        end
+        if not f then f = frames[1] end
+        if not f then return end
+
+        local td = math.min(target_t - f.t, 0.06)
+        local pred_pos = f.pos + f.vel * td * ServerPosition.Settings.Strength
+        local pred_cf = CFrame.new(pred_pos) * (f.cf - f.cf.Position)
+
+        for n, g in pairs(ServerPosition.Internal.Ghosts) do
+            local ghost = g.ghost
+            local box = g.box
+            local r = f.rel[n]
+            local tgt = r and pred_cf * r or (g.real and g.real.CFrame or ghost.CFrame)
+            local d = (tgt.Position - pred_cf.Position).Magnitude
+            if d > ServerPosition.Settings.MaxLimb then
+                local dir = (tgt.Position - pred_cf.Position).Unit
+                local p = pred_cf.Position + dir * ServerPosition.Settings.MaxLimb
+                local rx, ry, rz = tgt:ToEulerAnglesXYZ()
+                tgt = CFrame.new(p) * CFrame.Angles(rx, ry, rz)
+            end
+            ghost.CFrame = ghost.CFrame:Lerp(tgt, math.min(delta * 18, 1))
+            if ServerPosition.Settings.RGB then
+                box.Color3 = rgb(now)
+            else
+                box.Color3 = Color3.new(1,1,1)
+            end
+        end
+    end)
+end
+
+local function StopServerPosition()
+    if ServerPosition.Internal.Connection then
+        ServerPosition.Internal.Connection:Disconnect()
+        ServerPosition.Internal.Connection = nil
+    end
+    for _, g in pairs(ServerPosition.Internal.Ghosts) do
+        if g.ghost then g.ghost:Destroy() end
+    end
+    ServerPosition.Internal.Ghosts = {}
+end
+
+-- CharacterAdded handling
+LocalPlayer.CharacterAdded:Connect(function()
+    if ServerPosition.Settings.Enabled then
+        task.wait(0.2)
+        StopServerPosition() -- clean old
+        StartServerPosition()
+    end
+end)
 
 --====================================================================================
 --  Fly
@@ -1481,7 +1758,7 @@ task.delay(math.random(1,3), function()
     local teamModes = {"Enemies","Allies","All","IgnoreNeutrals"}
     local aaModes = {"Static", "Spin", "Jitter", "Sway"}
     local refModes = {"Camera", "Movement", "Player"}
-    local aaMethods = {"CFrame", "BodyGyro", "Motor6D"}  -- обновлено
+    local aaMethods = {"CFrame", "BodyGyro", "Motor6D", "AlignOrientation", "AngularVelocity"}
     local bhopKeys = {"Space", "LeftControl", "LeftShift", "C", "X", "Z"}
     local speedMethods = {"WalkSpeed", "CFrame", "Velocity"}
     local glowModes = {"Outline", "Fill", "Both", "Pulse"}
@@ -1509,6 +1786,8 @@ task.delay(math.random(1,3), function()
     Library.UnloadCallback = function()
         Aimbot.FOVCircle:Remove()
         WallHack.Functions.Exit()
+        StopServerPosition()
+        StopDesync() -- Make sure desync stops on unload
         if Fly.Internal.Active then
             Fly.Internal.BodyVelocity:Destroy()
             Fly.Internal.BodyVelocity = nil
@@ -1625,7 +1904,22 @@ task.delay(math.random(1,3), function()
     glowSec:AddSlider({ Name = "Thickness", Value = WallHack.Visuals.GlowSettings.Thickness, Min = 1, Max = 10, Callback = function(v) WallHack.Visuals.GlowSettings.Thickness = v; ApplyGlowToAll() end })
     glowSec:AddDropdown({ Name = "Mode", Value = WallHack.Visuals.GlowSettings.Mode, List = glowModes, Callback = function(v) WallHack.Visuals.GlowSettings.Mode = v; ApplyGlowToAll() end })
 
-    -- Anti-Aim UI (методы: CFrame, BodyGyro, Motor6D)
+    -- Server Position section (new)
+    local spSec = VisualsTab:CreateSection({ Name = "Server Position (Ghost)", Side = "Right" })
+    spSec:AddToggle({ Name = "Enabled", Value = ServerPosition.Settings.Enabled, Callback = function(v)
+        ServerPosition.Settings.Enabled = v
+        if v then
+            StopServerPosition()
+            StartServerPosition()
+        else
+            StopServerPosition()
+        end
+    end })
+    spSec:AddToggle({ Name = "RGB Color", Value = ServerPosition.Settings.RGB, Callback = function(v) ServerPosition.Settings.RGB = v end })
+    spSec:AddSlider({ Name = "Strength", Value = ServerPosition.Settings.Strength, Min = 0, Max = 5, Decimals = 1, Callback = function(v) ServerPosition.Settings.Strength = v end })
+    spSec:AddSlider({ Name = "Max Limb Distance", Value = ServerPosition.Settings.MaxLimb, Min = 1, Max = 20, Callback = function(v) ServerPosition.Settings.MaxLimb = v end })
+
+    -- Anti-Aim UI
     local aaMain = AntiTab:CreateSection({ Name = "Body (Server)" })
     aaMain:AddToggle({ Name = "Enabled", Value = AntiAim.Settings.Enabled, Callback = function(v) AntiAim.Settings.Enabled = v end })
     aaMain:AddDropdown({ Name = "Mode", Value = AntiAim.Settings.Mode, List = aaModes, Callback = function(v) AntiAim.Settings.Mode = v end })
@@ -1639,6 +1933,16 @@ task.delay(math.random(1,3), function()
     aaMain:AddSlider({ Name = "Sway Speed", Value = AntiAim.Settings.Body.SwaySpeed, Min = 0.1, Max = 10, Decimals = 1, Callback = function(v) AntiAim.Settings.Body.SwaySpeed = v end })
     aaMain:AddToggle({ Name = "Ignore when moving", Value = AntiAim.Settings.Body.IgnoreMoving, Callback = function(v) AntiAim.Settings.Body.IgnoreMoving = v end })
     aaMain:AddSlider({ Name = "Move speed threshold", Value = AntiAim.Settings.Body.MoveSpeedThreshold, Min = 0.1, Max = 5, Decimals = 2, Callback = function(v) AntiAim.Settings.Body.MoveSpeedThreshold = v end })
+
+    local desyncSec = AntiTab:CreateSection({ Name = "Desync (Client)", Side = "Right" })
+    desyncSec:AddToggle({ Name = "Enabled", Value = AntiAim.Desync.Settings.Enabled, Callback = function(v)
+        AntiAim.Desync.Settings.Enabled = v
+        if v then StartDesync() else StopDesync() end
+    end })
+    -- Изменено: Min = -100, Max = 100
+    desyncSec:AddSlider({ Name = "X Radius", Value = AntiAim.Desync.Settings.RadiusX, Min = -100, Max = 100, Callback = function(v) AntiAim.Desync.Settings.RadiusX = v end })
+    desyncSec:AddSlider({ Name = "Y Radius", Value = AntiAim.Desync.Settings.RadiusY, Min = -100, Max = 100, Callback = function(v) AntiAim.Desync.Settings.RadiusY = v end })
+    desyncSec:AddSlider({ Name = "Z Radius", Value = AntiAim.Desync.Settings.RadiusZ, Min = -100, Max = 100, Callback = function(v) AntiAim.Desync.Settings.RadiusZ = v end })
 
     -- Movement UI
     local bhopSec = MovementTab:CreateSection({ Name = "Bhop (Auto-Jump)" })
@@ -1697,6 +2001,8 @@ task.delay(math.random(1,3), function()
         Aimbot.FOVSettings = {Enabled = true, Visible = true, Amount = 90}
         WallHack.Functions.ResetSettings()
         AntiAim.Functions.ResetSettings()
+        ServerPosition.Settings = { Enabled = false, RGB = true, Strength = 1, MaxLimb = 6 }
+        StopServerPosition()
         Fly.Functions.ResetSettings()
         Bhop.Functions.ResetSettings()
         Speed.Functions.ResetSettings()
