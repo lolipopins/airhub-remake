@@ -1110,15 +1110,10 @@ end)
 --====================================================================================
 --  Fly  —  Multiple Methods + Proper Keybind
 --====================================================================================
---  Methods:
---    "BodyVelocity"   — BodyVelocity instance (плавный, серверный)
---    "LinearVelocity" — LinearVelocity + Attachment (современный, плавный)
---    "Velocity"       — прямая установка hrp.Velocity (резкий, мгновенный)
---    "CFrame"         — прямая установка hrp.CFrame (телепорт, client-side)
---
---  Keybind:
---    Toggle = false → Fly активен пока клавиша зажата
---    Toggle = true  → клавиша вкл/выкл
+--  Enabled   — мастер-выключатель из меню.
+--  Бинд работает ТОЛЬКО если Enabled = true.
+--  Toggle = false → держишь клавишу, летишь.
+--  Toggle = true  → клавиша вкл/выкл.
 --====================================================================================
 getgenv().AirHub.Fly = {
     Settings = {
@@ -1162,7 +1157,6 @@ local function Fly_GetHRP()
     return char:FindFirstChild("HumanoidRootPart")
 end
 
--- Создание инстанса под выбранный метод
 local function Fly_EnsureInstance(hrp)
     local method = Fly.Settings.Method
 
@@ -1191,12 +1185,10 @@ local function Fly_EnsureInstance(hrp)
             Fly.Internal.LinearVelocity = lv
         end
     else
-        -- Velocity / CFrame не нуждаются в инстансах
         Fly_ClearInstances()
     end
 end
 
--- Вектор движения на основе WASD + Space/Ctrl относительно камеры
 local function Fly_GetMoveDir()
     local moveDir = Vector3.new(0, 0, 0)
     if not Fly.Settings.UseKeys then return moveDir end
@@ -1233,22 +1225,23 @@ local function Fly_Update()
     local S = Fly.Settings
     local I = Fly.Internal
 
-    if not S.Enabled then
-        if I.Active then
+    -- Мастер-выключатель ИЛИ keybind не активирован — выключаем
+    if not S.Enabled or not I.Active then
+        if I.BodyVelocity or I.LinearVelocity or I.Attachment then
             Fly_ClearInstances()
-            I.Active = false
-            local char = LocalPlayer.Character
-            if char then
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                if hum then hum.PlatformStand = false end
-            end
+        end
+        if I.Active and not S.Enabled then I.Active = false end
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.PlatformStand then hum.PlatformStand = false end
         end
         return
     end
 
     local hrp = Fly_GetHRP()
     if not hrp then
-        if I.Active then Fly_ClearInstances() I.Active = false end
+        Fly_ClearInstances()
         return
     end
 
@@ -1256,7 +1249,6 @@ local function Fly_Update()
 
     local moveDir = Fly_GetMoveDir()
 
-    -- Целевая скорость: горизонтальная + вертикальная
     local targetVel
     if moveDir.Y ~= 0 then
         targetVel = Vector3.new(
@@ -1282,36 +1274,29 @@ local function Fly_Update()
             I.LinearVelocity.VectorVelocity = I.LinearVelocity.VectorVelocity:Lerp(targetVel, math.clamp(S.Smoothness, 0.01, 1))
         end
     elseif S.Method == "Velocity" then
-        -- Прямая установка скорости (резко, мгновенно)
-        local cur = hrp.Velocity
-        hrp.Velocity = Vector3.new(targetVel.X, targetVel.Y, targetVel.Z)
+        hrp.Velocity = targetVel
     elseif S.Method == "CFrame" then
-        -- Прямое перемещение через CFrame (client-side, телепорт-подобно)
-        hrp.CFrame = hrp.CFrame + targetVel * dt * (1 / math.max(S.Speed, 1)) * S.Speed
-        -- Фактически: hrp.CFrame = hrp.CFrame + moveDir * Speed * dt
-        -- Но для читаемости используем moveDir * S.Speed * dt
         hrp.CFrame = hrp.CFrame + (moveDir * S.Speed * dt)
     end
 
     local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
     if hum then hum.PlatformStand = true end
-
-    I.Active = true
 end
 
 RunService.RenderStepped:Connect(function() xpcall(Fly_Update, HandleError) end)
 
--- Правильный keybind: hold или toggle, проверка на чат
+-- Keybind: срабатывает только если Enabled = true
 UserInputService.InputBegan:Connect(function(inp, gpe)
     if gpe then return end
     if Typing or UserInputService:GetFocusedTextBox() then return end
     if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    if not Fly.Settings.Enabled then return end   -- ← мастер-гейт
     local kc = Enum.KeyCode[Fly.Settings.ToggleKey]
     if not kc or inp.KeyCode ~= kc then return end
 
     if Fly.Settings.Toggle then
-        Fly.Settings.Enabled = not Fly.Settings.Enabled
-        if not Fly.Settings.Enabled then
+        Fly.Internal.Active = not Fly.Internal.Active
+        if not Fly.Internal.Active then
             Fly_ClearInstances()
             local char = LocalPlayer.Character
             if char then
@@ -1320,7 +1305,7 @@ UserInputService.InputBegan:Connect(function(inp, gpe)
             end
         end
     else
-        Fly.Settings.Enabled = true
+        Fly.Internal.Active = true
     end
 end)
 
@@ -1328,9 +1313,8 @@ UserInputService.InputEnded:Connect(function(inp)
     if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
     local kc = Enum.KeyCode[Fly.Settings.ToggleKey]
     if not kc or inp.KeyCode ~= kc then return end
-
     if not Fly.Settings.Toggle then
-        Fly.Settings.Enabled = false
+        Fly.Internal.Active = false
         Fly_ClearInstances()
         local char = LocalPlayer.Character
         if char then
@@ -1340,17 +1324,11 @@ UserInputService.InputEnded:Connect(function(inp)
     end
 end)
 
--- Очистка при респавне
 LocalPlayer.CharacterAdded:Connect(function()
     task.wait(0.3)
     Fly_ClearInstances()
     Fly.Internal.Active = false
     Fly.Internal.LastUpdate = 0
-    -- Если fly был включён — пересоздать инстанс автоматически
-    if Fly.Settings.Enabled then
-        local hrp = Fly_GetHRP()
-        if hrp then Fly_EnsureInstance(hrp) end
-    end
 end)
 
 Fly.Functions = {
@@ -1377,16 +1355,17 @@ Fly.Functions = {
 }
 
 --====================================================================================
---  Bhop
+--  Bhop  —  Enabled = мастер, бинд только при Enabled
 --====================================================================================
 getgenv().AirHub.Bhop = {
     Settings = { Enabled = false, AutoJumpKey = "Space", BypassJump = true, JumpCooldown = 0.1 },
-    Internal = {KeyHeld = false, LastJumpTime = 0, Active = false}
+    Internal = { KeyHeld = false, LastJumpTime = 0, Active = false }
 }
 local Bhop = getgenv().AirHub.Bhop
 
 UserInputService.InputBegan:Connect(function(inp)
     if Typing then return end
+    if not Bhop.Settings.Enabled then return end
     if inp.UserInputType == Enum.UserInputType.Keyboard and inp.KeyCode == Enum.KeyCode[Bhop.Settings.AutoJumpKey] then
         Bhop.Internal.KeyHeld = true
     end
@@ -1399,13 +1378,15 @@ end)
 
 local function BhopLoop()
     while task.wait(0.01) do
-        if not Bhop.Settings.Enabled then Bhop.Internal.Active = false continue end
+        if not Bhop.Settings.Enabled or not Bhop.Internal.KeyHeld then
+            Bhop.Internal.Active = false
+            continue
+        end
         local char = LocalPlayer.Character
         if not char then continue end
         local hum = char:FindFirstChildOfClass("Humanoid")
         local hrp = char:FindFirstChild("HumanoidRootPart")
         if not hum or not hrp then continue end
-        if not Bhop.Internal.KeyHeld then Bhop.Internal.Active = false continue end
         Bhop.Internal.Active = true
         local now = tick()
         if now - Bhop.Internal.LastJumpTime < Bhop.Settings.JumpCooldown then continue end
@@ -1525,25 +1506,19 @@ Speed.Functions = {
 }
 
 --====================================================================================
---  AutoStrafer  —  Legit / Spam
---====================================================================================
---  Legit: следит за вращением камеры.
---         вправо → A, влево → D (или наоборот при Invert = true).
---         Если игрок НЕ двигает камеру — ничего не нажимает.
---  Spam:  каждые SpamDelay секунд переключает A↔D, пока клавиша зажата.
---
---  Клавиша по умолчанию — Space.
+--  AutoStrafer  —  Legit / Spam  (Enabled = мастер, бинд только при Enabled)
 --====================================================================================
 getgenv().AirHub.AutoStrafer = {
     Settings = {
         Enabled   = false,
-        Mode      = "Legit",   -- "Legit" | "Spam"
+        Mode      = "Legit",
         Key       = "Space",
         Toggle    = false,
         Invert    = false,
         SpamDelay = 0.05,
     },
     Internal = {
+        Active    = false,
         LastYaw   = nil,
         KeyA      = false,
         KeyD      = false,
@@ -1603,13 +1578,12 @@ local function AS_Update()
     local S = AutoStrafer.Settings
     local I = AutoStrafer.Internal
 
-    if not S.Enabled then AS_ReleaseAll() return end
+    if not S.Enabled or not I.Active then AS_ReleaseAll() return end
 
     local char = LocalPlayer.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then AS_ReleaseAll() return end
 
-    -- ============== SPAM ==============
     if S.Mode == "Spam" then
         local now = tick()
         if now - I.LastSpam >= S.SpamDelay then
@@ -1624,22 +1598,20 @@ local function AS_Update()
         return
     end
 
-    -- ============== LEGIT ==============
+    -- LEGIT
     local yaw = AS_GetCameraYaw()
     if I.LastYaw == nil then
         I.LastYaw = yaw
-        return  -- первый кадр пропускаем
+        return
     end
     local delta = AS_WrapAngle(yaw - I.LastYaw)
     I.LastYaw = yaw
 
-    -- Если игрок камеру не двигает — НЕ нажимаем клавиши
     if delta == 0 then
         AS_ReleaseAll()
         return
     end
 
-    -- delta > 0 = крутит вправо, delta < 0 = крутит влево
     local turningRight = delta > 0
     if S.Invert then turningRight = not turningRight end
 
@@ -1652,17 +1624,19 @@ end
 
 RunService.RenderStepped:Connect(function() xpcall(AS_Update, HandleError) end)
 
+-- Keybind: только если Enabled = true
 UserInputService.InputBegan:Connect(function(inp)
     if AS_IsTyping() then return end
     if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    if not AutoStrafer.Settings.Enabled then return end   -- ← мастер-гейт
     local kc = Enum.KeyCode[AutoStrafer.Settings.Key]
     if not kc or inp.KeyCode ~= kc then return end
 
     if AutoStrafer.Settings.Toggle then
-        AutoStrafer.Settings.Enabled = not AutoStrafer.Settings.Enabled
-        if not AutoStrafer.Settings.Enabled then AS_ReleaseAll() end
+        AutoStrafer.Internal.Active = not AutoStrafer.Internal.Active
+        if not AutoStrafer.Internal.Active then AS_ReleaseAll() end
     else
-        AutoStrafer.Settings.Enabled = true
+        AutoStrafer.Internal.Active = true
     end
 end)
 
@@ -1671,7 +1645,7 @@ UserInputService.InputEnded:Connect(function(inp)
     local kc = Enum.KeyCode[AutoStrafer.Settings.Key]
     if not kc or inp.KeyCode ~= kc then return end
     if not AutoStrafer.Settings.Toggle then
-        AutoStrafer.Settings.Enabled = false
+        AutoStrafer.Internal.Active = false
         AS_ReleaseAll()
     end
 end)
@@ -1679,6 +1653,7 @@ end)
 LocalPlayer.CharacterAdded:Connect(function()
     task.wait(0.5)
     AS_ReleaseAll()
+    AutoStrafer.Internal.Active = false
     AutoStrafer.Internal.LastYaw = nil
 end)
 
@@ -1689,10 +1664,10 @@ AutoStrafer.Functions = {
             Enabled   = false, Mode = "Legit", Key = "Space", Toggle = false,
             Invert    = false, SpamDelay = 0.05,
         }
-        AutoStrafer.Internal = { LastYaw = nil, KeyA = false, KeyD = false, SpamDir = -1, LastSpam = 0 }
+        AutoStrafer.Internal = { Active = false, LastYaw = nil, KeyA = false, KeyD = false, SpamDir = -1, LastSpam = 0 }
     end,
     Stop = function()
-        AutoStrafer.Settings.Enabled = false
+        AutoStrafer.Internal.Active = false
         AS_ReleaseAll()
     end,
 }
@@ -1940,7 +1915,15 @@ task.delay(math.random(1,3), function()
     local flySec = MovementTab:CreateSection({ Name = "Fly" })
     flySec:AddToggle({ Name = "Enabled", Value = Fly.Settings.Enabled, Callback = function(v)
         Fly.Settings.Enabled = v
-        if not v then Fly.Functions.ResetSettings() end
+        if not v then
+            Fly.Internal.Active = false
+            Fly_ClearInstances()
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hum.PlatformStand = false end
+            end
+        end
     end })
     flySec:AddDropdown({ Name = "Method", Value = Fly.Settings.Method, List = flyMethods, Callback = function(v)
         Fly.Settings.Method = v
@@ -1955,7 +1938,10 @@ task.delay(math.random(1,3), function()
 
     -- Bhop
     local bhopSec = MovementTab:CreateSection({ Name = "Bhop", Side = "Right" })
-    bhopSec:AddToggle({ Name = "Enabled", Value = Bhop.Settings.Enabled, Callback = function(v) Bhop.Settings.Enabled = v end })
+    bhopSec:AddToggle({ Name = "Enabled", Value = Bhop.Settings.Enabled, Callback = function(v)
+        Bhop.Settings.Enabled = v
+        if not v then Bhop.Internal.KeyHeld = false Bhop.Internal.Active = false end
+    end })
     bhopSec:AddDropdown({ Name = "Jump Key", Value = Bhop.Settings.AutoJumpKey, List = bhopKeys, Callback = function(v) Bhop.Settings.AutoJumpKey = v end })
     bhopSec:AddToggle({ Name = "Bypass Jump Restrictions", Value = Bhop.Settings.BypassJump, Callback = function(v) Bhop.Settings.BypassJump = v end })
     bhopSec:AddSlider({ Name = "Jump Cooldown", Value = Bhop.Settings.JumpCooldown, Min = 0.01, Max = 0.5, Decimals = 2, Callback = function(v) Bhop.Settings.JumpCooldown = v end })
