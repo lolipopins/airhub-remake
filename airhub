@@ -1,5 +1,3 @@
--- WARNING: For educational/testing purposes only
-
 --// Error handling
 local ErrorText = Drawing.new("Text")
 ErrorText.Visible = false
@@ -7,7 +5,20 @@ ErrorText.Size = 16
 ErrorText.Color = Color3.fromRGB(255, 0, 0)
 ErrorText.Position = Vector2.new(20, 20)
 local function ShowError(msg) ErrorText.Text = tostring(msg) ErrorText.Visible = true task.delay(3, function() ErrorText.Visible = false end) end
-local function HandleError(err) ShowError("⚠️ " .. tostring(err)) end
+local function HandleError(err) ShowError("⚠️ " .. tostring(err)) warn("[AirHub] " .. tostring(err)) end
+
+local function SafeKeyCode(name)
+    if type(name) ~= "string" then return nil end
+    local ok, kc = pcall(function() return Enum.KeyCode[name] end)
+    if ok and kc then return kc end
+    return nil
+end
+local function SafeUserInputType(name)
+    if type(name) ~= "string" then return nil end
+    local ok, uit = pcall(function() return Enum.UserInputType[name] end)
+    if ok and uit then return uit end
+    return nil
+end
 
 --// Логи
 local ActiveLogs = {}
@@ -41,10 +52,8 @@ local LocalPlayer = Players.LocalPlayer
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
-local Lighting = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- Звуки
 local Hitsound, Killsound
 local function LoadSound(id, volume)
     local sound = Instance.new("Sound")
@@ -53,28 +62,22 @@ local function LoadSound(id, volume)
     sound.Parent = Camera
     return sound
 end
-
 local function PlayHitsound()
     local s = getgenv().AirHub.Sound
     if not s.HitsoundEnabled then return end
     if not Hitsound or Hitsound.SoundId ~= "rbxassetid://"..s.HitsoundID then
         if Hitsound then Hitsound:Destroy() end
         Hitsound = LoadSound(s.HitsoundID, s.HitsoundVolume)
-    else
-        Hitsound.Volume = s.HitsoundVolume
-    end
+    else Hitsound.Volume = s.HitsoundVolume end
     Hitsound:Play()
 end
-
 local function PlayKillsound()
     local s = getgenv().AirHub.Sound
     if not s.KillsoundEnabled then return end
     if not Killsound or Killsound.SoundId ~= "rbxassetid://"..s.KillsoundID then
         if Killsound then Killsound:Destroy() end
         Killsound = LoadSound(s.KillsoundID, s.KillsoundVolume)
-    else
-        Killsound.Volume = s.KillsoundVolume
-    end
+    else Killsound.Volume = s.KillsoundVolume end
     Killsound:Play()
 end
 
@@ -92,13 +95,210 @@ end)
 local Running, Typing, LastShotTime = false, false, 0
 local OriginalSensitivity, MenuVisible = nil, true
 
-getgenv().AirHub.Logging = {
-    Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18
-}
+getgenv().AirHub.Logging = { Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18 }
 getgenv().AirHub.Sound = {
     HitsoundEnabled = false, HitsoundID = 83717596220569, HitsoundVolume = 1,
     KillsoundEnabled = false, KillsoundID = 83717596220569, KillsoundVolume = 1
 }
+
+--====================================================================================
+--  Config System
+--====================================================================================
+local CONFIG_FOLDER = "AirHub/Configs"
+local IN_MEMORY_CONFIGS = {}
+
+local function Config_HasFS()
+    return type(writefile) == "function" and type(readfile) == "function"
+end
+
+pcall(function()
+    if type(makefolder) == "function" then
+        if type(isfolder) == "function" then
+            if not isfolder("AirHub") then makefolder("AirHub") end
+            if not isfolder(CONFIG_FOLDER) then makefolder(CONFIG_FOLDER) end
+        else
+            pcall(makefolder, "AirHub")
+            pcall(makefolder, CONFIG_FOLDER)
+        end
+    end
+end)
+
+local function Config_Encode(value)
+    local t = type(value)
+    if t == "number" or t == "string" or t == "boolean" then return value
+    elseif t == "table" then
+        if value.R ~= nil and value.G ~= nil and value.B ~= nil and value.X == nil then
+            return {__t = "Color3", R = value.R, G = value.G, B = value.B}
+        elseif value.X ~= nil and value.Y ~= nil and value.Z ~= nil and value.R == nil then
+            return {__t = "Vector3", X = value.X, Y = value.Y, Z = value.Z}
+        elseif value.X ~= nil and value.Y ~= nil and value.Z == nil then
+            return {__t = "Vector2", X = value.X, Y = value.Y}
+        else
+            local out = {}
+            for k, v in pairs(value) do
+                local enc = Config_Encode(v)
+                if enc ~= nil then out[k] = enc end
+            end
+            return out
+        end
+    end
+    return nil
+end
+
+local function Config_Decode(value)
+    if type(value) ~= "table" then return value end
+    if value.__t == "Color3" then return Color3.new(value.R, value.G, value.B)
+    elseif value.__t == "Vector3" then return Vector3.new(value.X, value.Y, value.Z)
+    elseif value.__t == "Vector2" then return Vector2.new(value.X, value.Y)
+    else
+        local out = {}
+        for k, v in pairs(value) do out[k] = Config_Decode(v) end
+        return out
+    end
+end
+
+local function Config_ListFiles()
+    local list, seen = {}, {}
+    for name in pairs(IN_MEMORY_CONFIGS) do
+        if not seen[name] then seen[name] = true table.insert(list, name) end
+    end
+    if type(listfiles) == "function" then
+        local ok, files = pcall(listfiles, CONFIG_FOLDER)
+        if ok and type(files) == "table" then
+            for _, path in ipairs(files) do
+                local name = path:match("([^/\\]+)%.json$")
+                if name and not seen[name] then
+                    seen[name] = true table.insert(list, name)
+                end
+            end
+        end
+    end
+    table.sort(list)
+    return list
+end
+
+local function Config_Serialize()
+    local H = getgenv().AirHub
+    if not H then return {} end
+    local data = {Version = 1}
+    if H.Aimbot then data.Aimbot = H.Aimbot.Settings data.FOVSettings = H.Aimbot.FOVSettings end
+    if H.WallHack then
+        data.WallHack = H.WallHack.Settings
+        data.BoxSettings = H.WallHack.Visuals.BoxSettings
+        data.GlowSettings = H.WallHack.Visuals.GlowSettings
+    end
+    if H.AntiAim then data.AntiAim = H.AntiAim.Settings data.Desync = H.AntiAim.Desync.Settings end
+    if H.ServerPosition then data.ServerPosition = H.ServerPosition.Settings end
+    if H.Fly then data.Fly = H.Fly.Settings end
+    if H.Bhop then data.Bhop = H.Bhop.Settings end
+    if H.Speed then data.Speed = H.Speed.Settings end
+    if H.AutoStrafer then data.AutoStrafer = H.AutoStrafer.Settings end
+    if H.Noclip then data.Noclip = H.Noclip.Settings end
+    data.Logging = H.Logging
+    data.Sound   = H.Sound
+    return data
+end
+
+local function Config_Apply(data)
+    if type(data) ~= "table" then return false end
+    local H = getgenv().AirHub
+    if not H then return false end
+    if data.Aimbot and H.Aimbot then H.Aimbot.Settings = data.Aimbot end
+    if data.FOVSettings and H.Aimbot then H.Aimbot.FOVSettings = data.FOVSettings end
+    if data.WallHack and H.WallHack then H.WallHack.Settings = data.WallHack end
+    if data.BoxSettings and H.WallHack then H.WallHack.Visuals.BoxSettings = data.BoxSettings end
+    if data.GlowSettings and H.WallHack then H.WallHack.Visuals.GlowSettings = data.GlowSettings end
+    if data.AntiAim and H.AntiAim then H.AntiAim.Settings = data.AntiAim end
+    if data.Desync and H.AntiAim then H.AntiAim.Desync.Settings = data.Desync end
+    if data.ServerPosition and H.ServerPosition then H.ServerPosition.Settings = data.ServerPosition end
+    if data.Fly and H.Fly then H.Fly.Settings = data.Fly H.Fly.Internal.Active = false end
+    if data.Bhop and H.Bhop then
+        H.Bhop.Settings = data.Bhop
+        H.Bhop.Internal.KeyHeld = false
+        H.Bhop.Internal.Active = false
+    end
+    if data.Speed and H.Speed then H.Speed.Settings = data.Speed end
+    if data.AutoStrafer and H.AutoStrafer then
+        H.AutoStrafer.Settings = data.AutoStrafer
+        H.AutoStrafer.Internal.Active = false
+        H.AutoStrafer.Internal.KeyA = false
+        H.AutoStrafer.Internal.KeyD = false
+    end
+    if data.Noclip and H.Noclip then H.Noclip.Settings = data.Noclip end
+    if data.Logging then H.Logging = data.Logging end
+    if data.Sound then H.Sound = data.Sound end
+    return true
+end
+
+local function Config_Save(name)
+    if not name or name == "" then return false, "empty name" end
+    local data = Config_Serialize()
+    if Config_HasFS() and type(HttpService.JSONEncode) == "function" then
+        local ok, encoded = pcall(function()
+            return HttpService:JSONEncode(Config_Encode(data))
+        end)
+        if ok and encoded then
+            local path1 = CONFIG_FOLDER .. "/" .. name .. ".json"
+            local path2 = CONFIG_FOLDER .. "\\" .. name .. ".json"
+            local wok = pcall(writefile, path1, encoded)
+            if not wok then wok = pcall(writefile, path2, encoded) end
+            if wok then return true, "file" end
+        else
+            warn("[AirHub] Encode failed: " .. tostring(encoded))
+        end
+    end
+    IN_MEMORY_CONFIGS[name] = data
+    return true, "memory"
+end
+
+local function Config_Load(name)
+    if not name or name == "" then return false, "empty name" end
+    if IN_MEMORY_CONFIGS[name] then
+        Config_Apply(IN_MEMORY_CONFIGS[name])
+        return true, "memory"
+    end
+    if Config_HasFS() and type(readfile) == "function" then
+        local content
+        local ok1, c1 = pcall(readfile, CONFIG_FOLDER .. "/" .. name .. ".json")
+        if ok1 and c1 and c1 ~= "" then content = c1
+        else
+            local ok2, c2 = pcall(readfile, CONFIG_FOLDER .. "\\" .. name .. ".json")
+            if ok2 and c2 and c2 ~= "" then content = c2 end
+        end
+        if content then
+            local decode_ok, decoded = pcall(function()
+                return Config_Decode(HttpService:JSONDecode(content))
+            end)
+            if decode_ok and decoded then
+                Config_Apply(decoded)
+                return true, "file"
+            else
+                warn("[AirHub] Decode failed: " .. tostring(decoded))
+            end
+        end
+    end
+    return false, "not found"
+end
+
+local function Config_Delete(name)
+    if not name or name == "" then return false, "empty name" end
+    local deleted = false
+
+    -- удаляем из памяти
+    if IN_MEMORY_CONFIGS[name] then
+        IN_MEMORY_CONFIGS[name] = nil
+        deleted = true
+    end
+
+    -- удаляем файл(ы) — проверяем оба варианта пути
+    if type(delfile) == "function" then
+        local ok1 = pcall(delfile, CONFIG_FOLDER .. "/" .. name .. ".json")
+        local ok2 = pcall(delfile, CONFIG_FOLDER .. "\\" .. name .. ".json")
+        if ok1 or ok2 then deleted = true end
+    end
+
+    return deleted, deleted and "deleted" or "not found"
+end
 
 --====================================================================================
 --  Aimbot
@@ -143,9 +343,8 @@ end
 local function GetVisiblePointOnPart(origin, part)
     if not part or not part:IsA("BasePart") then return nil end
     if IsPartVisible(origin, part) then return part.Position end
-    local size = part.Size
+    local half = part.Size * 0.5
     local cf = part.CFrame
-    local half = size * 0.5
     local testPoints = {
         cf * Vector3.new(0, half.Y, 0), cf * Vector3.new(0, -half.Y, 0),
         cf * Vector3.new(half.X, 0, 0), cf * Vector3.new(-half.X, 0, 0),
@@ -188,8 +387,7 @@ local function IsTargetValid(targetPlayer)
         if lt and tt and lt == tt then return false end
         if (not lt or not tt) and not tc.TreatNeutralAsEnemy then return false end
         return true
-    elseif mode == "Allies" then
-        return (lt and tt and lt == tt)
+    elseif mode == "Allies" then return (lt and tt and lt == tt)
     elseif mode == "IgnoreNeutrals" then
         if not lt or not tt then return false end
         return lt ~= tt
@@ -338,7 +536,14 @@ end
 local GunHandlerHooked = false
 local function SetupGunHandlerHook()
     if GunHandlerHooked then return end
-    local success, GunHandler = pcall(require, ReplicatedStorage.Modules.Guns.GunHandler)
+    GunHandlerHooked = true
+    local modules = ReplicatedStorage:FindFirstChild("Modules")
+    if not modules then return end
+    local guns = modules:FindFirstChild("Guns")
+    if not guns then return end
+    local gunHandlerModule = guns:FindFirstChild("GunHandler")
+    if not gunHandlerModule then return end
+    local success, GunHandler = pcall(require, gunHandlerModule)
     if not success or not GunHandler then return end
     if not GunHandler.Shoot then return end
     local oldShoot = GunHandler.Shoot
@@ -348,7 +553,6 @@ local function SetupGunHandlerHook()
         end
         return oldShoot(p1, p2, p3, p4, p5, p6, p7, p8)
     end
-    GunHandlerHooked = true
 end
 task.spawn(SetupGunHandlerHook)
 
@@ -474,9 +678,11 @@ local function LoadAimbot()
         local triggerKey = Aimbot.Settings.TriggerKey
         local keyPressed = false
         if inp.UserInputType == Enum.UserInputType.Keyboard then
-            keyPressed = inp.KeyCode == Enum.KeyCode[triggerKey]
-        elseif inp.UserInputType == Enum.UserInputType[triggerKey] then
-            keyPressed = true
+            local kc = SafeKeyCode(triggerKey)
+            if kc and inp.KeyCode == kc then keyPressed = true end
+        else
+            local uit = SafeUserInputType(triggerKey)
+            if uit and inp.UserInputType == uit then keyPressed = true end
         end
         if keyPressed then
             if Aimbot.Settings.Toggle then
@@ -491,9 +697,11 @@ local function LoadAimbot()
         local triggerKey = Aimbot.Settings.TriggerKey
         local keyReleased = false
         if inp.UserInputType == Enum.UserInputType.Keyboard then
-            keyReleased = inp.KeyCode == Enum.KeyCode[triggerKey]
-        elseif inp.UserInputType == Enum.UserInputType[triggerKey] then
-            keyReleased = true
+            local kc = SafeKeyCode(triggerKey)
+            if kc and inp.KeyCode == kc then keyReleased = true end
+        else
+            local uit = SafeUserInputType(triggerKey)
+            if uit and inp.UserInputType == uit then keyReleased = true end
         end
         if keyReleased then Running = false CancelLock() end
     end)
@@ -673,7 +881,6 @@ local function ApplyAntiAim()
     local char = LocalPlayer.Character
     if not char then CleanupAntiAim() return end
     local now = tick()
-    local dt = math.min(0.033, now - AntiAim.Internal.BodyLastUpdate)
     AntiAim.Internal.BodyLastUpdate = now
     local root = char:FindFirstChild("HumanoidRootPart")
     if not root then return end
@@ -785,7 +992,7 @@ getgenv().AirHub.WallHack = {
     Settings = {Enabled = false, TeamCheck = false, AliveCheck = true},
     Visuals = {
         BoxSettings = {Enabled = true, Type = 1, Color = Color3.fromRGB(255,255,255), TargetColor = Color3.fromRGB(255,0,0), Transparency = 0.7, Thickness = 1, Filled = false, Increase = 1},
-        GlowSettings = { Enabled = true, Color = Color3.fromRGB(0, 255, 255), Transparency = 0.5, Thickness = 2, Mode = "Outline" }
+        GlowSettings = { Enabled = true, Color = Color3.fromRGB(0, 255, 255), Transparency = 0.5, Mode = "Outline" }
     },
     WrappedPlayers = {}
 }
@@ -817,19 +1024,16 @@ local function ApplyGlowForPlayer(plr)
             if mode == "Outline" then
                 data.Glow.FillTransparency = 1
                 data.Glow.OutlineTransparency = gs.Transparency
-                data.Glow.OutlineThickness = gs.Thickness
                 data.Glow.FillColor = gs.Color
                 data.Glow.OutlineColor = gs.Color
             elseif mode == "Fill" then
                 data.Glow.FillTransparency = gs.Transparency
                 data.Glow.OutlineTransparency = 1
-                data.Glow.OutlineThickness = 0
                 data.Glow.FillColor = gs.Color
                 data.Glow.OutlineColor = gs.Color
             elseif mode == "Both" then
                 data.Glow.FillTransparency = gs.Transparency * 0.5
                 data.Glow.OutlineTransparency = gs.Transparency * 0.5
-                data.Glow.OutlineThickness = gs.Thickness
                 data.Glow.FillColor = gs.Color
                 data.Glow.OutlineColor = gs.Color
             elseif mode == "Pulse" then
@@ -842,7 +1046,6 @@ local function ApplyGlowForPlayer(plr)
                 data.Glow.OutlineColor = data.Glow.FillColor
                 data.Glow.FillTransparency = gs.Transparency * (0.5 + pulse * 0.5)
                 data.Glow.OutlineTransparency = gs.Transparency * (0.5 + pulse * 0.5)
-                data.Glow.OutlineThickness = gs.Thickness
             end
         elseif data.Glow then data.Glow:Destroy() data.Glow = nil end
     elseif data.Glow then data.Glow:Destroy() data.Glow = nil end
@@ -979,7 +1182,7 @@ WallHack.Functions = {
     ResetSettings = function()
         WallHack.Settings = {Enabled = false, TeamCheck = false, AliveCheck = true}
         WallHack.Visuals.BoxSettings = {Enabled = true, Type = 1, Color = Color3.fromRGB(255,255,255), TargetColor = Color3.fromRGB(255,0,0), Transparency = 0.7, Thickness = 1, Filled = false, Increase = 1}
-        WallHack.Visuals.GlowSettings = {Enabled = true, Color = Color3.fromRGB(0, 255, 255), Transparency = 0.5, Thickness = 2, Mode = "Outline"}
+        WallHack.Visuals.GlowSettings = {Enabled = true, Color = Color3.fromRGB(0, 255, 255), Transparency = 0.5, Mode = "Outline"}
         ApplyGlowToAll()
     end
 }
@@ -1108,47 +1311,25 @@ LocalPlayer.CharacterAdded:Connect(function()
 end)
 
 --====================================================================================
---  Fly  —  Multiple Methods + Proper Keybind
---====================================================================================
---  Enabled   — мастер-выключатель из меню.
---  Бинд работает ТОЛЬКО если Enabled = true.
---  Toggle = false → держишь клавишу, летишь.
---  Toggle = true  → клавиша вкл/выкл.
+--  Fly
 --====================================================================================
 getgenv().AirHub.Fly = {
     Settings = {
-        Enabled    = false,
-        ToggleKey  = "F",
-        Toggle     = false,
-        Method     = "BodyVelocity",
-        Speed      = 30,
-        UpSpeed    = 20,
-        Smoothness = 0.5,
-        UseKeys    = true
+        Enabled    = false, ToggleKey = "F", Toggle = false,
+        Method     = "BodyVelocity", Speed = 30, UpSpeed = 20,
+        Smoothness = 0.5, UseKeys = true
     },
     Internal = {
-        BodyVelocity   = nil,
-        LinearVelocity = nil,
-        Attachment     = nil,
-        Active         = false,
-        LastUpdate     = 0
+        BodyVelocity = nil, LinearVelocity = nil, Attachment = nil,
+        Active = false, LastUpdate = 0
     }
 }
 local Fly = getgenv().AirHub.Fly
 
 local function Fly_ClearInstances()
-    if Fly.Internal.BodyVelocity then
-        Fly.Internal.BodyVelocity:Destroy()
-        Fly.Internal.BodyVelocity = nil
-    end
-    if Fly.Internal.LinearVelocity then
-        Fly.Internal.LinearVelocity:Destroy()
-        Fly.Internal.LinearVelocity = nil
-    end
-    if Fly.Internal.Attachment then
-        Fly.Internal.Attachment:Destroy()
-        Fly.Internal.Attachment = nil
-    end
+    if Fly.Internal.BodyVelocity then Fly.Internal.BodyVelocity:Destroy() Fly.Internal.BodyVelocity = nil end
+    if Fly.Internal.LinearVelocity then Fly.Internal.LinearVelocity:Destroy() Fly.Internal.LinearVelocity = nil end
+    if Fly.Internal.Attachment then Fly.Internal.Attachment:Destroy() Fly.Internal.Attachment = nil end
 end
 
 local function Fly_GetHRP()
@@ -1159,7 +1340,6 @@ end
 
 local function Fly_EnsureInstance(hrp)
     local method = Fly.Settings.Method
-
     if method == "BodyVelocity" then
         if Fly.Internal.LinearVelocity or Fly.Internal.Attachment then Fly_ClearInstances() end
         if not Fly.Internal.BodyVelocity then
@@ -1192,16 +1372,13 @@ end
 local function Fly_GetMoveDir()
     local moveDir = Vector3.new(0, 0, 0)
     if not Fly.Settings.UseKeys then return moveDir end
-
     local forward = Camera.CFrame.LookVector
     local right   = Camera.CFrame.RightVector
     local up      = Vector3.new(0, 1, 0)
-
     local forwardFlat = Vector3.new(forward.X, 0, forward.Z)
     local rightFlat   = Vector3.new(right.X, 0, right.Z)
     if forwardFlat.Magnitude > 0.001 then forwardFlat = forwardFlat.Unit end
     if rightFlat.Magnitude > 0.001 then rightFlat = rightFlat.Unit end
-
     local w = UserInputService:IsKeyDown(Enum.KeyCode.W)
     local s = UserInputService:IsKeyDown(Enum.KeyCode.S)
     local a = UserInputService:IsKeyDown(Enum.KeyCode.A)
@@ -1209,14 +1386,12 @@ local function Fly_GetMoveDir()
     local sp = UserInputService:IsKeyDown(Enum.KeyCode.Space)
     local ct = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
              or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
-
     if w then moveDir = moveDir + forwardFlat end
     if s then moveDir = moveDir - forwardFlat end
     if a then moveDir = moveDir - rightFlat end
     if d then moveDir = moveDir + rightFlat end
     if sp then moveDir = moveDir + up end
     if ct then moveDir = moveDir - up end
-
     if moveDir.Magnitude > 0 then moveDir = moveDir.Unit end
     return moveDir
 end
@@ -1224,12 +1399,8 @@ end
 local function Fly_Update()
     local S = Fly.Settings
     local I = Fly.Internal
-
-    -- Мастер-выключатель ИЛИ keybind не активирован — выключаем
     if not S.Enabled or not I.Active then
-        if I.BodyVelocity or I.LinearVelocity or I.Attachment then
-            Fly_ClearInstances()
-        end
+        if I.BodyVelocity or I.LinearVelocity or I.Attachment then Fly_ClearInstances() end
         if I.Active and not S.Enabled then I.Active = false end
         local char = LocalPlayer.Character
         if char then
@@ -1238,62 +1409,42 @@ local function Fly_Update()
         end
         return
     end
-
     local hrp = Fly_GetHRP()
-    if not hrp then
-        Fly_ClearInstances()
-        return
-    end
-
+    if not hrp then Fly_ClearInstances() return end
     Fly_EnsureInstance(hrp)
-
     local moveDir = Fly_GetMoveDir()
-
     local targetVel
     if moveDir.Y ~= 0 then
-        targetVel = Vector3.new(
-            moveDir.X * S.Speed,
-            moveDir.Y * S.UpSpeed,
-            moveDir.Z * S.Speed
-        )
+        targetVel = Vector3.new(moveDir.X * S.Speed, moveDir.Y * S.UpSpeed, moveDir.Z * S.Speed)
     else
         targetVel = Vector3.new(moveDir.X * S.Speed, 0, moveDir.Z * S.Speed)
     end
-
     local now = tick()
     local dt = now - I.LastUpdate
     if dt <= 0 or dt > 0.5 then dt = 1/60 end
     I.LastUpdate = now
-
     if S.Method == "BodyVelocity" then
-        if I.BodyVelocity then
-            I.BodyVelocity.Velocity = I.BodyVelocity.Velocity:Lerp(targetVel, math.clamp(S.Smoothness, 0.01, 1))
-        end
+        if I.BodyVelocity then I.BodyVelocity.Velocity = I.BodyVelocity.Velocity:Lerp(targetVel, math.clamp(S.Smoothness, 0.01, 1)) end
     elseif S.Method == "LinearVelocity" then
-        if I.LinearVelocity then
-            I.LinearVelocity.VectorVelocity = I.LinearVelocity.VectorVelocity:Lerp(targetVel, math.clamp(S.Smoothness, 0.01, 1))
-        end
+        if I.LinearVelocity then I.LinearVelocity.VectorVelocity = I.LinearVelocity.VectorVelocity:Lerp(targetVel, math.clamp(S.Smoothness, 0.01, 1)) end
     elseif S.Method == "Velocity" then
         hrp.Velocity = targetVel
     elseif S.Method == "CFrame" then
         hrp.CFrame = hrp.CFrame + (moveDir * S.Speed * dt)
     end
-
     local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
     if hum then hum.PlatformStand = true end
 end
 
 RunService.RenderStepped:Connect(function() xpcall(Fly_Update, HandleError) end)
 
--- Keybind: срабатывает только если Enabled = true
 UserInputService.InputBegan:Connect(function(inp, gpe)
     if gpe then return end
     if Typing or UserInputService:GetFocusedTextBox() then return end
     if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
-    if not Fly.Settings.Enabled then return end   -- ← мастер-гейт
-    local kc = Enum.KeyCode[Fly.Settings.ToggleKey]
+    if not Fly.Settings.Enabled then return end
+    local kc = SafeKeyCode(Fly.Settings.ToggleKey)
     if not kc or inp.KeyCode ~= kc then return end
-
     if Fly.Settings.Toggle then
         Fly.Internal.Active = not Fly.Internal.Active
         if not Fly.Internal.Active then
@@ -1304,14 +1455,12 @@ UserInputService.InputBegan:Connect(function(inp, gpe)
                 if hum then hum.PlatformStand = false end
             end
         end
-    else
-        Fly.Internal.Active = true
-    end
+    else Fly.Internal.Active = true end
 end)
 
 UserInputService.InputEnded:Connect(function(inp)
     if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
-    local kc = Enum.KeyCode[Fly.Settings.ToggleKey]
+    local kc = SafeKeyCode(Fly.Settings.ToggleKey)
     if not kc or inp.KeyCode ~= kc then return end
     if not Fly.Settings.Toggle then
         Fly.Internal.Active = false
@@ -1333,16 +1482,8 @@ end)
 
 Fly.Functions = {
     ResetSettings = function()
-        Fly.Settings = {
-            Enabled    = false,
-            ToggleKey  = "F",
-            Toggle     = false,
-            Method     = "BodyVelocity",
-            Speed      = 30,
-            UpSpeed    = 20,
-            Smoothness = 0.5,
-            UseKeys    = true
-        }
+        Fly.Settings = { Enabled = false, ToggleKey = "F", Toggle = false, Method = "BodyVelocity",
+            Speed = 30, UpSpeed = 20, Smoothness = 0.5, UseKeys = true }
         Fly_ClearInstances()
         Fly.Internal.Active = false
         Fly.Internal.LastUpdate = 0
@@ -1355,7 +1496,7 @@ Fly.Functions = {
 }
 
 --====================================================================================
---  Bhop  —  Enabled = мастер, бинд только при Enabled
+--  Bhop
 --====================================================================================
 getgenv().AirHub.Bhop = {
     Settings = { Enabled = false, AutoJumpKey = "Space", BypassJump = true, JumpCooldown = 0.1 },
@@ -1506,37 +1647,16 @@ Speed.Functions = {
 }
 
 --====================================================================================
---  AutoStrafer  —  Legit / Spam  (Enabled = мастер, бинд только при Enabled)
+--  AutoStrafer
 --====================================================================================
 getgenv().AirHub.AutoStrafer = {
-    Settings = {
-        Enabled   = false,
-        Mode      = "Legit",
-        Key       = "Space",
-        Toggle    = false,
-        Invert    = false,
-        SpamDelay = 0.05,
-    },
-    Internal = {
-        Active    = false,
-        LastYaw   = nil,
-        KeyA      = false,
-        KeyD      = false,
-        SpamDir   = -1,
-        LastSpam  = 0,
-    }
+    Settings = { Enabled = false, Mode = "Legit", Key = "Space", Toggle = false, Invert = false, SpamDelay = 0.05 },
+    Internal = { Active = false, LastYaw = nil, KeyA = false, KeyD = false, SpamDir = -1, LastSpam = 0 }
 }
 local AutoStrafer = getgenv().AirHub.AutoStrafer
 
-local function AS_IsTyping()
-    return UserInputService:GetFocusedTextBox() ~= nil
-end
-
-local function AS_GetCameraYaw()
-    local look = Camera.CFrame.LookVector
-    return math.atan2(look.X, look.Z)
-end
-
+local function AS_IsTyping() return UserInputService:GetFocusedTextBox() ~= nil end
+local function AS_GetCameraYaw() local look = Camera.CFrame.LookVector return math.atan2(look.X, look.Z) end
 local function AS_WrapAngle(d)
     while d >  math.pi do d = d - math.pi * 2 end
     while d < -math.pi do d = d + math.pi * 2 end
@@ -1549,100 +1669,69 @@ local function AS_PressA()
     VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.A, false, game)
     AutoStrafer.Internal.KeyA = true
 end
-
 local function AS_ReleaseA()
     if not AutoStrafer.Internal.KeyA then return end
     VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.A, false, game)
     AutoStrafer.Internal.KeyA = false
 end
-
 local function AS_PressD()
     if AutoStrafer.Internal.KeyD then return end
     if UserInputService:IsKeyDown(Enum.KeyCode.D) then return end
     VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.D, false, game)
     AutoStrafer.Internal.KeyD = true
 end
-
 local function AS_ReleaseD()
     if not AutoStrafer.Internal.KeyD then return end
     VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.D, false, game)
     AutoStrafer.Internal.KeyD = false
 end
-
-local function AS_ReleaseAll()
-    AS_ReleaseA()
-    AS_ReleaseD()
-end
+local function AS_ReleaseAll() AS_ReleaseA() AS_ReleaseD() end
 
 local function AS_Update()
     local S = AutoStrafer.Settings
     local I = AutoStrafer.Internal
-
     if not S.Enabled or not I.Active then AS_ReleaseAll() return end
-
     local char = LocalPlayer.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then AS_ReleaseAll() return end
-
     if S.Mode == "Spam" then
         local now = tick()
         if now - I.LastSpam >= S.SpamDelay then
             I.LastSpam = now
             I.SpamDir = -I.SpamDir
-            if I.SpamDir == -1 then
-                AS_PressA(); AS_ReleaseD()
-            else
-                AS_PressD(); AS_ReleaseA()
-            end
+            if I.SpamDir == -1 then AS_PressA() AS_ReleaseD()
+            else AS_PressD() AS_ReleaseA() end
         end
         return
     end
-
-    -- LEGIT
     local yaw = AS_GetCameraYaw()
-    if I.LastYaw == nil then
-        I.LastYaw = yaw
-        return
-    end
+    if I.LastYaw == nil then I.LastYaw = yaw return end
     local delta = AS_WrapAngle(yaw - I.LastYaw)
     I.LastYaw = yaw
-
-    if delta == 0 then
-        AS_ReleaseAll()
-        return
-    end
-
+    if delta == 0 then AS_ReleaseAll() return end
     local turningRight = delta > 0
     if S.Invert then turningRight = not turningRight end
-
-    if turningRight then
-        AS_PressA(); AS_ReleaseD()
-    else
-        AS_PressD(); AS_ReleaseA()
-    end
+    if turningRight then AS_PressA() AS_ReleaseD()
+    else AS_PressD() AS_ReleaseA() end
 end
 
 RunService.RenderStepped:Connect(function() xpcall(AS_Update, HandleError) end)
 
--- Keybind: только если Enabled = true
 UserInputService.InputBegan:Connect(function(inp)
     if AS_IsTyping() then return end
     if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
-    if not AutoStrafer.Settings.Enabled then return end   -- ← мастер-гейт
-    local kc = Enum.KeyCode[AutoStrafer.Settings.Key]
+    if not AutoStrafer.Settings.Enabled then return end
+    local kc = SafeKeyCode(AutoStrafer.Settings.Key)
     if not kc or inp.KeyCode ~= kc then return end
-
     if AutoStrafer.Settings.Toggle then
         AutoStrafer.Internal.Active = not AutoStrafer.Internal.Active
         if not AutoStrafer.Internal.Active then AS_ReleaseAll() end
-    else
-        AutoStrafer.Internal.Active = true
-    end
+    else AutoStrafer.Internal.Active = true end
 end)
 
 UserInputService.InputEnded:Connect(function(inp)
     if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
-    local kc = Enum.KeyCode[AutoStrafer.Settings.Key]
+    local kc = SafeKeyCode(AutoStrafer.Settings.Key)
     if not kc or inp.KeyCode ~= kc then return end
     if not AutoStrafer.Settings.Toggle then
         AutoStrafer.Internal.Active = false
@@ -1660,13 +1749,11 @@ end)
 AutoStrafer.Functions = {
     ResetSettings = function()
         AS_ReleaseAll()
-        AutoStrafer.Settings = {
-            Enabled   = false, Mode = "Legit", Key = "Space", Toggle = false,
-            Invert    = false, SpamDelay = 0.05,
-        }
+        AutoStrafer.Settings = { Enabled = false, Mode = "Legit", Key = "Space", Toggle = false, Invert = false, SpamDelay = 0.05 }
         AutoStrafer.Internal = { Active = false, LastYaw = nil, KeyA = false, KeyD = false, SpamDir = -1, LastSpam = 0 }
     end,
     Stop = function()
+        AutoStrafer.Settings.Enabled = false
         AutoStrafer.Internal.Active = false
         AS_ReleaseAll()
     end,
@@ -1736,9 +1823,18 @@ task.delay(math.random(1,3), function()
 
     local function Rejoin() TeleportService:Teleport(game.PlaceId, LocalPlayer) end
     local function ServerHop()
-        local data = HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/"..game.PlaceId.."/servers/Public?limit=100"))
+        local ok, data = pcall(function()
+            local body
+            if type(game.HttpGet) == "function" then
+                body = game:HttpGet("https://games.roblox.com/v1/games/"..game.PlaceId.."/servers/Public?limit=100")
+            elseif type(request) == "function" then
+                body = request({Url = "https://games.roblox.com/v1/games/"..game.PlaceId.."/servers/Public?limit=100", Method = "GET"}).Body
+            end
+            return HttpService:JSONDecode(body or "")
+        end)
+        if not ok or not data then ShowError("ServerHop failed"); return end
         local servers = {}
-        for _, v in ipairs(data.data) do
+        for _, v in ipairs(data.data or {}) do
             if v.playing and v.id ~= game.JobId then servers[#servers+1] = v.id end
         end
         if #servers > 0 then TeleportService:TeleportToPlaceInstance(game.PlaceId, servers[math.random(1, #servers)], LocalPlayer)
@@ -1753,43 +1849,70 @@ task.delay(math.random(1,3), function()
     end)
 
     Library.UnloadCallback = function()
-        Aimbot.FOVCircle:Remove()
-        WallHack.Functions.Exit()
-        StopServerPosition()
-        StopDesync()
-        Fly.Functions.ResetSettings()
-        if Speed.Internal.Active then
+        Aimbot.Settings.Enabled = false
+        Aimbot.FOVSettings.Enabled = false
+        WallHack.Settings.Enabled = false
+        WallHack.Visuals.BoxSettings.Enabled = false
+        WallHack.Visuals.GlowSettings.Enabled = false
+        AntiAim.Settings.Enabled = false
+        AntiAim.Desync.Settings.Enabled = false
+        ServerPosition.Settings.Enabled = false
+        Fly.Settings.Enabled = false
+        Bhop.Settings.Enabled = false
+        Speed.Settings.Enabled = false
+        AutoStrafer.Settings.Enabled = false
+        Noclip.Settings.Enabled = false
+
+        Fly.Internal.Active = false
+        Bhop.Internal.KeyHeld = false
+        Bhop.Internal.Active = false
+        AutoStrafer.Internal.Active = false
+        Speed.Internal.Active = false
+        Noclip.Internal.Active = false
+
+        pcall(function() Aimbot.FOVCircle:Remove() end)
+        pcall(function() WallHack.Functions.Exit() end)
+        pcall(StopServerPosition)
+        pcall(StopDesync)
+        pcall(Fly_ClearInstances)
+        pcall(function()
             local char = LocalPlayer.Character
             if char then
                 local hum = char:FindFirstChildOfClass("Humanoid")
-                if hum and hum.WalkSpeed ~= Speed.Internal.OriginalWalkSpeed then
-                    hum.WalkSpeed = Speed.Internal.OriginalWalkSpeed
+                if hum then
+                    hum.PlatformStand = false
+                    if hum.WalkSpeed ~= 16 then hum.WalkSpeed = 16 end
                 end
-            end
-        end
-        if Noclip.Internal.Active then
-            local char = LocalPlayer.Character
-            if char then
                 for _, part in ipairs(char:GetDescendants()) do
                     if part:IsA("BasePart") then part.CanCollide = true end
                 end
             end
-        end
-        AutoStrafer.Functions.Stop()
-        RemoveRayHook()
-        RemoveMouseHitHook()
-        CleanupAntiAim()
-        ErrorText:Remove()
-        for _, log in ipairs(ActiveLogs) do log.text:Remove() end
+        end)
+        pcall(function() if AutoStrafer.Internal.KeyA or AutoStrafer.Internal.KeyD then AS_ReleaseAll() end end)
+        pcall(RemoveRayHook)
+        pcall(RemoveMouseHitHook)
+        pcall(CleanupAntiAim)
+        pcall(function() ErrorText:Remove() end)
+        pcall(function() for _, log in ipairs(ActiveLogs) do log.text:Remove() end end)
         ActiveLogs = {}
-        if Hitsound then Hitsound:Destroy() end
-        if Killsound then Killsound:Destroy() end
+        pcall(function() if Hitsound then Hitsound:Destroy() end end)
+        pcall(function() if Killsound then Killsound:Destroy() end end)
         getgenv().AirHub = nil
+        pcall(function()
+            local t = Drawing.new("Text")
+            t.Text = "AirHub unloaded"
+            t.Size = 20
+            t.Color = Color3.fromRGB(255, 80, 80)
+            t.Center = true
+            t.Outline = true
+            t.Position = workspace.CurrentCamera.ViewportSize / 2
+            task.delay(2, function() t:Remove() end)
+        end)
     end
 
     local MainFrame = Library:CreateWindow({
         Name = "AirHub",
-        Themeable = { Image = "96742921028995", Info = "Strafe Helper | Silent Aim | Ghost | Fly", Credit = false }
+        Themeable = { Image = "96742921028995", Info = "Strafe Helper | Silent Aim | Ghost | Fly | Configs", Credit = false }
     })
 
     local AimbotTab    = MainFrame:CreateTab({ Name = "Aimbot" })
@@ -1806,7 +1929,7 @@ task.delay(math.random(1,3), function()
     secA:AddToggle({ Name = "Check visibility from player on TP", Value = Aimbot.Settings.CheckFromPlayerOnTP, Callback = function(v) Aimbot.Settings.CheckFromPlayerOnTP = v end })
     secA:AddDropdown({ Name = "Lock Part", Value = Aimbot.Settings.LockPart, List = {"Head","Torso","Nearest"}, Callback = function(v) Aimbot.Settings.LockPart = v end })
     secA:AddToggle({ Name = "Fallback to visible parts", Value = Aimbot.Settings.FallbackToVisible, Callback = function(v) Aimbot.Settings.FallbackToVisible = v end })
-    secA:AddTextbox({ Name = "Aim Key", Value = Aimbot.Settings.TriggerKey, Callback = function(v) Aimbot.Settings.TriggerKey = v end })
+    secA:AddTextbox({ Name = "Aim Key (MouseButton1/2 or KeyCode)", Value = Aimbot.Settings.TriggerKey, Callback = function(v) Aimbot.Settings.TriggerKey = v end })
     secA:AddDropdown({ Name = "Aim Method", Value = Aimbot.Settings.AimMethod, List = {"Smooth","Instant"}, Callback = function(v) Aimbot.Settings.AimMethod = v end })
     secA:AddSlider({ Name = "Smoothing Speed", Value = Aimbot.Settings.AimSmoothingSpeed, Min = 1, Max = 20, Callback = function(v) Aimbot.Settings.AimSmoothingSpeed = v end })
 
@@ -1863,7 +1986,6 @@ task.delay(math.random(1,3), function()
     glowSec:AddToggle({ Name = "Enabled", Value = WallHack.Visuals.GlowSettings.Enabled, Callback = function(v) WallHack.Visuals.GlowSettings.Enabled = v; ApplyGlowToAll() end })
     glowSec:AddColorpicker({ Name = "Color", Value = WallHack.Visuals.GlowSettings.Color, Callback = function(v) WallHack.Visuals.GlowSettings.Color = v; ApplyGlowToAll() end })
     glowSec:AddSlider({ Name = "Transparency", Value = WallHack.Visuals.GlowSettings.Transparency, Min = 0, Max = 1, Decimals = 2, Callback = function(v) WallHack.Visuals.GlowSettings.Transparency = v; ApplyGlowToAll() end })
-    glowSec:AddSlider({ Name = "Thickness", Value = WallHack.Visuals.GlowSettings.Thickness, Min = 1, Max = 10, Callback = function(v) WallHack.Visuals.GlowSettings.Thickness = v; ApplyGlowToAll() end })
     glowSec:AddDropdown({ Name = "Mode", Value = WallHack.Visuals.GlowSettings.Mode, List = glowModes, Callback = function(v) WallHack.Visuals.GlowSettings.Mode = v; ApplyGlowToAll() end })
 
     local spSec = VisualsTab:CreateSection({ Name = "Server Position (Ghost)", Side = "Right" })
@@ -1971,8 +2093,169 @@ task.delay(math.random(1,3), function()
     logSec:AddDropdown({ Name = "Killsound", Value = "gamesense", List = {"gamesense","neverlose","crit","primordial"}, Callback = function(v) getgenv().AirHub.Sound.KillsoundID = soundIDs[v] end })
     logSec:AddSlider({ Name = "Killsound Volume", Value = getgenv().AirHub.Sound.KillsoundVolume, Min = 0, Max = 10, Decimals = 1, Callback = function(v) getgenv().AirHub.Sound.KillsoundVolume = v end })
 
-    local cfgSec = SettingsTab:CreateSection({ Name = "Config" })
-    cfgSec:AddButton({ Name = "Reset All", Callback = function()
+    --====================================================================================
+    --  Config UI — текстовый список, без dropdown
+    --====================================================================================
+    local cfgSec = SettingsTab:CreateSection({ Name = "Configs", Side = "Right" })
+
+    local currentConfigName = "default"
+
+    -- 1) Имя конфига (для сохранения)
+    local cfgNameBox = cfgSec:AddTextbox({
+        Name = "Config Name",
+        Value = currentConfigName,
+        Callback = function(v) currentConfigName = v end
+    })
+
+    -- 2) Выбор по номеру из списка
+    cfgSec:AddTextbox({
+        Name = "Select # → Load",
+        Value = "",
+        Callback = function(v)
+            local num = tonumber(v)
+            if not num or num <= 0 then return end
+            local list = Config_ListFiles()
+            if list[num] then
+                currentConfigName = list[num]
+                if cfgNameBox and type(cfgNameBox.Set) == "function" then
+                    pcall(function() cfgNameBox:Set(list[num]) end)
+                end
+                warn("[AirHub] Selected #" .. num .. " = " .. list[num])
+                ShowError("Selected: " .. list[num])
+            else
+                ShowError("Index out of range (max " .. #list .. ")")
+            end
+        end
+    })
+
+    -- 3) Список конфигов — по строкам (10 слотов, каждый = 1 конфиг)
+    local LIST_SLOTS = 10
+    local listSlots = {}
+    for i = 1, LIST_SLOTS do
+        listSlots[i] = cfgSec:AddTextbox({
+            Name = " " .. i .. ".",
+            Value = "",
+            Callback = function() end,
+        })
+    end
+
+    local function SetSlotText(slot, text)
+        if not slot then return end
+        text = text or ""
+        -- пробуем все известные API библиотеки, чтобы точно затереть значение
+        if type(slot.Set) == "function" then
+            pcall(function() slot:Set(text) end)
+        end
+        if type(slot.SetValue) == "function" then
+            pcall(function() slot:SetValue(text) end)
+        end
+        if type(slot.SetText) == "function" then
+            pcall(function() slot:SetText(text) end)
+        end
+        pcall(function() slot.Value = text end)
+        pcall(function() slot.Text = text end)
+    end
+
+    local function UpdateConfigListUI()
+        -- 1) принудительно чистим ВСЕ слоты
+        for i = 1, LIST_SLOTS do
+            SetSlotText(listSlots[i], "")
+        end
+
+        -- 2) заново получаем актуальный список файлов
+        local list = Config_ListFiles()
+        local total = #list
+
+        -- 3) заполняем
+        for i = 1, LIST_SLOTS do
+            local text = ""
+            if i < LIST_SLOTS then
+                if i <= total then text = list[i] end
+            else -- последний слот
+                if total > LIST_SLOTS then
+                    text = "... +" .. (total - LIST_SLOTS + 1) .. " more"
+                elseif i <= total then
+                    text = list[i]
+                end
+            end
+            SetSlotText(listSlots[i], text)
+        end
+
+        if total == 0 then
+            SetSlotText(listSlots[1], "(no configs)")
+        end
+
+        warn("[AirHub] Configs (" .. total .. "): " .. (total > 0 and table.concat(list, ", ") or "none"))
+        return list
+    end
+
+    -- 4) Кнопки
+    cfgSec:AddButton({ Name = "Save Config", Callback = function()
+        if not currentConfigName or currentConfigName == "" then
+            warn("[AirHub] Enter config name"); ShowError("Enter config name"); return
+        end
+        local ok, where = Config_Save(currentConfigName)
+        if ok then
+            warn("[AirHub] Config saved (" .. tostring(where) .. "): " .. currentConfigName)
+            ShowError("Saved: " .. currentConfigName .. " (" .. tostring(where) .. ")")
+            UpdateConfigListUI()
+        else
+            warn("[AirHub] Save failed: " .. tostring(where))
+            ShowError("Save failed: " .. tostring(where))
+        end
+    end })
+
+    cfgSec:AddButton({ Name = "Load Config", Callback = function()
+        if not currentConfigName or currentConfigName == "" then
+            warn("[AirHub] Enter config name"); ShowError("Enter config name"); return
+        end
+        local ok, where = Config_Load(currentConfigName)
+        if ok then
+            warn("[AirHub] Config loaded (" .. tostring(where) .. "): " .. currentConfigName)
+            ShowError("Loaded: " .. currentConfigName)
+        else
+            warn("[AirHub] Load failed: " .. tostring(where))
+            ShowError("Load failed: " .. tostring(where))
+        end
+    end })
+
+    cfgSec:AddButton({ Name = "Delete Config", Callback = function()
+        if not currentConfigName or currentConfigName == "" then
+            warn("[AirHub] Enter config name"); ShowError("Enter config name"); return
+        end
+
+        local nameToDelete = currentConfigName
+        local ok, where = Config_Delete(nameToDelete)
+
+        if ok then
+            warn("[AirHub] Deleted: " .. nameToDelete)
+            ShowError("Deleted: " .. nameToDelete)
+
+            -- очищаем поле имени
+            currentConfigName = ""
+            if cfgNameBox and type(cfgNameBox.Set) == "function" then
+                pcall(function() cfgNameBox:Set("") end)
+            elseif cfgNameBox and type(cfgNameBox.SetValue) == "function" then
+                pcall(function() cfgNameBox:SetValue("") end)
+            end
+
+            -- обновляем список в UI (с небольшой задержкой, чтобы FS успела удалить)
+            task.defer(UpdateConfigListUI)
+        else
+            warn("[AirHub] Delete failed: " .. tostring(where))
+            ShowError("Delete failed: " .. tostring(where))
+        end
+    end })
+
+    cfgSec:AddButton({ Name = "Refresh List", Callback = function()
+        local list = UpdateConfigListUI()
+        ShowError("Found: " .. tostring(#list) .. " (введи № в Select #)")
+    end })
+
+    -- Main
+    local mainSec = SettingsTab:CreateSection({ Name = "Main" })
+
+    mainSec:AddButton({ Name = "Reset All", Callback = function()
         Aimbot.Settings = { Enabled = false, TeamCheck = {Enabled = true, Mode = "Enemies", TreatNeutralAsEnemy = true}, AliveCheck = true, WallCheck = false, FallbackToVisible = false, AimSmoothingSpeed = 6, TriggerKey = "MouseButton2", Toggle = false, LockPart = "Head", AimMethod = "Smooth", SilentAim = true, SilentAimMode = "Camera", IgnoreFOV = false, CheckFromPlayerOnTP = true, AutoShoot = {Enabled = false, ShootKey = "MouseButton1", FireRate = 0.05, OnlyWhenAiming = true, AutoStop = {Enabled = false, Time = 0.1}} }
         Aimbot.FOVSettings = {Enabled = true, Visible = true, Amount = 90}
         WallHack.Functions.ResetSettings()
@@ -1990,9 +2273,14 @@ task.delay(math.random(1,3), function()
         ApplyGlowToAll()
         ShowError("All settings reset")
     end })
-    cfgSec:AddButton({ Name = "Rejoin", Callback = Rejoin })
-    cfgSec:AddButton({ Name = "Server Hop", Callback = ServerHop })
-    cfgSec:AddButton({ Name = "Exit", Callback = Library.Unload })
 
-    ShowError("AirHub | Strafe Helper | Silent Aim | Ghost | Fly")
+    mainSec:AddButton({ Name = "Rejoin", Callback = Rejoin })
+    mainSec:AddButton({ Name = "Server Hop", Callback = ServerHop })
+    mainSec:AddButton({ Name = "Exit (Unload All)", Callback = function()
+        Library:Unload()
+    end })
+
+    task.defer(UpdateConfigListUI)
+
+    ShowError("Airhub loaded")
 end)
