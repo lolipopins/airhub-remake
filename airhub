@@ -197,6 +197,7 @@ local function Config_Serialize()
     if H.Fly then data.Fly = H.Fly.Settings end
     if H.Bhop then data.Bhop = H.Bhop.Settings end
     if H.Speed then data.Speed = H.Speed.Settings end
+    if H.FastStop then data.FastStop = H.FastStop.Settings end
     if H.AutoStrafer then data.AutoStrafer = H.AutoStrafer.Settings end
     if H.Noclip then data.Noclip = H.Noclip.Settings end
     data.Logging = H.Logging
@@ -208,7 +209,14 @@ local function Config_Apply(data)
     if type(data) ~= "table" then return false end
     local H = getgenv().AirHub
     if not H then return false end
-    if data.Aimbot and H.Aimbot then H.Aimbot.Settings = data.Aimbot end
+    if data.Aimbot and H.Aimbot then
+        H.Aimbot.Settings = data.Aimbot
+        if H.Aimbot.Settings.PredictionX == nil then H.Aimbot.Settings.PredictionX = 0 end
+        if H.Aimbot.Settings.PredictionY == nil then H.Aimbot.Settings.PredictionY = 0 end
+        if H.Aimbot.Settings.PredictionEnabled == nil then H.Aimbot.Settings.PredictionEnabled = false end
+        if H.Aimbot.Settings.WallCheckMode == nil then H.Aimbot.Settings.WallCheckMode = "Perfect" end
+        if H.Aimbot.Settings.WallCheckDelay == nil then H.Aimbot.Settings.WallCheckDelay = 0.15 end
+    end
     if data.FOVSettings and H.Aimbot then H.Aimbot.FOVSettings = data.FOVSettings end
     if data.WallHack and H.WallHack then H.WallHack.Settings = data.WallHack end
     if data.BoxSettings and H.WallHack then
@@ -244,6 +252,7 @@ local function Config_Apply(data)
         H.Bhop.Internal.Active = false
     end
     if data.Speed and H.Speed then H.Speed.Settings = data.Speed end
+    if data.FastStop and H.FastStop then H.FastStop.Settings = data.FastStop end
     if data.AutoStrafer and H.AutoStrafer then
         H.AutoStrafer.Settings = data.AutoStrafer
         H.AutoStrafer.Internal.Active = false
@@ -325,10 +334,16 @@ getgenv().AirHub.Aimbot = {
         Enabled = false,
         TeamCheck = { Enabled = true, Mode = "Enemies", TreatNeutralAsEnemy = true },
         AliveCheck = true, WallCheck = false, FallbackToVisible = false,
+        WallCheckMode = "Perfect",     -- "Perfect" | "Fast"
+        WallCheckDelay = 0.15,          -- seconds to wait for a clean line of sight in Perfect mode
         AimSmoothingSpeed = 6.0, TriggerKey = "MouseButton2", Toggle = false,
         LockPart = "Head", AimMethod = "Smooth",
         SilentAim = true, SilentAimMode = "Camera", IgnoreFOV = false,
         CheckFromPlayerOnTP = true,
+        PredictionEnabled = false,
+        PredictionX = 0,
+        PredictionY = 0,
+        PredictionTime = 0.15,
         AutoShoot = { Enabled = false, ShootKey = "MouseButton1", FireRate = 0.05,
             OnlyWhenAiming = true, AutoStop = { Enabled = false, Time = 0.1 } }
     },
@@ -344,33 +359,119 @@ local function GetActualPartName(lockPart)
     if lockPart == "Torso" then return {"Torso", "UpperTorso", "LowerTorso"} else return {lockPart} end
 end
 
-local function IsPartVisible(origin, part)
-    if not part or not part:IsA("BasePart") then return false end
-    local targetCharacter = part.Parent
-    if not targetCharacter then return false end
+local function PredictPartPosition(part)
+    if not part then return Vector3.new(0,0,0) end
+    if not Aimbot.Settings.PredictionEnabled then return part.Position end
+    local vel = part.AssemblyLinearVelocity or part.Velocity
+    if not vel then return part.Position end
+    local baseTime = Aimbot.Settings.PredictionTime or 0.15
+    local px = (Aimbot.Settings.PredictionX or 0) / 100
+    local py = (Aimbot.Settings.PredictionY or 0) / 100
+    return part.Position + Vector3.new(
+        vel.X * px * baseTime,
+        vel.Y * py * baseTime,
+        vel.Z * px * baseTime
+    )
+end
+
+local function BuildRayParams(targetCharacter)
     local localCharacter = LocalPlayer.Character
     local ignoreList = {targetCharacter}
     if localCharacter then table.insert(ignoreList, localCharacter) end
     local params = RaycastParams.new()
     params.FilterDescendantsInstances = ignoreList
     params.FilterType = Enum.RaycastFilterType.Blacklist
-    return workspace:Raycast(origin, part.Position - origin, params) == nil
+    params.IgnoreWater = true
+    return params
 end
 
-local function GetVisiblePointOnPart(origin, part)
-    if not part or not part:IsA("BasePart") then return nil end
-    if IsPartVisible(origin, part) then return part.Position end
-    local half = part.Size * 0.5
-    local cf = part.CFrame
-    local testPoints = {
-        cf * Vector3.new(0, half.Y, 0), cf * Vector3.new(0, -half.Y, 0),
-        cf * Vector3.new(half.X, 0, 0), cf * Vector3.new(-half.X, 0, 0),
-        cf * Vector3.new(0, 0, half.Z), cf * Vector3.new(0, 0, -half.Z)
-    }
-    for _, point in ipairs(testPoints) do
-        if IsPartVisible(origin, part) then return point end
+--== FAST mode: single ray to predicted, single to actual ==--
+local function GetVisiblePoint_Fast(origin, part)
+    local predicted = PredictPartPosition(part)
+    local params = BuildRayParams(part.Parent)
+
+    if workspace:Raycast(origin, predicted - origin, params) == nil then
+        return predicted
+    end
+    if workspace:Raycast(origin, part.Position - origin, params) == nil then
+        return part.Position
     end
     return nil
+end
+
+--== PERFECT mode: tests many points, guaranteed no wall in the way ==--
+local function GetVisiblePoint_Perfect(origin, part)
+    local predicted = PredictPartPosition(part)
+    local params = BuildRayParams(part.Parent)
+
+    -- 1) Predicted center
+    if workspace:Raycast(origin, predicted - origin, params) == nil then
+        return predicted
+    end
+    -- 2) Actual center
+    if workspace:Raycast(origin, part.Position - origin, params) == nil then
+        return part.Position
+    end
+
+    -- 3) Offsets around the part
+    local half = part.Size * 0.5
+    local cf = part.CFrame
+    local offsetList = {
+        Vector3.new( half.X * 0.8,  0,            0),
+        Vector3.new(-half.X * 0.8,  0,            0),
+        Vector3.new( 0,             half.Y * 0.8, 0),
+        Vector3.new( 0,            -half.Y * 0.8, 0),
+        Vector3.new( 0,             0,            half.Z * 0.8),
+        Vector3.new( 0,             0,           -half.Z * 0.8),
+        Vector3.new( half.X * 0.6,  half.Y * 0.6, 0),
+        Vector3.new(-half.X * 0.6,  half.Y * 0.6, 0),
+        Vector3.new( half.X * 0.6, -half.Y * 0.6, 0),
+        Vector3.new(-half.X * 0.6, -half.Y * 0.6, 0),
+        Vector3.new( half.X * 0.6,  0,            half.Z * 0.6),
+        Vector3.new(-half.X * 0.6,  0,           -half.Z * 0.6),
+    }
+    for _, off in ipairs(offsetList) do
+        local wp = cf * off
+        if workspace:Raycast(origin, wp - origin, params) == nil then
+            return wp
+        end
+    end
+    return nil
+end
+
+-- Main dispatcher
+local function GetVisiblePointOnPart(origin, part)
+    if not part or not part:IsA("BasePart") then return nil end
+
+    -- WallCheck OFF → no raycast at all
+    if not Aimbot.Settings.WallCheck then
+        return PredictPartPosition(part)
+    end
+
+    if Aimbot.Settings.WallCheckMode == "Fast" then
+        return GetVisiblePoint_Fast(origin, part)
+    else
+        return GetVisiblePoint_Perfect(origin, part)
+    end
+end
+
+-- PERFECT mode + delay tolerance: retry until deadline
+local function GetVisiblePointWithDelay(origin, part)
+    if not part then return nil end
+    if not Aimbot.Settings.WallCheck then return PredictPartPosition(part) end
+
+    if Aimbot.Settings.WallCheckMode ~= "Perfect" then
+        return GetVisiblePointOnPart(origin, part)
+    end
+
+    local maxWait = tonumber(Aimbot.Settings.WallCheckDelay) or 0.15
+    local deadline = tick() + math.max(0, maxWait)
+    local vp = GetVisiblePointOnPart(origin, part)
+    while not vp and tick() < deadline do
+        task.wait(0.005)
+        vp = GetVisiblePointOnPart(origin, part)
+    end
+    return vp
 end
 
 local function FindVisiblePart(player, origin, preferredParts)
@@ -379,12 +480,12 @@ local function FindVisiblePart(player, origin, preferredParts)
     if preferredParts then
         for _, name in ipairs(preferredParts) do
             local part = char:FindFirstChild(name)
-            if part and part:IsA("BasePart") and IsPartVisible(origin, part) then return part end
+            if part and part:IsA("BasePart") and GetVisiblePointOnPart(origin, part) then return part end
         end
     end
     for _, name in ipairs(VISIBLE_PARTS) do
         local part = char:FindFirstChild(name)
-        if part and part:IsA("BasePart") and IsPartVisible(origin, part) then return part end
+        if part and part:IsA("BasePart") and GetVisiblePointOnPart(origin, part) then return part end
     end
     return nil
 end
@@ -433,7 +534,7 @@ local function GetClosestPlayer()
             else
                 for _, name in ipairs(preferred) do
                     local p = target.Character:FindFirstChild(name)
-                    if p and p:IsA("BasePart") and IsPartVisible(origin, p) then part = p break end
+                    if p and p:IsA("BasePart") and GetVisiblePointOnPart(origin, p) then part = p break end
                 end
                 if not part then Aimbot.LockPartInstance = nil return end
             end
@@ -464,12 +565,12 @@ local function GetClosestPlayer()
             else
                 for _, name in ipairs(preferred) do
                     local p = charTarget:FindFirstChild(name)
-                    if p and p:IsA("BasePart") and IsPartVisible(origin, p) then targetPart = p break end
+                    if p and p:IsA("BasePart") and GetVisiblePointOnPart(origin, p) then targetPart = p break end
                 end
             end
         end
         if targetPart then
-            local point = targetPart.Position
+            local point = PredictPartPosition(targetPart)
             local vec, on = Camera:WorldToViewportPoint(point)
             local dist = ignoreFOV and (point - origin).Magnitude or (on and (mousePos - Vector2.new(vec.X, vec.Y)).Magnitude or math.huge)
             if dist < bestDist and (ignoreFOV or dist < required) then
@@ -526,6 +627,18 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
     local startHealth = hum and hum.Health or 0
 
+    -- PERFECT wallcheck: wait for clean line of sight (with delay tolerance)
+    local originCheck = Camera.CFrame.Position
+    local checkPoint
+    if Aimbot.Settings.WallCheck and Aimbot.Settings.WallCheckMode == "Perfect" then
+        checkPoint = GetVisiblePointWithDelay(originCheck, targetPart)
+    else
+        checkPoint = GetVisiblePointOnPart(originCheck, targetPart)
+    end
+    if Aimbot.Settings.WallCheck and not checkPoint then
+        return
+    end
+
     if Aimbot.Settings.SilentAimMode == "GunHandler"
     or Aimbot.Settings.SilentAimMode == "RayHook"
     or Aimbot.Settings.SilentAimMode == "MouseHit" then
@@ -538,7 +651,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     end
 
     local origin = Camera.CFrame.Position
-    local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
+    local visiblePoint = checkPoint or GetVisiblePointOnPart(origin, targetPart)
     if not visiblePoint then return end
     local oldCF = Camera.CFrame
     Camera.CFrame = CFrame.new(oldCF.Position, visiblePoint)
@@ -566,7 +679,17 @@ local function SetupGunHandlerHook()
     local oldShoot = GunHandler.Shoot
     GunHandler.Shoot = function(p1, p2, p3, p4, p5, p6, p7, p8)
         if Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim and Aimbot.Settings.SilentAimMode == "GunHandler" and Running and Aimbot.Locked and Aimbot.LockPartInstance then
-            if p1 == LocalPlayer then p4 = Aimbot.LockPartInstance.Position end
+            if p1 == LocalPlayer then
+                local origin = Camera.CFrame.Position
+                local vp = GetVisiblePointOnPart(origin, Aimbot.LockPartInstance)
+                if vp then
+                    p4 = vp
+                elseif Aimbot.Settings.WallCheck then
+                    -- not visible → don't redirect (avoid shooting into a wall)
+                else
+                    p4 = PredictPartPosition(Aimbot.LockPartInstance)
+                end
+            end
         end
         return oldShoot(p1, p2, p3, p4, p5, p6, p7, p8)
     end
@@ -605,7 +728,13 @@ local function SetupRayHook()
             local target = GetClosestTargetRay()
             if target then
                 local origin = old(t, 'Origin')
-                return (target.Position - origin).Unit
+                local vp = GetVisiblePointOnPart(origin, target)
+                if vp then
+                    return (vp - origin).Unit
+                elseif not Aimbot.Settings.WallCheck then
+                    return (PredictPartPosition(target) - origin).Unit
+                end
+                -- wallcheck on + no visible point → do nothing
             end
         end
         return old(t, k)
@@ -632,7 +761,13 @@ local function SetupMouseHitHook()
             __index = function(t, k)
                 if k == "Hit" then
                     if Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim and Aimbot.Settings.SilentAimMode == "MouseHit" and Running and Aimbot.LockPartInstance then
-                        return Aimbot.LockPartInstance.Position
+                        local origin = Camera.CFrame.Position
+                        local vp = GetVisiblePointOnPart(origin, Aimbot.LockPartInstance)
+                        if vp then return vp end
+                        if not Aimbot.Settings.WallCheck then
+                            return PredictPartPosition(Aimbot.LockPartInstance)
+                        end
+                        return nil
                     end
                 end
                 return realMouse[k]
@@ -740,6 +875,14 @@ local function LoadAimbot()
                 local wasVisible = GetVisiblePointOnPart(origin, targetPart) ~= nil
                 PerformSilentShot(targetPart, btn, wasVisible)
             else
+                -- non-silent: bail out if wallcheck on and no line of sight
+                if Aimbot.Settings.WallCheck then
+                    local origin = Camera.CFrame.Position
+                    local vp = (Aimbot.Settings.WallCheckMode == "Perfect")
+                        and GetVisiblePointWithDelay(origin, targetPart)
+                        or GetVisiblePointOnPart(origin, targetPart)
+                    if not vp then return end
+                end
                 local mousePos = UserInputService:GetMouseLocation()
                 VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
                 task.wait(0.001)
@@ -765,9 +908,15 @@ local function LoadAimbot()
                 if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then CancelLock() return end
                 local startHealth = hum and hum.Health or 0
                 local origin = Camera.CFrame.Position
-                local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
+                -- Perfect mode: try hard for a visible point (with delay); Fast: single check
+                local visiblePoint
+                if Aimbot.Settings.WallCheck and Aimbot.Settings.WallCheckMode == "Perfect" then
+                    visiblePoint = GetVisiblePointWithDelay(origin, targetPart)
+                else
+                    visiblePoint = GetVisiblePointOnPart(origin, targetPart)
+                end
                 local wasVisible = visiblePoint ~= nil
-                if not visiblePoint then return end
+                if not visiblePoint and Aimbot.Settings.WallCheck then return end
                 if Aimbot.Settings.AutoShoot.AutoStop.Enabled then
                     local char = LocalPlayer.Character
                     if char then
@@ -818,7 +967,7 @@ getgenv().AirHub.AntiAim = {
             UpdateInterval = 0.05, 
             Smoothness = 0.2, 
             OnlyInAir = false,
-            NotInAir = false,           -- NEW: don't apply desync while airborne
+            NotInAir = false,
             FreezeOldPos = true,
             RandomDelayEnabled = false,
             AutoUpdateMin = 0.2,
@@ -832,7 +981,8 @@ getgenv().AirHub.AntiAim = {
             TargetOffset = Vector3.new(0,0,0),
             SavedCFrame = nil,
             OldPosTimer = 0,
-            NextUpdate = 0
+            NextUpdate = 0,
+            PendingRefresh = false
         } 
     },
     Internal = { BodyLastUpdate = 0, BodyJitterTime = 0, BodyJitterOffset = 0,
@@ -894,6 +1044,7 @@ local function StartDesync()
         end
         desync.Internal.OldPosTimer = 0
         desync.Internal.NextUpdate = PickNextDelay(desync.Settings)
+        desync.Internal.PendingRefresh = false
     end
 
     desync.Internal.Connection = RunService.Heartbeat:Connect(function(dt)
@@ -904,12 +1055,11 @@ local function StartDesync()
         local hum = char:FindFirstChildOfClass("Humanoid")
         local inAir = hum and hum.FloorMaterial == Enum.Material.Air
 
-        -- OnlyInAir: apply only while airborne
         if desync.Settings.OnlyInAir and not inAir then
             return
         end
-        -- NEW NotInAir: do NOT apply while airborne
-        if desync.Settings.NotInAir and inAir then
+
+        if desync.Settings.NotInAir and inAir and desync.Settings.Mode ~= "OldPosition" then
             return
         end
 
@@ -923,16 +1073,37 @@ local function StartDesync()
                 desync.Internal.SavedCFrame = oldcf
             end
 
-            if desync.Settings.RandomDelayEnabled and not desync.Settings.FreezeOldPos then
+            local canRefresh = true
+            if desync.Settings.NotInAir and inAir then
+                canRefresh = false
+            end
+
+            if canRefresh and desync.Internal.PendingRefresh then
+                desync.Internal.PendingRefresh = false
+                desync.Internal.SavedCFrame = oldcf
+                desync.Internal.OldPosTimer = 0
+                desync.Internal.NextUpdate = PickNextDelay(desync.Settings)
+            end
+
+            if canRefresh and desync.Settings.RandomDelayEnabled and not desync.Settings.FreezeOldPos then
                 desync.Internal.OldPosTimer = (desync.Internal.OldPosTimer or 0) + dt
                 if desync.Internal.OldPosTimer >= (desync.Internal.NextUpdate or 0) then
-                    desync.Internal.OldPosTimer = 0
                     desync.Internal.SavedCFrame = oldcf
+                    desync.Internal.OldPosTimer = 0
                     desync.Internal.NextUpdate = PickNextDelay(desync.Settings)
+                end
+            elseif not canRefresh then
+                if desync.Settings.RandomDelayEnabled and not desync.Settings.FreezeOldPos then
+                    desync.Internal.OldPosTimer = (desync.Internal.OldPosTimer or 0) + dt
+                    if desync.Internal.OldPosTimer >= (desync.Internal.NextUpdate or 0) then
+                        desync.Internal.PendingRefresh = true
+                    end
+                elseif not desync.Settings.FreezeOldPos and not desync.Settings.RandomDelayEnabled then
+                    desync.Internal.PendingRefresh = true
                 end
             end
 
-            if not desync.Settings.FreezeOldPos and not desync.Settings.RandomDelayEnabled then
+            if canRefresh and not desync.Settings.FreezeOldPos and not desync.Settings.RandomDelayEnabled then
                 desync.Internal.SavedCFrame = oldcf
             end
 
@@ -969,6 +1140,7 @@ local function StopDesync()
     desync.Internal.SavedCFrame = nil
     desync.Internal.OldPosTimer = 0
     desync.Internal.NextUpdate = 0
+    desync.Internal.PendingRefresh = false
 end
 
 local function CleanupAntiAim()
@@ -1092,6 +1264,7 @@ AntiAim.Functions = {
         AntiAim.Desync.Internal.SavedCFrame = nil
         AntiAim.Desync.Internal.OldPosTimer = 0
         AntiAim.Desync.Internal.NextUpdate = 0
+        AntiAim.Desync.Internal.PendingRefresh = false
         CleanupAntiAim()
         StopDesync()
     end,
@@ -1102,6 +1275,7 @@ AntiAim.Functions = {
             AntiAim.Desync.Internal.SavedCFrame = hrp.CFrame
             AntiAim.Desync.Internal.OldPosTimer = 0
             AntiAim.Desync.Internal.NextUpdate = PickNextDelay(AntiAim.Desync.Settings)
+            AntiAim.Desync.Internal.PendingRefresh = false
             return true
         end
         return false
@@ -1757,7 +1931,7 @@ Bhop.Functions = {
 }
 
 --====================================================================================
---  Speed (with separate Ground/Air values)
+--  Speed
 --====================================================================================
 getgenv().AirHub.Speed = {
     Settings = { 
@@ -1870,6 +2044,56 @@ Speed.Functions = {
             local hum = char:FindFirstChildOfClass("Humanoid")
             if hum and hum.WalkSpeed ~= 16 then hum.WalkSpeed = 16 end
         end
+    end
+}
+
+--====================================================================================
+--  FastStop
+--====================================================================================
+getgenv().AirHub.FastStop = {
+    Settings = { Enabled = false, StopY = false },
+    Internal = { LastActive = false }
+}
+local FastStop = getgenv().AirHub.FastStop
+
+local function FS_AnyMoveHeld()
+    return UserInputService:IsKeyDown(Enum.KeyCode.W)
+        or UserInputService:IsKeyDown(Enum.KeyCode.A)
+        or UserInputService:IsKeyDown(Enum.KeyCode.S)
+        or UserInputService:IsKeyDown(Enum.KeyCode.D)
+end
+
+local function FastStopLoop()
+    while task.wait(0.01) do
+        if not FastStop.Settings.Enabled then
+            FastStop.Internal.LastActive = false
+            continue
+        end
+        if FS_AnyMoveHeld() then
+            FastStop.Internal.LastActive = false
+            continue
+        end
+        local char = LocalPlayer.Character
+        if not char then continue end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hrp or not hum then continue end
+        if hum.Health <= 0 then continue end
+
+        if FastStop.Settings.StopY then
+            hrp.Velocity = Vector3.new(0, 0, 0)
+        else
+            hrp.Velocity = Vector3.new(0, hrp.Velocity.Y, 0)
+        end
+        FastStop.Internal.LastActive = true
+    end
+end
+coroutine.wrap(FastStopLoop)()
+
+FastStop.Functions = {
+    ResetSettings = function()
+        FastStop.Settings = { Enabled = false, StopY = false }
+        FastStop.Internal = { LastActive = false }
     end
 }
 
@@ -2029,6 +2253,68 @@ Noclip.Functions = {
 }
 
 --====================================================================================
+--  Post-Config Hook
+--====================================================================================
+local function ApplyAllEnabledStates()
+    local H = getgenv().AirHub
+    if not H then return end
+
+    if WallHack.Settings.Enabled then
+        ApplyGlowToAll()
+    end
+
+    if H.AntiAim and H.AntiAim.Desync.Settings.Enabled then
+        StopDesync()
+        task.defer(function()
+            if getgenv().AirHub and getgenv().AirHub.AntiAim.Desync.Settings.Enabled then
+                StartDesync()
+            end
+        end)
+    else
+        StopDesync()
+    end
+
+    if H.ServerPosition and H.ServerPosition.Settings.Enabled then
+        StopServerPosition()
+        task.defer(function()
+            if getgenv().AirHub and getgenv().AirHub.ServerPosition.Settings.Enabled then
+                StartServerPosition()
+            end
+        end)
+    else
+        StopServerPosition()
+    end
+
+    if H.Fly then
+        Fly_ClearInstances()
+        if H.Fly.Settings.Enabled and H.Fly.Settings.Toggle then
+            H.Fly.Internal.Active = true
+        else
+            H.Fly.Internal.Active = false
+        end
+    end
+
+    if H.Bhop then
+        H.Bhop.Internal.KeyHeld = false
+        H.Bhop.Internal.Active = false
+        H.Bhop.Internal.SpiderTouching = false
+    end
+    if H.Speed then
+        H.Speed.Internal.Active = false
+    end
+    if H.Noclip then
+        H.Noclip.Internal.Active = false
+    end
+    if H.AutoStrafer then
+        AutoStrafer.Internal.Active = false
+        AS_ReleaseAll()
+    end
+    if H.FastStop then
+        FastStop.Internal.LastActive = false
+    end
+end
+
+--====================================================================================
 --  UI
 --====================================================================================
 task.delay(math.random(1,3), function()
@@ -2042,6 +2328,35 @@ task.delay(math.random(1,3), function()
         return
     end
 
+    local function SafeShow()
+        if not Library then return end
+        if type(Library.Show) == "function" then pcall(function() Library:Show() end) return end
+        if type(Library.Open) == "function" then pcall(function() Library:Open() end) return end
+        if type(Library.Toggle) == "function" then pcall(function() Library:Toggle() end) return end
+        local mf = rawget(Library, "MainFrame") or rawget(Library, "Window")
+        if mf then
+            if type(mf.Show) == "function" then pcall(function() mf:Show() end) return end
+            if type(mf.Open) == "function" then pcall(function() mf:Open() end) return end
+            if type(mf.Visible) == "boolean" then mf.Visible = true end
+        end
+    end
+    local function SafeHide()
+        if not Library then return end
+        if type(Library.Hide) == "function" then pcall(function() Library:Hide() end) return end
+        if type(Library.Close) == "function" then pcall(function() Library:Close() end) return end
+        local mf = rawget(Library, "MainFrame") or rawget(Library, "Window")
+        if mf then
+            if type(mf.Hide) == "function" then pcall(function() mf:Hide() end) return end
+            if type(mf.Close) == "function" then pcall(function() mf:Close() end) return end
+            if type(mf.Visible) == "boolean" then mf.Visible = false end
+        end
+    end
+    local function SafeUnload()
+        if not Library then return end
+        if type(Library.Unload) == "function" then pcall(function() Library:Unload() end) return end
+        if type(Library.Destroy) == "function" then pcall(function() Library:Destroy() end) return end
+    end
+
     local teamModes = {"Enemies","Allies","All","IgnoreNeutrals"}
     local aaModes = {"Static", "Spin", "Jitter", "Sway"}
     local refModes = {"Camera", "Movement", "Player"}
@@ -2050,6 +2365,7 @@ task.delay(math.random(1,3), function()
     local speedMethods = {"WalkSpeed", "CFrame", "Velocity"}
     local glowModes = {"Outline", "Fill", "Both", "Pulse"}
     local silentAimModes = {"Camera", "GunHandler", "RayHook", "MouseHit"}
+    local wallCheckModes = {"Fast", "Perfect"}
     local strafeModes = {"Legit", "Spam"}
     local strafeKeys = {"Space", "LeftShift", "LeftControl", "C", "X", "Z", "Q", "E"}
     local flyMethods = {"BodyVelocity", "LinearVelocity", "Velocity", "CFrame"}
@@ -2081,7 +2397,7 @@ task.delay(math.random(1,3), function()
     UserInputService.InputBegan:Connect(function(inp)
         if inp.KeyCode == Enum.KeyCode.RightShift then
             MenuVisible = not MenuVisible
-            if MenuVisible then Library:Show() else Library:Hide() end
+            if MenuVisible then SafeShow() else SafeHide() end
         end
     end)
 
@@ -2097,6 +2413,7 @@ task.delay(math.random(1,3), function()
         Fly.Settings.Enabled = false
         Bhop.Settings.Enabled = false
         Speed.Settings.Enabled = false
+        FastStop.Settings.Enabled = false
         AutoStrafer.Settings.Enabled = false
         Noclip.Settings.Enabled = false
 
@@ -2106,6 +2423,7 @@ task.delay(math.random(1,3), function()
         AutoStrafer.Internal.Active = false
         Speed.Internal.Active = false
         Noclip.Internal.Active = false
+        FastStop.Internal.LastActive = false
 
         pcall(function() Aimbot.FOVCircle:Remove() end)
         pcall(function() WallHack.Functions.Exit() end)
@@ -2170,8 +2488,26 @@ task.delay(math.random(1,3), function()
     secA:AddDropdown({ Name = "Aim Method", Value = Aimbot.Settings.AimMethod, List = {"Smooth","Instant"}, Callback = function(v) Aimbot.Settings.AimMethod = v end })
     secA:AddSlider({ Name = "Smoothing Speed", Value = Aimbot.Settings.AimSmoothingSpeed, Min = 1, Max = 20, Callback = function(v) Aimbot.Settings.AimSmoothingSpeed = v end })
 
+    local predSec = AimbotTab:CreateSection({ Name = "Prediction" })
+    predSec:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.PredictionEnabled, Callback = function(v) Aimbot.Settings.PredictionEnabled = v end })
+    predSec:AddSlider({ Name = "Prediction X (%)", Value = Aimbot.Settings.PredictionX, Min = 0, Max = 100, Callback = function(v) Aimbot.Settings.PredictionX = v end })
+    predSec:AddSlider({ Name = "Prediction Y (%)", Value = Aimbot.Settings.PredictionY, Min = 0, Max = 100, Callback = function(v) Aimbot.Settings.PredictionY = v end })
+    predSec:AddSlider({ Name = "Base Time (s)", Value = Aimbot.Settings.PredictionTime, Min = 0.01, Max = 0.5, Decimals = 2, Callback = function(v) Aimbot.Settings.PredictionTime = v end })
+
     local secW = AimbotTab:CreateSection({ Name = "Visibility", Side = "Right" })
     secW:AddToggle({ Name = "WallCheck", Value = Aimbot.Settings.WallCheck, Callback = function(v) Aimbot.Settings.WallCheck = v end })
+    secW:AddDropdown({
+        Name = "WallCheck Mode",
+        Value = Aimbot.Settings.WallCheckMode,
+        List = wallCheckModes,
+        Callback = function(v) Aimbot.Settings.WallCheckMode = v end
+    })
+    secW:AddSlider({
+        Name = "Perfect Delay Tolerance (s)",
+        Value = Aimbot.Settings.WallCheckDelay,
+        Min = 0, Max = 1, Decimals = 2,
+        Callback = function(v) Aimbot.Settings.WallCheckDelay = v end
+    })
     secW:AddToggle({ Name = "Alive Check", Value = Aimbot.Settings.AliveCheck, Callback = function(v) Aimbot.Settings.AliveCheck = v end })
     secW:AddToggle({ Name = "Team Check", Value = Aimbot.Settings.TeamCheck.Enabled, Callback = function(v) Aimbot.Settings.TeamCheck.Enabled = v end })
     secW:AddDropdown({ Name = "Team Mode", Value = Aimbot.Settings.TeamCheck.Mode, List = teamModes, Callback = function(v) Aimbot.Settings.TeamCheck.Mode = v end })
@@ -2316,8 +2652,7 @@ task.delay(math.random(1,3), function()
     desyncSec:AddSlider({ Name = "Update Interval", Value = AntiAim.Desync.Settings.UpdateInterval, Min = 0.01, Max = 1, Decimals = 2, Callback = function(v) AntiAim.Desync.Settings.UpdateInterval = v end })
     desyncSec:AddSlider({ Name = "Smoothness", Value = AntiAim.Desync.Settings.Smoothness, Min = 0.01, Max = 1, Decimals = 2, Callback = function(v) AntiAim.Desync.Settings.Smoothness = v end })
     desyncSec:AddToggle({ Name = "Only In Air", Value = AntiAim.Desync.Settings.OnlyInAir, Callback = function(v) AntiAim.Desync.Settings.OnlyInAir = v end })
-    -- NEW
-    desyncSec:AddToggle({ Name = "Not In Air", Value = AntiAim.Desync.Settings.NotInAir, Callback = function(v) AntiAim.Desync.Settings.NotInAir = v end })
+    desyncSec:AddToggle({ Name = "Not In Air (OldPos: only update on ground)", Value = AntiAim.Desync.Settings.NotInAir, Callback = function(v) AntiAim.Desync.Settings.NotInAir = v end })
     desyncSec:AddToggle({ Name = "Freeze Old Position", Value = AntiAim.Desync.Settings.FreezeOldPos, Callback = function(v) AntiAim.Desync.Settings.FreezeOldPos = v end })
 
     desyncSec:AddToggle({
@@ -2421,6 +2756,11 @@ task.delay(math.random(1,3), function()
     speedSec:AddSlider({ Name = "Air Speed", Value = Speed.Settings.AirSpeed, Min = 1, Max = 500, Callback = function(v) Speed.Settings.AirSpeed = v end })
     speedSec:AddToggle({ Name = "In Air Only", Value = Speed.Settings.InAirOnly, Callback = function(v) Speed.Settings.InAirOnly = v end })
 
+    -- FastStop
+    local fsSec = MovementTab:CreateSection({ Name = "FastStop" })
+    fsSec:AddToggle({ Name = "Enabled", Value = FastStop.Settings.Enabled, Callback = function(v) FastStop.Settings.Enabled = v end })
+    fsSec:AddToggle({ Name = "Also stop Y velocity (falling)", Value = FastStop.Settings.StopY, Callback = function(v) FastStop.Settings.StopY = v end })
+
     -- Noclip
     local noclipSec = MovementTab:CreateSection({ Name = "Noclip", Side = "Right" })
     noclipSec:AddToggle({ Name = "Enabled", Value = Noclip.Settings.Enabled, Callback = function(v) Noclip.Settings.Enabled = v end })
@@ -2518,7 +2858,9 @@ task.delay(math.random(1,3), function()
     cfgSec:AddButton({ Name = "Load Config", Callback = function()
         if not currentConfigName or currentConfigName == "" then ShowError("Enter config name"); return end
         local ok, where = Config_Load(currentConfigName)
-        if ok then ShowError("Loaded: " .. currentConfigName)
+        if ok then
+            ShowError("Loaded: " .. currentConfigName)
+            task.defer(ApplyAllEnabledStates)
         else ShowError("Load failed: " .. tostring(where)) end
     end })
 
@@ -2543,7 +2885,7 @@ task.delay(math.random(1,3), function()
     -- Main
     local mainSec = SettingsTab:CreateSection({ Name = "Main" })
     mainSec:AddButton({ Name = "Reset All", Callback = function()
-        Aimbot.Settings = { Enabled = false, TeamCheck = {Enabled = true, Mode = "Enemies", TreatNeutralAsEnemy = true}, AliveCheck = true, WallCheck = false, FallbackToVisible = false, AimSmoothingSpeed = 6, TriggerKey = "MouseButton2", Toggle = false, LockPart = "Head", AimMethod = "Smooth", SilentAim = true, SilentAimMode = "Camera", IgnoreFOV = false, CheckFromPlayerOnTP = true, AutoShoot = {Enabled = false, ShootKey = "MouseButton1", FireRate = 0.05, OnlyWhenAiming = true, AutoStop = {Enabled = false, Time = 0.1}} }
+        Aimbot.Settings = { Enabled = false, TeamCheck = {Enabled = true, Mode = "Enemies", TreatNeutralAsEnemy = true}, AliveCheck = true, WallCheck = false, FallbackToVisible = false, WallCheckMode = "Perfect", WallCheckDelay = 0.15, AimSmoothingSpeed = 6, TriggerKey = "MouseButton2", Toggle = false, LockPart = "Head", AimMethod = "Smooth", SilentAim = true, SilentAimMode = "Camera", IgnoreFOV = false, CheckFromPlayerOnTP = true, PredictionEnabled = false, PredictionX = 0, PredictionY = 0, PredictionTime = 0.15, AutoShoot = {Enabled = false, ShootKey = "MouseButton1", FireRate = 0.05, OnlyWhenAiming = true, AutoStop = {Enabled = false, Time = 0.1}} }
         Aimbot.FOVSettings = {Enabled = true, Visible = true, Amount = 90}
         WallHack.Functions.ResetSettings()
         AntiAim.Functions.ResetSettings()
@@ -2552,18 +2894,19 @@ task.delay(math.random(1,3), function()
         Fly.Functions.ResetSettings()
         Bhop.Functions.ResetSettings()
         Speed.Functions.ResetSettings()
+        FastStop.Functions.ResetSettings()
         AutoStrafer.Functions.ResetSettings()
         Noclip.Functions.ResetSettings()
         getgenv().AirHub.Logging = {Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18}
         getgenv().AirHub.Sound = { HitsoundEnabled = false, HitsoundID = 83717596220569, HitsoundVolume = 1, KillsoundEnabled = false, KillsoundID = 83717596220569, KillsoundVolume = 1 }
-        if Library.ResetAll then Library.ResetAll() end
+        if Library.ResetAll then pcall(function() Library.ResetAll() end) end
         ApplyGlowToAll()
         ShowError("All settings reset")
     end })
 
     mainSec:AddButton({ Name = "Rejoin", Callback = Rejoin })
     mainSec:AddButton({ Name = "Server Hop", Callback = ServerHop })
-    mainSec:AddButton({ Name = "Exit (Unload All)", Callback = function() Library:Unload() end })
+    mainSec:AddButton({ Name = "Exit (Unload All)", Callback = function() SafeUnload() end })
 
     task.defer(UpdateConfigListUI)
     ShowError("AirHub | Strafe Helper | Silent Aim | Ghost | Fly | Configs")
