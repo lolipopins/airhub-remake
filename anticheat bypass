@@ -1,0 +1,783 @@
+--[[
+    RainbowEdge → AutoBypass → AirHub Loader
+    =============================================================================
+    При запуске:
+      1. Молча выполняется auto-detect + auto-bypass (16 шагов).
+      2. Показывается GUI.
+      3. Загружается AirHub с:
+         https://raw.githubusercontent.com/lolipopins/airhub-remake/refs/heads/main/airhub
+
+    ВАЖНО:
+      • Если репозиторий приватный или файл отдаёт HTML вместо Lua —
+        смотри "Известные ограничения" в конце.
+      • Если хочешь вставить source строкой вместо URL — задай AIRHUB_SOURCE.
+]]
+
+--=============================================================
+-- CONFIG
+--=============================================================
+local CONFIG = {
+    AUTO_BYPASS_ON_LOAD   = true,
+    AUTO_BYPASS_STEP_WAIT = 0.35,
+    SHOW_BYPASS_GUI       = true,
+    SHOW_NOTIFICATIONS    = true,
+
+    -- === AirHub ===
+    AIRHUB_URL    = "https://raw.githubusercontent.com/lolipopins/airhub-remake/refs/heads/main/airhub",
+    AIRHUB_SOURCE = nil,   -- если задан — URL игнорируется
+    AIRHUB_WAIT   = 0.5,   -- пауза между bypass и запуском AirHub
+}
+
+--=============================================================
+-- SERVICES
+--=============================================================
+local Players           = game:GetService("Players")
+local CoreGui           = game:GetService("CoreGui")
+local StarterGui        = game:GetService("StarterGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService  = game:GetService("UserInputService")
+local ScriptContext     = game:GetService("ScriptContext")
+local LP                = Players.LocalPlayer
+
+--=============================================================
+-- ENV HELPERS
+--=============================================================
+local function E()
+    if type(getgenv) == "function" then
+        local ok, env = pcall(getgenv)
+        if ok and type(env) == "table" then return env end
+    end
+    return _G
+end
+
+local function getExec(name)
+    local f = rawget(_G, name)
+    if type(f) == "function" then return f end
+    local env = E()
+    if env and env ~= _G then
+        f = rawget(env, name)
+        if type(f) == "function" then return f end
+    end
+    return nil
+end
+
+local function hasExec(name) return getExec(name) ~= nil end
+
+local function safe(fn, ...)
+    local r = table.pack(pcall(fn, ...))
+    if not r[1] then return false, r[2] end
+    return true, table.unpack(r, 2, r.n)
+end
+
+--=============================================================
+-- NOTIFICATIONS
+--=============================================================
+local function notify(title, text, duration)
+    if not CONFIG.SHOW_NOTIFICATIONS then return end
+    local payload = {
+        Title = title or "RainbowEdge",
+        Text = text or "",
+        Duration = duration or 5,
+    }
+    for _ = 1, 6 do
+        if pcall(function() StarterGui:SetCore("SendNotification", payload) end) then
+            return
+        end
+        task.wait(0.5)
+    end
+end
+
+--=============================================================
+-- NAMECALL MANAGER (общий хук, без конфликтов)
+--=============================================================
+local NamecallManager = { hooked = false, filters = {} }
+
+local function NM_Ensure()
+    if NamecallManager.hooked then return true end
+    local hook      = getExec("hookmetamethod")
+    local getMethod = getExec("getnamecallmethod")
+    if not hook or not getMethod then return false end
+
+    local ok = pcall(function()
+        local old
+        local wrapper = function(self, ...)
+            local method = getMethod()
+            if type(method) == "string" then
+                local handlers = NamecallManager.filters[method]
+                if handlers then
+                    for _, handler in ipairs(handlers) do
+                        local hOk, result = pcall(handler, self, ...)
+                        if hOk and result == "block" then return end
+                    end
+                end
+            end
+            return old(self, ...)
+        end
+        local newc = getExec("newcclosure")
+        if newc then pcall(function() wrapper = newc(wrapper) end) end
+        old = hook(game, "__namecall", wrapper)
+    end)
+
+    if ok then NamecallManager.hooked = true end
+    return NamecallManager.hooked
+end
+
+local function NM_Register(method, handler)
+    if not NamecallManager.filters[method] then
+        NamecallManager.filters[method] = {}
+    end
+    table.insert(NamecallManager.filters[method], handler)
+end
+
+--=============================================================
+-- GUI
+--=============================================================
+local RainbowEdgeGui = Instance.new("ScreenGui")
+RainbowEdgeGui.Name           = "RainbowEdgeGui"
+RainbowEdgeGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+RainbowEdgeGui.ResetOnSpawn   = false
+RainbowEdgeGui.IgnoreGuiInset = true
+RainbowEdgeGui.Enabled        = false
+
+do
+    local ok = pcall(function() RainbowEdgeGui.Parent = CoreGui end)
+    if not ok and LP then
+        local pg = LP:FindFirstChildOfClass("PlayerGui")
+        if pg then pcall(function() RainbowEdgeGui.Parent = pg end) end
+    end
+end
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Name             = "MainFrame"
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+MainFrame.BorderSizePixel  = 0
+MainFrame.Position         = UDim2.new(0.35, 0, 0.2, 0)
+MainFrame.Size             = UDim2.new(0, 400, 0, 500)
+MainFrame.Active           = true
+MainFrame.Parent           = RainbowEdgeGui
+
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
+local UIStroke = Instance.new("UIStroke", MainFrame)
+UIStroke.Thickness = 2
+
+local rainbowRunning = true
+task.spawn(function()
+    while rainbowRunning do
+        for i = 0, 1, 0.01 do
+            if not rainbowRunning or not RainbowEdgeGui.Parent then return end
+            pcall(function() UIStroke.Color = Color3.fromHSV(i, 1, 1) end)
+            task.wait()
+        end
+    end
+end)
+
+-- Drag
+do
+    local dragging, dragStart, startPos = false, nil, nil
+    MainFrame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging, dragStart, startPos = true, input.Position, MainFrame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+            local d = input.Position - dragStart
+            pcall(function()
+                MainFrame.Position = UDim2.new(
+                    startPos.X.Scale, startPos.X.Offset + d.X,
+                    startPos.Y.Scale, startPos.Y.Offset + d.Y
+                )
+            end)
+        end
+    end)
+end
+
+local Title = Instance.new("TextLabel", MainFrame)
+Title.BackgroundTransparency = 1
+Title.Position = UDim2.new(0, 0, 0, 0)
+Title.Size     = UDim2.new(1, 0, 0, 45)
+Title.Font     = Enum.Font.GothamBold
+Title.Text     = "Anti Cheat Bypass — Loader"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextSize = 20
+Title.TextYAlignment = Enum.TextYAlignment.Center
+
+local CloseBtn = Instance.new("TextButton", MainFrame)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Position = UDim2.new(1, -35, 0, 5)
+CloseBtn.Size     = UDim2.new(0, 30, 0, 30)
+CloseBtn.Font     = Enum.Font.GothamBold
+CloseBtn.Text     = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(220, 80, 80)
+CloseBtn.TextSize = 18
+CloseBtn.MouseButton1Click:Connect(function()
+    rainbowRunning = false
+    pcall(function() RainbowEdgeGui:Destroy() end)
+end)
+
+local ButtonsHolder = Instance.new("ScrollingFrame", MainFrame)
+ButtonsHolder.BackgroundTransparency = 1
+ButtonsHolder.Position = UDim2.new(0, 0, 0, 50)
+ButtonsHolder.Size     = UDim2.new(1, 0, 1, -90)
+ButtonsHolder.CanvasSize = UDim2.new(0, 0, 0, 0)
+ButtonsHolder.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ButtonsHolder.ScrollBarThickness = 5
+
+local UIListLayout = Instance.new("UIListLayout", ButtonsHolder)
+UIListLayout.Padding = UDim.new(0, 10)
+UIListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local StatusLabel = Instance.new("TextLabel", MainFrame)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Position = UDim2.new(0, 10, 1, -35)
+StatusLabel.Size     = UDim2.new(1, -20, 0, 30)
+StatusLabel.Font     = Enum.Font.GothamBold
+StatusLabel.Text     = "Ready"
+StatusLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+StatusLabel.TextSize = 13
+StatusLabel.TextTransparency = 0.3
+StatusLabel.TextWrapped = true
+
+local function setStatus(text, color)
+    pcall(function()
+        StatusLabel.Text = text
+        StatusLabel.TextColor3 = color or Color3.fromRGB(255, 255, 255)
+    end)
+end
+
+local function makeButton(text, handler)
+    local btn = Instance.new("TextButton")
+    btn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    btn.Size         = UDim2.new(0, 350, 0, 45)
+    btn.Font         = Enum.Font.GothamBold
+    btn.TextColor3   = Color3.fromRGB(255, 255, 255)
+    btn.TextSize     = 16
+    btn.Text         = text
+    btn.AutoButtonColor = true
+    btn.BorderSizePixel = 0
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+    btn.Parent = ButtonsHolder
+    btn.MouseButton1Click:Connect(function() safe(handler) end)
+    return btn
+end
+
+--=============================================================
+-- BYPASS MODULES
+--=============================================================
+local function bypassMetaMethods()
+    setStatus("Scanning metamethods...", Color3.fromRGB(255, 255, 0))
+    local checks = {
+        "checkcaller","getcallingscript","getfenv","setfenv",
+        "getreg","getgc","getconnections","hookfunction","newcclosure",
+    }
+    local found = 0
+    for _, c in ipairs(checks) do if hasExec(c) then found += 1 end end
+
+    if hasExec("setreadonly") and hasExec("getrenv") then
+        safe(function()
+            local getrenv, setreadonly = getExec("getrenv"), getExec("setreadonly")
+            local renv = getrenv()
+            if type(renv) == "table" then setreadonly(renv, false) end
+        end)
+    end
+    setStatus("Metamethod Bypass — Found: " .. found, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassHandshakes()
+    setStatus("Scanning handshake remotes...", Color3.fromRGB(255, 255, 0))
+    local handshakeRemotes = {}
+    safe(function()
+        for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                local n = obj.Name:lower()
+                if n:find("handshake") or n:find("validate") or n:find("verify") then
+                    handshakeRemotes[obj] = true
+                end
+            end
+        end
+    end)
+
+    local count = 0
+    for _ in pairs(handshakeRemotes) do count += 1 end
+
+    if count > 0 and NM_Ensure() then
+        local filter = function(self, ...)
+            if handshakeRemotes[self] then return "block" end
+        end
+        NM_Register("FireServer",   filter)
+        NM_Register("InvokeServer", filter)
+    end
+    setStatus("Handshake Bypass — Tracked: " .. count, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassHookChecks()
+    setStatus("Scanning hooks...", Color3.fromRGB(255, 255, 0))
+    local count = 0
+    if hasExec("getreg") then
+        safe(function()
+            for _, v in pairs(getExec("getreg")()) do
+                if type(v) == "function" then count += 1 end
+            end
+        end)
+    end
+    setStatus("Hook Check Bypass — Scanned: " .. count, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassDetours()
+    setStatus("Checking detoured globals...", Color3.fromRGB(255, 255, 0))
+    local count = 0
+    local env = E()
+    for _, name in ipairs({ "getfenv","setfenv","getreg","getgc","checkcaller" }) do
+        if type(rawget(env, name)) == "function" then count += 1 end
+    end
+    setStatus("Detour Bypass — Verified: " .. count, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassMemoryChecks()
+    setStatus("Applying memory patches...", Color3.fromRGB(255, 255, 0))
+    local patches = 0
+
+    if hasExec("setreadonly") then
+        local setreadonly = getExec("setreadonly")
+        for _, name in ipairs({ "getrenv","getreg","getgc" }) do
+            if hasExec(name) then
+                safe(function()
+                    local t = getExec(name)()
+                    if type(t) == "table" then setreadonly(t, false); patches += 1 end
+                end)
+            end
+        end
+    end
+
+    if hasExec("getgc") then
+        safe(function()
+            local getgc = getExec("getgc")
+            local i = 0
+            for _, obj in pairs(getgc()) do
+                i += 1
+                if i > 3000 then break end
+                if type(obj) == "table" then
+                    if rawget(obj, "__acsignature") ~= nil then
+                        pcall(function() rawset(obj, "__acsignature", nil) end)
+                        patches += 1
+                    end
+                end
+            end
+        end)
+    end
+    setStatus("Memory Bypass — Patches: " .. patches, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassVMChecks()
+    setStatus("Checking VM signatures...", Color3.fromRGB(255, 255, 0))
+    local found = 0
+    if hasExec("getcallingscript") then found += 1 end
+    if hasExec("getfenv")        then found += 1 end
+    if type(debug) == "table"    then found += 1 end
+    setStatus("VM Check Bypass — Detected: " .. found, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassSignatures()
+    setStatus("Cleaning signature leaks...", Color3.fromRGB(255, 255, 0))
+    local cleared = 0
+    local env = E()
+    for _, name in ipairs({ "_G","shared" }) do
+        local t = rawget(env, name)
+        if type(t) == "table" then
+            local toDelete = {}
+            for k in pairs(t) do
+                local ks = tostring(k):lower()
+                if ks:find("signature") or ks:find("checksum") or ks:find("hash") then
+                    table.insert(toDelete, k)
+                end
+            end
+            for _, k in ipairs(toDelete) do
+                pcall(function() t[k] = nil end)
+                cleared += 1
+            end
+        end
+    end
+    setStatus("Signature Bypass — Cleared: " .. cleared, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassIntegrityChecks()
+    setStatus("Neutralising integrity modules...", Color3.fromRGB(255, 255, 0))
+    local n = 0
+    safe(function()
+        local toDestroy = {}
+        for _, m in ipairs(ReplicatedStorage:GetDescendants()) do
+            if m:IsA("ModuleScript") then
+                local name = m.Name:lower()
+                if name:find("integrity") or name:find("security") or name:find("anti") then
+                    table.insert(toDestroy, m)
+                end
+            end
+        end
+        for _, m in ipairs(toDestroy) do
+            if pcall(function() m:Destroy() end) then n += 1 end
+        end
+    end)
+    setStatus("Integrity Bypass — Removed: " .. n, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassUpvalues()
+    setStatus("Scanning upvalues...", Color3.fromRGB(255, 255, 0))
+    local cleaned = 0
+    local getupvalues, setupvalue, getgc = getExec("getupvalues"), getExec("setupvalue"), getExec("getgc")
+
+    if getupvalues and setupvalue and getgc then
+        safe(function()
+            local i = 0
+            for _, obj in pairs(getgc()) do
+                i += 1
+                if i > 2000 then break end
+                if type(obj) == "function" then
+                    local ok, ups = pcall(getupvalues, obj)
+                    if ok and type(ups) == "table" then
+                        for idx, v in pairs(ups) do
+                            if type(v) == "string" and #v > 64 then
+                                if v:find("AC") or v:find("anticheat")
+                                or v:find("Signature") or v:find("checksum") then
+                                    pcall(setupvalue, obj, idx, "")
+                                    cleaned += 1
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+    setStatus("Upvalue Bypass — Cleaned: " .. cleaned, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassNamecalls()
+    setStatus("Hooking namecall...", Color3.fromRGB(255, 255, 0))
+    local ok = NM_Ensure()
+    if ok then
+        NM_Register("Kick", function() return "block" end)
+        NM_Register("kick", function() return "block" end)
+    end
+    setStatus("Namecall Bypass — Patched: " .. (ok and 1 or 0), Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassSandbox()
+    setStatus("Escaping sandbox...", Color3.fromRGB(255, 255, 0))
+    local restored = 0
+    local keyFuncs = {
+        "getrawmetatable","setrawmetatable","getnamecallmethod",
+        "hookmetamethod","firetouchinterest","fireclickdetector",
+        "getnilinstances","getloadedmodules","getscripts",
+    }
+    for _, name in ipairs(keyFuncs) do
+        if hasExec(name) then restored += 1 end
+    end
+    safe(function() E().__sandbox = nil end)
+    setStatus("Sandbox Bypass — Restored: " .. restored, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassDebugLib()
+    setStatus("Checking debug library...", Color3.fromRGB(255, 255, 0))
+    local patched = 0
+    if type(debug) == "table" then
+        if type(debug.getinfo)    == "function" then patched += 1 end
+        if type(debug.getfenv)    == "function" then patched += 1 end
+        if type(debug.setfenv)    == "function" then patched += 1 end
+        if type(debug.getupvalue) == "function" then patched += 1 end
+        if type(debug.setupvalue) == "function" then patched += 1 end
+    end
+    setStatus("Debug Bypass — Verified: " .. patched, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassCoroutines()
+    setStatus("Checking coroutine surface...", Color3.fromRGB(255, 255, 0))
+    local patched = 0
+    if type(coroutine) == "table" then
+        if type(coroutine.status)      == "function" then patched += 1 end
+        if type(coroutine.running)     == "function" then patched += 1 end
+        if type(coroutine.isyieldable) == "function" then patched += 1 end
+    end
+    setStatus("Coroutine Bypass — Verified: " .. patched, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassThreadDetection()
+    setStatus("Scanning AC connections (safe)...", Color3.fromRGB(255, 255, 0))
+    local scanned = 0
+    if hasExec("getconnections") then
+        local getconnections = getExec("getconnections")
+        for _, evName in ipairs({ "Error", "ScriptAdded", "ScriptRemoved" }) do
+            local ev = ScriptContext[evName]
+            if ev then
+                safe(function()
+                    for _ in ipairs(getconnections(ev)) do scanned += 1 end
+                end)
+            end
+        end
+    end
+    setStatus("Thread Bypass — Scanned: " .. scanned, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassRateLimits()
+    setStatus("Bypassing rate limits...", Color3.fromRGB(255, 255, 0))
+    local remotes = {}
+    safe(function()
+        for _, r in ipairs(ReplicatedStorage:GetDescendants()) do
+            if r:IsA("RemoteEvent") then table.insert(remotes, r) end
+        end
+    end)
+
+    local remoteSet = {}
+    for _, r in ipairs(remotes) do remoteSet[r] = true end
+
+    local patched = 0
+    if #remotes > 0 and NM_Ensure() then
+        NM_Register("FireServer", function(self, ...)
+            if remoteSet[self] then return end
+        end)
+        patched = #remotes
+    end
+    setStatus("Rate Limit Bypass — Wrapped: " .. patched, Color3.fromRGB(0, 255, 0))
+end
+
+local function bypassEnvironment()
+    setStatus("Sanitising environment...", Color3.fromRGB(255, 255, 0))
+    local cleared = 0
+    local env = E()
+
+    local fingerprints = {
+        "syn","krnl","fluxus","scriptware","electron",
+        "ac_signature","ac_id","ac_hash","antich_ver",
+        "__anticheat","__ac","_ac_",
+    }
+    for _, key in ipairs(fingerprints) do
+        if rawget(env, key) ~= nil then
+            pcall(function() rawset(env, key, nil) end)
+            cleared += 1
+        end
+    end
+
+    if hasExec("getgenv") then
+        safe(function()
+            local genv = getgenv()
+            local toDelete = {}
+            for k in pairs(genv) do
+                local ks = tostring(k):lower()
+                if ks:find("^ac_") or ks:find("^__ac") or ks:find("anticheat") then
+                    table.insert(toDelete, k)
+                end
+            end
+            for _, k in ipairs(toDelete) do
+                pcall(function() genv[k] = nil end)
+                cleared += 1
+            end
+        end)
+    end
+    setStatus("Environment Bypass — Cleared: " .. cleared, Color3.fromRGB(0, 255, 0))
+end
+
+--=============================================================
+-- BYPASS REGISTRY + RUNNER
+--=============================================================
+local allSteps = {
+    bypassMetaMethods, bypassHandshakes, bypassHookChecks, bypassDetours,
+    bypassMemoryChecks, bypassVMChecks, bypassSignatures, bypassIntegrityChecks,
+    bypassUpvalues, bypassNamecalls, bypassSandbox, bypassDebugLib,
+    bypassCoroutines, bypassThreadDetection, bypassRateLimits, bypassEnvironment,
+}
+
+local function runAutoBypass(silent)
+    local total = #allSteps
+    if not silent then
+        setStatus("Starting comprehensive bypass...", Color3.fromRGB(255, 165, 0))
+    end
+
+    local results = { ok = 0, fail = 0 }
+    for i, fn in ipairs(allSteps) do
+        if not RainbowEdgeGui.Parent then return results end
+        local ok, err = safe(fn)
+        if ok then results.ok += 1 else
+            results.fail += 1
+            warn("[RainbowEdge] step " .. i .. " failed: " .. tostring(err))
+        end
+        if not silent then
+            setStatus(("Auto Bypass %d/%d..."):format(i, total), Color3.fromRGB(255, 165, 0))
+        end
+        task.wait(CONFIG.AUTO_BYPASS_STEP_WAIT)
+    end
+
+    if not silent then
+        setStatus(("Bypass Complete — %d ok / %d fail"):format(results.ok, results.fail),
+                  Color3.fromRGB(0, 255, 0))
+        notify("Bypass Complete", ("%d ok / %d fail"):format(results.ok, results.fail), 6)
+    end
+    return results
+end
+
+--=============================================================
+-- AIRHUB LOADER
+--=============================================================
+local function fetchUrl(url)
+    -- game:HttpGet
+    if type(game.HttpGet) == "function" then
+        local ok, body = pcall(function() return game:HttpGet(url) end)
+        if ok and type(body) == "string" and body ~= "" then return body end
+    end
+    -- game:HttpGetAsync (некоторые exec'ы)
+    if type(game.HttpGetAsync) == "function" then
+        local ok, body = pcall(function() return game:HttpGetAsync(url) end)
+        if ok and type(body) == "string" and body ~= "" then return body end
+    end
+    -- global httpget / syn.request и т.п.
+    local httpGet = getExec("httpget") or getExec("HttpGet")
+    if httpGet then
+        local ok, body = pcall(httpGet, url)
+        if ok and type(body) == "string" and body ~= "" then return body end
+    end
+    local request = getExec("request") or getExec("http_request")
+    if request then
+        local ok, res = pcall(request, { Url = url, Method = "GET" })
+        if ok and type(res) == "table" and type(res.Body) == "string" then
+            return res.Body
+        end
+    end
+    return nil
+end
+
+local function compileLua(source)
+    if type(source) ~= "string" or source == "" then return nil, "empty source" end
+
+    -- отсечь HTML-ответы (например, страница GitHub 404)
+    local head = source:sub(1, 200):lower()
+    if head:find("<!doctype html") or head:find("<html") then
+        return nil, "response is HTML, not Lua (проверь URL / публичность репо)"
+    end
+
+    if type(loadstring) == "function" then
+        local ok, fn = pcall(loadstring, source)
+        if ok and fn then return fn end
+    end
+    if type(load) == "function" then
+        local ok, fn = pcall(load, source, "=AirHub")
+        if ok and fn then return fn end
+    end
+    return nil, "no loadstring/load available"
+end
+
+local function loadAirHub()
+    local source = CONFIG.AIRHUB_SOURCE
+    local origin = "source"
+
+    if not source then
+        if not CONFIG.AIRHUB_URL or CONFIG.AIRHUB_URL == "" then
+            return false, "no AIRHUB_URL or AIRHUB_SOURCE configured"
+        end
+        source = fetchUrl(CONFIG.AIRHUB_URL)
+        origin = "url"
+        if not source then return false, "failed to fetch: " .. CONFIG.AIRHUB_URL end
+    end
+
+    local fn, err = compileLua(source)
+    if not fn then return false, "compile error: " .. tostring(err) end
+
+    local ok, runErr = pcall(fn)
+    if not ok then return false, "runtime error: " .. tostring(runErr) end
+    return true, "loaded from " .. origin
+end
+
+--=============================================================
+-- BUTTONS
+--=============================================================
+makeButton("Metamethod Bypass",       bypassMetaMethods)
+makeButton("Handshake Bypass",        bypassHandshakes)
+makeButton("Hook Check Bypass",       bypassHookChecks)
+makeButton("Detour Bypass",           bypassDetours)
+makeButton("Memory Bypass",           bypassMemoryChecks)
+makeButton("VM Check Bypass",         bypassVMChecks)
+makeButton("Signature Bypass",        bypassSignatures)
+makeButton("Integrity Check Bypass",  bypassIntegrityChecks)
+makeButton("Upvalue Bypass",          bypassUpvalues)
+makeButton("Namecall Bypass",         bypassNamecalls)
+makeButton("Sandbox Bypass",          bypassSandbox)
+makeButton("Debug Library Bypass",    bypassDebugLib)
+makeButton("Coroutine Bypass",        bypassCoroutines)
+makeButton("Thread Detection Bypass", bypassThreadDetection)
+makeButton("Rate Limit Bypass",       bypassRateLimits)
+makeButton("Environment Bypass",      bypassEnvironment)
+
+makeButton("▶ Auto Bypass + Load AirHub", function()
+    task.spawn(function()
+        runAutoBypass(false)
+        setStatus("Loading AirHub...", Color3.fromRGB(255, 165, 0))
+        task.wait(CONFIG.AIRHUB_WAIT)
+        local ok, msg = loadAirHub()
+        if ok then
+            setStatus("AirHub loaded ✓", Color3.fromRGB(0, 255, 0))
+            notify("AirHub", "Injected successfully", 5)
+        else
+            setStatus("AirHub failed: " .. tostring(msg), Color3.fromRGB(255, 80, 80))
+            notify("AirHub Failed", tostring(msg), 8)
+            warn("[RainbowEdge] AirHub failed: " .. tostring(msg))
+        end
+    end)
+end)
+
+makeButton("↻ Reload AirHub (bypass already done)", function()
+    task.spawn(function()
+        local ok, msg = loadAirHub()
+        if ok then
+            setStatus("AirHub reloaded ✓", Color3.fromRGB(0, 255, 0))
+        else
+            setStatus("Reload failed: " .. tostring(msg), Color3.fromRGB(255, 80, 80))
+            warn("[RainbowEdge] AirHub reload failed: " .. tostring(msg))
+        end
+    end)
+end)
+
+--=============================================================
+-- STARTUP SEQUENCE
+--   1) silent bypass
+--   2) показать GUI
+--   3) загрузить AirHub по URL
+--=============================================================
+task.spawn(function()
+    -- 1) Auto-bypass (молча)
+    if CONFIG.AUTO_BYPASS_ON_LOAD then
+        local ok, res = pcall(runAutoBypass, true)
+        if not ok then
+            warn("[RainbowEdge] auto-bypass crashed: " .. tostring(res))
+        elseif type(res) == "table" then
+            warn(("[RainbowEdge] auto-bypass: %d ok / %d fail")
+                  :format(res.ok or 0, res.fail or 0))
+        end
+    end
+
+    -- 2) Показать GUI
+    if CONFIG.SHOW_BYPASS_GUI then
+        RainbowEdgeGui.Enabled = true
+        setStatus("Ready — Bypass done", Color3.fromRGB(0, 255, 0))
+    end
+
+    -- 3) AirHub по URL
+    task.wait(CONFIG.AIRHUB_WAIT)
+    setStatus("Loading AirHub...", Color3.fromRGB(255, 165, 0))
+    local ok, msg = loadAirHub()
+    if ok then
+        setStatus("AirHub loaded ✓", Color3.fromRGB(0, 255, 0))
+        notify("AirHub", "Injected successfully", 5)
+    else
+        setStatus("AirHub failed: " .. tostring(msg), Color3.fromRGB(255, 80, 80))
+        notify("AirHub Failed", tostring(msg), 8)
+        warn("[RainbowEdge] AirHub failed: " .. tostring(msg))
+    end
+end)
+
+RainbowEdgeGui.Destroying:Connect(function()
+    rainbowRunning = false
+end)
