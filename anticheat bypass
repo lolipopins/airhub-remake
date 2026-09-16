@@ -1,51 +1,58 @@
 --[[
-    AutoDetect → AutoBypass → AirHub
+    AutoDetect → AutoBypass → Inject AirHub → Self-Cleanup
     =============================================================================
-    1. Auto-detect  — что вообще доступно в этом executor'е
-    2. Auto-bypass  — 16 шагов, каждый пишет ✓ / ✗ в консоль
-    3. Inject AirHub — тянет с GitHub, проверяет HTML, exec
+    1. Auto-detect        — лог в консоль
+    2. Auto-bypass        — 16 шагов, лог в консоль
+    3. Inject AirHub      — fetch + compile + exec
+    4. Self-Cleanup       — ПОСЛЕ успеха:
+                              • удаляется Loading GUI
+                              • чистятся getgenv() переменные лоадера
+                              • сбрасываются локальные ссылки
+                              • остаются только bypass-хуки (нужны AirHub)
 
-    Всё логируется в консоль (F9 / dev console).
-    Никакого GUI, никаких нотификаций.
+    Управление:
+      CONFIG.SHOW_LOADING_UI   — показывать ли индикатор загрузки (true/false)
+      CONFIG.CLEANUP_AFTER_LOAD — самоуничтожение после успеха (true/false)
+      CONFIG.KEEP_FAILED_UI    — оставить UI при ошибке (сек, 0 = сразу скрыть)
 ]]
 
 --=============================================================
 -- CONFIG
 --=============================================================
 local CONFIG = {
-    STEP_WAIT     = 0.15,   -- пауза между bypass-шагами
+    STEP_WAIT          = 0.15,
+    SHOW_LOADING_UI    = true,
+    CLEANUP_AFTER_LOAD = true,
+    KEEP_FAILED_UI     = 5,     -- сколько секунд держать UI при ошибке
+
     AIRHUB_URL    = "https://raw.githubusercontent.com/lolipopins/airhub-remake/refs/heads/main/airhub",
-    AIRHUB_SOURCE = nil,    -- если задан — URL игнорируется
+    AIRHUB_SOURCE = nil,
 }
 
 --=============================================================
 -- SERVICES
 --=============================================================
+local Players           = game:GetService("Players")
+local CoreGui           = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ScriptContext     = game:GetService("ScriptContext")
+local LP                = Players.LocalPlayer
 
 --=============================================================
--- LOGGING  (чистый вывод в консоль)
+-- LOGGING
 --=============================================================
-local LOG_PREFIX = "[Bypass]"
+local LOG_PREFIX = "[Loader]"
 
-local function L(msg)
-    warn(LOG_PREFIX .. " " .. tostring(msg))
+local function L(msg)  warn(LOG_PREFIX .. " " .. tostring(msg)) end
+local function OK(l, x)
+    local s = "  ✓  " .. l
+    if x then s = s .. "  (" .. tostring(x) .. ")" end
+    warn(LOG_PREFIX .. s)
 end
-
-local function OK(label, extra)
-    local line = "  ✓  " .. label
-    if extra then line = line .. "  (" .. tostring(extra) .. ")" end
-    warn(LOG_PREFIX .. line)
-end
-
-local function FAIL(label, reason)
-    warn(LOG_PREFIX .. "  ✗  " .. label .. "  →  " .. tostring(reason))
-end
-
-local function SECTION(title)
+local function FAIL(l, r) warn(LOG_PREFIX .. "  ✗  " .. l .. "  →  " .. tostring(r)) end
+local function SECTION(t)
     warn(LOG_PREFIX .. "─────────────────────────────────────────")
-    warn(LOG_PREFIX .. "  " .. title)
+    warn(LOG_PREFIX .. "  " .. t)
 end
 
 --=============================================================
@@ -79,84 +86,67 @@ local function safe(fn, ...)
 end
 
 --=============================================================
--- 1. AUTO-DETECT
+-- LOADING UI  (минимальный, самоуничтожается)
 --=============================================================
-local DETECT_GROUPS = {
-    ["Core"] = {
-        "getgenv", "getrenv", "getreg", "getgc",
-        "getrawmetatable", "setrawmetatable",
-        "setreadonly", "isreadonly",
-    },
-    ["Meta"] = {
-        "hookmetamethod", "getnamecallmethod",
-        "hookfunction", "newcclosure", "checkcaller",
-    },
-    ["Reflect"] = {
-        "getupvalues", "setupvalue", "getupvalue", "setupvalue",
-        "getconstants", "getinfo", "getproto",
-    },
-    ["Script"] = {
-        "getcallingscript", "getscriptclosure", "getloadedmodules",
-        "getscripts", "getnilinstances", "getconnections",
-    },
-    ["Input"] = {
-        "firetouchinterest", "fireclickdetector", "fireproximityprompt",
-    },
-    ["HTTP"] = {
-        "httpget", "HttpGet", "request", "http_request", "syn",
-    },
-}
+local LoadingGui, StatusText
 
-local function autoDetect()
-    SECTION("STEP 1 / 3  —  Auto-Detect")
+local function createLoadingUI()
+    if not CONFIG.SHOW_LOADING_UI then return end
 
-    local total = 0
-    local found = 0
-    local available = {}
+    LoadingGui = Instance.new("ScreenGui")
+    LoadingGui.Name = "LoaderStatusGui"
+    LoadingGui.ResetOnSpawn = false
+    LoadingGui.IgnoreGuiInset = true
+    LoadingGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
-    for group, names in pairs(DETECT_GROUPS) do
-        local foundInGroup = {}
-        for _, name in ipairs(names) do
-            total += 1
-            if hasExec(name) then
-                found += 1
-                table.insert(foundInGroup, name)
-                available[name] = true
-            end
-        end
-        if #foundInGroup > 0 then
-            OK(group, table.concat(foundInGroup, ", "))
-        else
-            FAIL(group, "nothing available")
-        end
+    local parentOk = pcall(function() LoadingGui.Parent = CoreGui end)
+    if not parentOk and LP then
+        local pg = LP:FindFirstChildOfClass("PlayerGui")
+        if pg then pcall(function() LoadingGui.Parent = pg end) end
     end
 
-    -- Особые проверки
-    local extras = {}
-    if type(loadstring) == "function" then
-        extras[#extras + 1] = "loadstring"
-        available.loadstring = true
-    end
-    if type(load) == "function" then
-        extras[#extras + 1] = "load"
-    end
-    if type(debug) == "table" then
-        extras[#extras + 1] = "debug"
-        available.debug = true
-    end
-    if type(coroutine) == "table" then
-        extras[#extras + 1] = "coroutine"
-    end
-    if #extras > 0 then
-        OK("Lua stdlib", table.concat(extras, ", "))
-    end
+    local frame = Instance.new("Frame", LoadingGui)
+    frame.Name = "StatusFrame"
+    frame.Size = UDim2.new(0, 340, 0, 40)
+    frame.Position = UDim2.new(0.5, -170, 0, 20)
+    frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    frame.BackgroundTransparency = 0.15
+    frame.BorderSizePixel = 0
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
 
-    L(string.format("  →  %d / %d executor functions detected", found, total))
-    return found, total, available
+    local stroke = Instance.new("UIStroke", frame)
+    stroke.Thickness = 1
+    stroke.Color = Color3.fromRGB(80, 80, 80)
+
+    StatusText = Instance.new("TextLabel", frame)
+    StatusText.Size = UDim2.new(1, -16, 1, 0)
+    StatusText.Position = UDim2.new(0, 8, 0, 0)
+    StatusText.BackgroundTransparency = 1
+    StatusText.Font = Enum.Font.GothamMedium
+    StatusText.TextSize = 14
+    StatusText.TextColor3 = Color3.fromRGB(230, 230, 230)
+    StatusText.TextXAlignment = Enum.TextXAlignment.Left
+    StatusText.Text = "Initializing..."
+end
+
+local function setLoadingStatus(text, color)
+    if not StatusText then return end
+    pcall(function()
+        StatusText.Text = text
+        StatusText.TextColor3 = color or Color3.fromRGB(230, 230, 230)
+    end)
+end
+
+local function destroyLoadingUI()
+    if LoadingGui then
+        pcall(function() LoadingGui:Destroy() end)
+        LoadingGui = nil
+        StatusText = nil
+    end
 end
 
 --=============================================================
--- NAMECALL MANAGER
+-- NAMECALL MANAGER  (единый hook — ОСТАЁТСЯ после cleanup)
 --=============================================================
 local NamecallManager = { hooked = false, filters = {} }
 
@@ -173,9 +163,9 @@ local function NM_Ensure()
             if type(method) == "string" then
                 local handlers = NamecallManager.filters[method]
                 if handlers then
-                    for _, handler in ipairs(handlers) do
-                        local hOk, result = pcall(handler, self, ...)
-                        if hOk and result == "block" then return end
+                    for _, h in ipairs(handlers) do
+                        local hOk, res = pcall(h, self, ...)
+                        if hOk and res == "block" then return end
                     end
                 end
             end
@@ -198,345 +188,325 @@ local function NM_Register(method, handler)
 end
 
 --=============================================================
--- BYPASS STEPS  (каждый возвращает label + count)
+-- 1. AUTO-DETECT
+--=============================================================
+local DETECT_GROUPS = {
+    ["Core"]    = { "getgenv","getrenv","getreg","getgc","getrawmetatable","setrawmetatable","setreadonly","isreadonly" },
+    ["Meta"]    = { "hookmetamethod","getnamecallmethod","hookfunction","newcclosure","checkcaller" },
+    ["Reflect"] = { "getupvalues","setupvalue","getconstants","getinfo","getproto" },
+    ["Script"]  = { "getcallingscript","getscriptclosure","getloadedmodules","getscripts","getnilinstances","getconnections" },
+    ["Input"]   = { "firetouchinterest","fireclickdetector","fireproximityprompt" },
+    ["HTTP"]    = { "httpget","HttpGet","request","http_request","syn" },
+}
+
+local function autoDetect()
+    SECTION("STEP 1 / 4  —  Auto-Detect")
+    setLoadingStatus("Detecting executor...", Color3.fromRGB(255, 220, 120))
+
+    local total, found = 0, 0
+    for group, names in pairs(DETECT_GROUPS) do
+        local got = {}
+        for _, name in ipairs(names) do
+            total += 1
+            if hasExec(name) then
+                found += 1
+                table.insert(got, name)
+            end
+        end
+        if #got > 0 then OK(group, table.concat(got, ", "))
+        else FAIL(group, "nothing available") end
+    end
+
+    local extras = {}
+    if type(loadstring) == "function" then extras[#extras + 1] = "loadstring" end
+    if type(load) == "function"       then extras[#extras + 1] = "load" end
+    if type(debug) == "table"         then extras[#extras + 1] = "debug" end
+    if type(coroutine) == "table"     then extras[#extras + 1] = "coroutine" end
+    if #extras > 0 then OK("Lua stdlib", table.concat(extras, ", ")) end
+
+    L(string.format("  →  %d / %d executor functions detected", found, total))
+    return found, total
+end
+
+--=============================================================
+-- 2. AUTO-BYPASS
 --=============================================================
 local steps = {}
 
-steps[#steps + 1] = {
-    name = "Metamethod Bypass",
-    fn = function()
-        local checks = {
-            "checkcaller","getcallingscript","getfenv","setfenv",
-            "getreg","getgc","getconnections","hookfunction","newcclosure",
-        }
-        local found = 0
-        for _, c in ipairs(checks) do
-            if hasExec(c) then found += 1 end
-        end
-        if hasExec("setreadonly") and hasExec("getrenv") then
-            safe(function()
-                local renv = getExec("getrenv")()
-                if type(renv) == "table" then getExec("setreadonly")(renv, false) end
-            end)
-        end
-        return found .. " executor fns found"
-    end,
-}
-
-steps[#steps + 1] = {
-    name = "Handshake Bypass",
-    fn = function()
-        local set = {}
+steps[#steps + 1] = { name = "Metamethod Bypass", fn = function()
+    local checks = { "checkcaller","getcallingscript","getfenv","setfenv","getreg","getgc","getconnections","hookfunction","newcclosure" }
+    local found = 0
+    for _, c in ipairs(checks) do if hasExec(c) then found += 1 end end
+    if hasExec("setreadonly") and hasExec("getrenv") then
         safe(function()
-            for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-                if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-                    local n = obj.Name:lower()
-                    if n:find("handshake") or n:find("validate") or n:find("verify") then
-                        set[obj] = true
-                    end
+            local renv = getExec("getrenv")()
+            if type(renv) == "table" then getExec("setreadonly")(renv, false) end
+        end)
+    end
+    return found .. " executor fns found"
+end }
+
+steps[#steps + 1] = { name = "Handshake Bypass", fn = function()
+    local set = {}
+    safe(function()
+        for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                local n = obj.Name:lower()
+                if n:find("handshake") or n:find("validate") or n:find("verify") then set[obj] = true end
+            end
+        end
+    end)
+    local count = 0
+    for _ in pairs(set) do count += 1 end
+    if count > 0 and NM_Ensure() then
+        local filter = function(self) if set[self] then return "block" end end
+        NM_Register("FireServer",   filter)
+        NM_Register("InvokeServer", filter)
+    end
+    return count .. " handshake remotes tracked"
+end }
+
+steps[#steps + 1] = { name = "Hook Check Bypass", fn = function()
+    local count = 0
+    if hasExec("getreg") then
+        safe(function()
+            for _, v in pairs(getExec("getreg")()) do
+                if type(v) == "function" then count += 1 end
+            end
+        end)
+    end
+    return count .. " functions scanned"
+end }
+
+steps[#steps + 1] = { name = "Detour Bypass", fn = function()
+    local count = 0
+    local env = E()
+    for _, name in ipairs({ "getfenv","setfenv","getreg","getgc","checkcaller" }) do
+        if type(rawget(env, name)) == "function" then count += 1 end
+    end
+    return count .. " globals verified"
+end }
+
+steps[#steps + 1] = { name = "Memory Bypass", fn = function()
+    local patches = 0
+    if hasExec("setreadonly") then
+        local setro = getExec("setreadonly")
+        for _, name in ipairs({ "getrenv","getreg","getgc" }) do
+            if hasExec(name) then
+                safe(function()
+                    local t = getExec(name)()
+                    if type(t) == "table" then setro(t, false); patches += 1 end
+                end)
+            end
+        end
+    end
+    if hasExec("getgc") then
+        safe(function()
+            local i = 0
+            for _, obj in pairs(getExec("getgc")()) do
+                i += 1
+                if i > 3000 then break end
+                if type(obj) == "table" and rawget(obj, "__acsignature") ~= nil then
+                    pcall(function() rawset(obj, "__acsignature", nil) end)
+                    patches += 1
                 end
             end
         end)
-        local count = 0
-        for _ in pairs(set) do count += 1 end
-        if count > 0 and NM_Ensure() then
-            local filter = function(self) if set[self] then return "block" end end
-            NM_Register("FireServer",   filter)
-            NM_Register("InvokeServer", filter)
-        end
-        return count .. " handshake remotes tracked"
-    end,
-}
+    end
+    return patches .. " patches applied"
+end }
 
-steps[#steps + 1] = {
-    name = "Hook Check Bypass",
-    fn = function()
-        local count = 0
-        if hasExec("getreg") then
-            safe(function()
-                for _, v in pairs(getExec("getreg")()) do
-                    if type(v) == "function" then count += 1 end
+steps[#steps + 1] = { name = "VM Check Bypass", fn = function()
+    local found = 0
+    if hasExec("getcallingscript") then found += 1 end
+    if hasExec("getfenv")        then found += 1 end
+    if type(debug) == "table"    then found += 1 end
+    return found .. " VM vectors checked"
+end }
+
+steps[#steps + 1] = { name = "Signature Bypass", fn = function()
+    local cleared = 0
+    local env = E()
+    for _, name in ipairs({ "_G","shared" }) do
+        local t = rawget(env, name)
+        if type(t) == "table" then
+            local toDelete = {}
+            for k in pairs(t) do
+                local ks = tostring(k):lower()
+                if ks:find("signature") or ks:find("checksum") or ks:find("hash") then
+                    table.insert(toDelete, k)
                 end
-            end)
+            end
+            for _, k in ipairs(toDelete) do
+                pcall(function() t[k] = nil end)
+                cleared += 1
+            end
         end
-        return count .. " functions scanned"
-    end,
-}
+    end
+    return cleared .. " signatures cleared"
+end }
 
-steps[#steps + 1] = {
-    name = "Detour Bypass",
-    fn = function()
-        local count = 0
-        local env = E()
-        for _, name in ipairs({ "getfenv","setfenv","getreg","getgc","checkcaller" }) do
-            if type(rawget(env, name)) == "function" then count += 1 end
-        end
-        return count .. " globals verified"
-    end,
-}
-
-steps[#steps + 1] = {
-    name = "Memory Bypass",
-    fn = function()
-        local patches = 0
-        if hasExec("setreadonly") then
-            local setro = getExec("setreadonly")
-            for _, name in ipairs({ "getrenv","getreg","getgc" }) do
-                if hasExec(name) then
-                    safe(function()
-                        local t = getExec(name)()
-                        if type(t) == "table" then setro(t, false); patches += 1 end
-                    end)
+steps[#steps + 1] = { name = "Integrity Bypass", fn = function()
+    local n = 0
+    safe(function()
+        local toDestroy = {}
+        for _, m in ipairs(ReplicatedStorage:GetDescendants()) do
+            if m:IsA("ModuleScript") then
+                local name = m.Name:lower()
+                if name:find("integrity") or name:find("security") or name:find("anti") then
+                    table.insert(toDestroy, m)
                 end
             end
         end
-        if hasExec("getgc") then
-            safe(function()
-                local i = 0
-                for _, obj in pairs(getExec("getgc")()) do
-                    i += 1
-                    if i > 3000 then break end
-                    if type(obj) == "table" and rawget(obj, "__acsignature") ~= nil then
-                        pcall(function() rawset(obj, "__acsignature", nil) end)
-                        patches += 1
-                    end
-                end
-            end)
+        for _, m in ipairs(toDestroy) do
+            if pcall(function() m:Destroy() end) then n += 1 end
         end
-        return patches .. " patches applied"
-    end,
-}
+    end)
+    return n .. " modules removed"
+end }
 
-steps[#steps + 1] = {
-    name = "VM Check Bypass",
-    fn = function()
-        local found = 0
-        if hasExec("getcallingscript") then found += 1 end
-        if hasExec("getfenv")        then found += 1 end
-        if type(debug) == "table"    then found += 1 end
-        return found .. " VM vectors checked"
-    end,
-}
-
-steps[#steps + 1] = {
-    name = "Signature Bypass",
-    fn = function()
-        local cleared = 0
-        local env = E()
-        for _, name in ipairs({ "_G","shared" }) do
-            local t = rawget(env, name)
-            if type(t) == "table" then
-                local toDelete = {}
-                for k in pairs(t) do
-                    local ks = tostring(k):lower()
-                    if ks:find("signature") or ks:find("checksum") or ks:find("hash") then
-                        table.insert(toDelete, k)
-                    end
-                end
-                for _, k in ipairs(toDelete) do
-                    pcall(function() t[k] = nil end)
-                    cleared += 1
-                end
-            end
-        end
-        return cleared .. " signatures cleared"
-    end,
-}
-
-steps[#steps + 1] = {
-    name = "Integrity Bypass",
-    fn = function()
-        local n = 0
+steps[#steps + 1] = { name = "Upvalue Bypass", fn = function()
+    local cleaned = 0
+    local getupvalues, setupvalue, getgc = getExec("getupvalues"), getExec("setupvalue"), getExec("getgc")
+    if getupvalues and setupvalue and getgc then
         safe(function()
-            local toDestroy = {}
-            for _, m in ipairs(ReplicatedStorage:GetDescendants()) do
-                if m:IsA("ModuleScript") then
-                    local name = m.Name:lower()
-                    if name:find("integrity") or name:find("security") or name:find("anti") then
-                        table.insert(toDestroy, m)
-                    end
-                end
-            end
-            for _, m in ipairs(toDestroy) do
-                if pcall(function() m:Destroy() end) then n += 1 end
-            end
-        end)
-        return n .. " modules removed"
-    end,
-}
-
-steps[#steps + 1] = {
-    name = "Upvalue Bypass",
-    fn = function()
-        local cleaned = 0
-        local getupvalues  = getExec("getupvalues")
-        local setupvalue   = getExec("setupvalue")
-        local getgc        = getExec("getgc")
-        if getupvalues and setupvalue and getgc then
-            safe(function()
-                local i = 0
-                for _, obj in pairs(getgc()) do
-                    i += 1
-                    if i > 2000 then break end
-                    if type(obj) == "function" then
-                        local ok, ups = pcall(getupvalues, obj)
-                        if ok and type(ups) == "table" then
-                            for idx, v in pairs(ups) do
-                                if type(v) == "string" and #v > 64 then
-                                    if v:find("AC") or v:find("anticheat")
-                                    or v:find("Signature") or v:find("checksum") then
-                                        pcall(setupvalue, obj, idx, "")
-                                        cleaned += 1
-                                    end
+            local i = 0
+            for _, obj in pairs(getgc()) do
+                i += 1
+                if i > 2000 then break end
+                if type(obj) == "function" then
+                    local ok, ups = pcall(getupvalues, obj)
+                    if ok and type(ups) == "table" then
+                        for idx, v in pairs(ups) do
+                            if type(v) == "string" and #v > 64 then
+                                if v:find("AC") or v:find("anticheat") or v:find("Signature") or v:find("checksum") then
+                                    pcall(setupvalue, obj, idx, "")
+                                    cleaned += 1
                                 end
                             end
                         end
                     end
                 end
-            end)
-        end
-        return cleaned .. " upvalues cleaned"
-    end,
-}
-
-steps[#steps + 1] = {
-    name = "Namecall Bypass",
-    fn = function()
-        local ok = NM_Ensure()
-        if ok then
-            NM_Register("Kick", function() return "block" end)
-            NM_Register("kick", function() return "block" end)
-        end
-        return ok and "hook installed (Kick blocked)" or "hookmetamethod unavailable"
-    end,
-}
-
-steps[#steps + 1] = {
-    name = "Sandbox Bypass",
-    fn = function()
-        local restored = 0
-        local keyFuncs = {
-            "getrawmetatable","setrawmetatable","getnamecallmethod",
-            "hookmetamethod","firetouchinterest","fireclickdetector",
-            "getnilinstances","getloadedmodules","getscripts",
-        }
-        for _, name in ipairs(keyFuncs) do
-            if hasExec(name) then restored += 1 end
-        end
-        safe(function() E().__sandbox = nil end)
-        return restored .. " capabilities verified"
-    end,
-}
-
-steps[#steps + 1] = {
-    name = "Debug Library Bypass",
-    fn = function()
-        local patched = 0
-        if type(debug) == "table" then
-            if type(debug.getinfo)    == "function" then patched += 1 end
-            if type(debug.getfenv)    == "function" then patched += 1 end
-            if type(debug.setfenv)    == "function" then patched += 1 end
-            if type(debug.getupvalue) == "function" then patched += 1 end
-            if type(debug.setupvalue) == "function" then patched += 1 end
-        end
-        return patched .. " debug fns verified"
-    end,
-}
-
-steps[#steps + 1] = {
-    name = "Coroutine Bypass",
-    fn = function()
-        local patched = 0
-        if type(coroutine) == "table" then
-            if type(coroutine.status)      == "function" then patched += 1 end
-            if type(coroutine.running)     == "function" then patched += 1 end
-            if type(coroutine.isyieldable) == "function" then patched += 1 end
-        end
-        return patched .. " coroutine fns verified"
-    end,
-}
-
-steps[#steps + 1] = {
-    name = "Thread Detection Bypass",
-    fn = function()
-        local scanned = 0
-        if hasExec("getconnections") then
-            local getconnections = getExec("getconnections")
-            for _, evName in ipairs({ "Error", "ScriptAdded", "ScriptRemoved" }) do
-                local ev = ScriptContext[evName]
-                if ev then
-                    safe(function()
-                        for _ in ipairs(getconnections(ev)) do scanned += 1 end
-                    end)
-                end
-            end
-        end
-        return scanned .. " connections audited (safe mode)"
-    end,
-}
-
-steps[#steps + 1] = {
-    name = "Rate Limit Bypass",
-    fn = function()
-        local remotes = {}
-        safe(function()
-            for _, r in ipairs(ReplicatedStorage:GetDescendants()) do
-                if r:IsA("RemoteEvent") then table.insert(remotes, r) end
             end
         end)
-        local set = {}
-        for _, r in ipairs(remotes) do set[r] = true end
+    end
+    return cleaned .. " upvalues cleaned"
+end }
 
-        local patched = 0
-        if #remotes > 0 and NM_Ensure() then
-            NM_Register("FireServer", function(self) if set[self] then return end end)
-            patched = #remotes
-        end
-        return patched .. " remotes wrapped"
-    end,
-}
+steps[#steps + 1] = { name = "Namecall Bypass", fn = function()
+    local ok = NM_Ensure()
+    if ok then
+        NM_Register("Kick", function() return "block" end)
+        NM_Register("kick", function() return "block" end)
+    end
+    return ok and "hook installed (Kick blocked)" or "hookmetamethod unavailable"
+end }
 
-steps[#steps + 1] = {
-    name = "Environment Bypass",
-    fn = function()
-        local cleared = 0
-        local env = E()
-        local fingerprints = {
-            "syn","krnl","fluxus","scriptware","electron",
-            "ac_signature","ac_id","ac_hash","antich_ver",
-            "__anticheat","__ac","_ac_",
-        }
-        for _, key in ipairs(fingerprints) do
-            if rawget(env, key) ~= nil then
-                pcall(function() rawset(env, key, nil) end)
-                cleared += 1
+steps[#steps + 1] = { name = "Sandbox Bypass", fn = function()
+    local restored = 0
+    local keyFuncs = {
+        "getrawmetatable","setrawmetatable","getnamecallmethod",
+        "hookmetamethod","firetouchinterest","fireclickdetector",
+        "getnilinstances","getloadedmodules","getscripts",
+    }
+    for _, name in ipairs(keyFuncs) do
+        if hasExec(name) then restored += 1 end
+    end
+    safe(function() E().__sandbox = nil end)
+    return restored .. " capabilities verified"
+end }
+
+steps[#steps + 1] = { name = "Debug Library Bypass", fn = function()
+    local patched = 0
+    if type(debug) == "table" then
+        if type(debug.getinfo)    == "function" then patched += 1 end
+        if type(debug.getfenv)    == "function" then patched += 1 end
+        if type(debug.setfenv)    == "function" then patched += 1 end
+        if type(debug.getupvalue) == "function" then patched += 1 end
+        if type(debug.setupvalue) == "function" then patched += 1 end
+    end
+    return patched .. " debug fns verified"
+end }
+
+steps[#steps + 1] = { name = "Coroutine Bypass", fn = function()
+    local patched = 0
+    if type(coroutine) == "table" then
+        if type(coroutine.status)      == "function" then patched += 1 end
+        if type(coroutine.running)     == "function" then patched += 1 end
+        if type(coroutine.isyieldable) == "function" then patched += 1 end
+    end
+    return patched .. " coroutine fns verified"
+end }
+
+steps[#steps + 1] = { name = "Thread Detection Bypass", fn = function()
+    local scanned = 0
+    if hasExec("getconnections") then
+        local getconnections = getExec("getconnections")
+        for _, evName in ipairs({ "Error","ScriptAdded","ScriptRemoved" }) do
+            local ev = ScriptContext[evName]
+            if ev then
+                safe(function()
+                    for _ in ipairs(getconnections(ev)) do scanned += 1 end
+                end)
             end
         end
-        if hasExec("getgenv") then
-            safe(function()
-                local genv = getgenv()
-                local toDelete = {}
-                for k in pairs(genv) do
-                    local ks = tostring(k):lower()
-                    if ks:find("^ac_") or ks:find("^__ac") or ks:find("anticheat") then
-                        table.insert(toDelete, k)
-                    end
-                end
-                for _, k in ipairs(toDelete) do
-                    pcall(function() genv[k] = nil end)
-                    cleared += 1
-                end
-            end)
-        end
-        return cleared .. " fingerprints cleared"
-    end,
-}
+    end
+    return scanned .. " connections audited (safe mode)"
+end }
 
---=============================================================
--- 2. AUTO-BYPASS RUNNER
---=============================================================
+steps[#steps + 1] = { name = "Rate Limit Bypass", fn = function()
+    local remotes = {}
+    safe(function()
+        for _, r in ipairs(ReplicatedStorage:GetDescendants()) do
+            if r:IsA("RemoteEvent") then table.insert(remotes, r) end
+        end
+    end)
+    local set = {}
+    for _, r in ipairs(remotes) do set[r] = true end
+    local patched = 0
+    if #remotes > 0 and NM_Ensure() then
+        NM_Register("FireServer", function(self) if set[self] then return end end)
+        patched = #remotes
+    end
+    return patched .. " remotes wrapped"
+end }
+
+steps[#steps + 1] = { name = "Environment Bypass", fn = function()
+    local cleared = 0
+    local env = E()
+    local fingerprints = {
+        "syn","krnl","fluxus","scriptware","electron",
+        "ac_signature","ac_id","ac_hash","antich_ver",
+        "__anticheat","__ac","_ac_",
+    }
+    for _, key in ipairs(fingerprints) do
+        if rawget(env, key) ~= nil then
+            pcall(function() rawset(env, key, nil) end)
+            cleared += 1
+        end
+    end
+    if hasExec("getgenv") then
+        safe(function()
+            local genv = getgenv()
+            local toDelete = {}
+            for k in pairs(genv) do
+                local ks = tostring(k):lower()
+                if ks:find("^ac_") or ks:find("^__ac") or ks:find("anticheat") then
+                    table.insert(toDelete, k)
+                end
+            end
+            for _, k in ipairs(toDelete) do
+                pcall(function() genv[k] = nil end)
+                cleared += 1
+            end
+        end)
+    end
+    return cleared .. " fingerprints cleared"
+end }
+
 local function autoBypass()
-    SECTION("STEP 2 / 3  —  Auto-Bypass")
+    SECTION("STEP 2 / 4  —  Auto-Bypass")
+    setLoadingStatus("Running bypass...", Color3.fromRGB(255, 220, 120))
 
     local ok_count, fail_count = 0, 0
     local total = #steps
@@ -577,9 +547,7 @@ local function fetchUrl(url)
     local request = getExec("request") or getExec("http_request")
     if request then
         local ok, res = pcall(request, { Url = url, Method = "GET" })
-        if ok and type(res) == "table" and type(res.Body) == "string" then
-            return res.Body
-        end
+        if ok and type(res) == "table" and type(res.Body) == "string" then return res.Body end
     end
     return nil
 end
@@ -606,7 +574,8 @@ local function compileLua(source)
 end
 
 local function injectAirHub()
-    SECTION("STEP 3 / 3  —  Inject AirHub")
+    SECTION("STEP 3 / 4  —  Inject AirHub")
+    setLoadingStatus("Fetching AirHub...", Color3.fromRGB(120, 180, 255))
 
     local source = CONFIG.AIRHUB_SOURCE
     local origin = "inline source"
@@ -622,7 +591,6 @@ local function injectAirHub()
         local t0 = tick()
         source = fetchUrl(url)
         local dt = tick() - t0
-
         if not source then
             FAIL("AirHub fetch", "request failed (no response)")
             return false
@@ -633,6 +601,8 @@ local function injectAirHub()
         OK("Using inline source", string.format("%d bytes", #source))
     end
 
+    setLoadingStatus("Compiling...", Color3.fromRGB(120, 180, 255))
+
     local fn, err = compileLua(source)
     if not fn then
         FAIL("Compile", err)
@@ -640,20 +610,69 @@ local function injectAirHub()
     end
     OK("Compiled", "OK")
 
+    setLoadingStatus("Executing AirHub...", Color3.fromRGB(120, 180, 255))
+
     local ok, runErr = pcall(fn)
     if not ok then
         FAIL("Execute", tostring(runErr))
         return false
     end
-
     OK("Executed", "loaded from " .. origin)
     return true
+end
+
+--=============================================================
+-- 4. SELF-CLEANUP
+--=============================================================
+local function cleanupLoader()
+    SECTION("STEP 4 / 4  —  Self-Cleanup")
+
+    -- 4.1 Loading UI
+    if LoadingGui then
+        destroyLoadingUI()
+        OK("Loading UI", "destroyed")
+    end
+
+    -- 4.2 Any extra ScreenGui / Drawing objects left by loader
+    local cleaned = 0
+    safe(function()
+        for _, g in ipairs(CoreGui:GetChildren()) do
+            if g.Name == "LoaderStatusGui" then
+                g:Destroy()
+                cleaned += 1
+            end
+        end
+    end)
+    if cleaned > 0 then OK("Orphan GUIs", cleaned .. " removed") end
+
+    -- 4.3 getgenv() vars set by loader
+    local genv = E()
+    local removed = 0
+    for _, key in ipairs({ "__loader_active", "__loader_source", "__loader_origin" }) do
+        if rawget(genv, key) ~= nil then
+            pcall(function() rawset(genv, key, nil) end)
+            removed += 1
+        end
+    end
+    if removed > 0 then OK("getgenv vars", removed .. " cleared") end
+
+    -- 4.4 NOTE: NamecallManager hook НЕ удаляется —
+    --     он нужен для bypass'а (Kick-блокировка, handshake-фильтры),
+    --     который продолжает работать под AirHub.
+    if NamecallManager.hooked then
+        OK("Bypass hooks", "kept alive (needed by AirHub)")
+    end
+
+    L("  →  Loader cleanup complete")
 end
 
 --=============================================================
 -- MAIN
 --=============================================================
 task.spawn(function()
+    -- Индикатор загрузки
+    createLoadingUI()
+
     L("═════════════════════════════════════════")
     L("  AutoDetect → AutoBypass → AirHub")
     L("═════════════════════════════════════════")
@@ -670,12 +689,28 @@ task.spawn(function()
     task.wait(0.2)
     local injected = injectAirHub()
 
-    local total_time = tick() - t_start
-    L("═════════════════════════════════════════")
+    -- 4) Self-Cleanup
+    task.wait(0.2)
+
     if injected then
-        L(string.format("  DONE  ✓   total %.2fs", total_time))
+        cleanupLoader()
+
+        local total_time = tick() - t_start
+        L("═════════════════════════════════════════")
+        L(string.format("  DONE  ✓   AirHub running   (%.2fs)", total_time))
+        L("═════════════════════════════════════════")
     else
-        L(string.format("  FAILED  ✗   total %.2fs", total_time))
+        -- При ошибке — показываем статус, затем через N сек скрываем
+        setLoadingStatus("AirHub injection failed — see console", Color3.fromRGB(255, 100, 100))
+
+        local total_time = tick() - t_start
+        L("═════════════════════════════════════════")
+        L(string.format("  FAILED  ✗   AirHub not loaded   (%.2fs)", total_time))
+        L("═════════════════════════════════════════")
+
+        if CONFIG.KEEP_FAILED_UI > 0 then
+            task.wait(CONFIG.KEEP_FAILED_UI)
+        end
+        destroyLoadingUI()
     end
-    L("═════════════════════════════════════════")
 end)
