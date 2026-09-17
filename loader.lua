@@ -1,21 +1,17 @@
-local REPO = "local REPO = "https://raw.githubusercontent.com/lolipopins/airhub-remake-dev/main/src/""
+local REPO = "https://raw.githubusercontent.com/lolipopins/airhub-remake/main/src/"
 
---// ---------------------------------------------------------------------------
---// Module list — DO NOT reorder unless you know what you're doing
---// ---------------------------------------------------------------------------
 local FILES = {
     "01_core.lua",
     "02_aimbot.lua",
     "03_antiaim.lua",
     "04_wallhack.lua",
     "05_serverposition.lua",
-    "06_movement.lua",
-    "07_ui.lua",
+    "06a_movement_fly_bhop.lua",
+    "06b_movement_speed_strafer.lua",
+    "07a_ui_core.lua",
+    "07b_ui_tabs.lua",
 }
 
---// ---------------------------------------------------------------------------
---// Fetch helper (game:HttpGet → request fallback)
---// ---------------------------------------------------------------------------
 local function Fetch(url)
     local ok, res = pcall(function() return game:HttpGet(url) end)
     if ok and type(res) == "string" and #res > 0 then return res end
@@ -28,39 +24,32 @@ local function Fetch(url)
     return nil
 end
 
---// ---------------------------------------------------------------------------
---// Download + execute each module in order
---// ---------------------------------------------------------------------------
 local function RunModule(filename)
     local url = REPO .. filename
     local src = Fetch(url)
     if not src then
-        warn("[AirHub] ✗ Failed to download: " .. filename .. " (" .. url .. ")")
+        warn("[AirHub] Failed to download: " .. filename .. " (" .. url .. ")")
         return false
     end
-
     local chunk, compileErr = loadstring(src, "@" .. filename)
     if not chunk then
-        warn("[AirHub] ✗ Compile error in " .. filename .. ": " .. tostring(compileErr))
+        warn("[AirHub] Compile error in " .. filename .. ": " .. tostring(compileErr))
         return false
     end
-
     local runOk, runErr = pcall(chunk)
     if not runOk then
-        warn("[AirHub] ✗ Runtime error in " .. filename .. ": " .. tostring(runErr))
+        warn("[AirHub] Runtime error in " .. filename .. ": " .. tostring(runErr))
         return false
     end
-
     return true
 end
 
 for _, file in ipairs(FILES) do
-    local ok = RunModule(file)
-    if not ok then
-        warn("[AirHub] Aborting loader — module '" .. file .. "' failed.")
+    if not RunModule(file) then
+        warn("[AirHub] Aborting — module '" .. file .. "' failed.")
         return
     end
     task.wait()
 end
 
-warn("[AirHub] ✓ All modules loaded successfully")
+warn("[AirHub] All modules loaded successfully")
