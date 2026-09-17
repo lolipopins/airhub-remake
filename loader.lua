@@ -1,13 +1,19 @@
 --// ============================================================================
---// AirHub Remake — Loader (hardened, with Bypass Menu + Wait-for-Ready)
+--// AirHub Remake — Loader (hardened, Bypass Menu, Kick Reason Logger)
 --// ============================================================================
---// Что нового:
+--// Что нового в этой версии:
 --//   • Меню с чекбоксами обходов + кнопка "Inject AirHub"
 --//   • Лоадер ЖДЁТ сигнал getgenv().ACBypassReady от античит-байпаса
 --//   • После клика "Inject" меню скрывается, байпас запускается с выбранными
 --//     опциями, затем AirHub грузится автоматически
 --//   • Кнопка "Cancel" — выход без загрузки
---//   • Если байпас не подал сигнал за N секунд — грузим всё равно (с логом)
+--//   • [NEW] Лог кика с причиной в консоль:
+--//         - перехват player:Kick(reason)
+--//         - перехват player:Disconnect()
+--//         - перехват Moderator-сообщений Adonis
+--//         - перехват PlayerRemoving (если кикнули нас)
+--//         - запись причины в стилизованный блок в консоли
+--//   • Если байпас не подал сигнал за N секунд — грузим всё равно
 --// ============================================================================
 
 local REPO = "https://raw.githubusercontent.com/lolipopins/airhub-remake/main/src/"
@@ -33,14 +39,19 @@ local FILES = {
 --// ---------------------------------------------------------------------------
 local CONFIG = {
     MENU_TITLE          = "AirHub Loader",
-    READY_SIGNAL        = "ACBypassReady",       -- getgenv()[READY_SIGNAL] = true
-    CONFIG_SIGNAL       = "ACBypassConfig",      -- сюда кладём выбранные опции
-    READY_TIMEOUT       = 30,                    -- сек, ожидание сигнала от байпаса
-    AUTO_INJECT         = false,                 -- true = не ждать кнопки, сразу грузить
+    READY_SIGNAL        = "ACBypassReady",
+    CONFIG_SIGNAL       = "ACBypassConfig",
+    READY_TIMEOUT       = 30,
+    AUTO_INJECT         = false,
+
+    -- Лог кика
+    LOG_KICK_REASON     = true,   -- писать в консоль причину кика
+    KICK_LOG_PREFIX     = "[AirHub][KICK]",
+    BLOCK_KICK          = true,   -- спуфить кик (false = разрешить кикнуть)
 }
 
 --// ---------------------------------------------------------------------------
---// Безопасные обёртки над print/warn
+--// Безопасные обёртки
 --// ---------------------------------------------------------------------------
 local _print = (type(print) == "function") and print or function() end
 local _warn  = (type(warn)  == "function") and warn  or _print
@@ -48,9 +59,6 @@ local _warn  = (type(warn)  == "function") and warn  or _print
 local function say(...)   _print(...) end
 local function swarn(...) _warn(...)  end
 
---// ---------------------------------------------------------------------------
---// tick() — универсальный wait
---// ---------------------------------------------------------------------------
 local function tick()
     if type(task) == "table" and type(task.wait) == "function" then
         task.wait()
@@ -59,9 +67,6 @@ local function tick()
     end
 end
 
---// ---------------------------------------------------------------------------
---// getgenv() — универсальный доступ
---// ---------------------------------------------------------------------------
 local function GENV()
     if type(getgenv) == "function" then
         local ok, env = pcall(getgenv)
@@ -109,9 +114,6 @@ end
 
 local function Fetch(url) return httpGet(url) end
 
---// ---------------------------------------------------------------------------
---// Компиляция
---// ---------------------------------------------------------------------------
 local function compile(src, name)
     if type(loadstring) == "function" then
         return loadstring(src, "@" .. name)
@@ -121,9 +123,6 @@ local function compile(src, name)
     return nil, "loadstring/load unavailable in this executor"
 end
 
---// ---------------------------------------------------------------------------
---// Выполнение с заглушёнными warn/print (для байпаса)
---// ---------------------------------------------------------------------------
 local function withSilencedOutput(fn)
     local savedWarn, savedPrint
     pcall(function() savedWarn  = warn  end)
@@ -139,9 +138,228 @@ local function withSilencedOutput(fn)
     return ok, err
 end
 
+--// ===========================================================================
+--// KICK REASON LOGGER
+--// ===========================================================================
+--// Что делает:
+--//   • Перехватывает namecall "Kick" на Player → пишет причину в консоль
+--//     с подсветкой, временем и стеком источника (если доступен).
+--//   • Перехватывает "Disconnect" на Player → лог "disconnect".
+--//   • Ловит PlayerRemoving — если уходит LocalPlayer, пишет "removed".
+--//   • Ловит Adonis-сообщения: "Moderator message: ..." через remotes.
+--//   • Опционально НЕ даёт кикнуть (BLOCK_KICK = true) — спуфит успех.
+--//
+--// Формат лога:
+--//   [AirHub][KICK] ─────────────────────────────
+--//   [AirHub][KICK]  Reason : You have been kicked for exploiting
+--//   [AirHub][KICK]  Vector : Player:Kick
+--//   [AirHub][KICK]  Target : LocalPlayer
+--//   [AirHub][KICK]  Caller : LocalScript (если доступен)
+--//   [AirHub][KICK] ─────────────────────────────
+--// ===========================================================================
+
+local KickLogger = {
+    hooked      = false,
+    events      = {},     -- история последних 50 киков
+    max_events  = 50,
+    original_nc = nil,
+    wrapper     = nil,
+}
+
+local function fmtTime()
+    local ok, t = pcall(function()
+        if type(os) == "table" and type(os.date) == "function" then
+            return os.date("%H:%M:%S")
+        end
+        return "??:??:??"
+    end)
+    return ok and t or "??:??:??"
+end
+
+local function banner(lines, color)
+    local prefix = CONFIG.KICK_LOG_PREFIX
+    swarn(prefix .. " ─────────────────────────────────────────")
+    for _, line in ipairs(lines) do
+        swarn(prefix .. "  " .. line)
+    end
+    swarn(prefix .. " ─────────────────────────────────────────")
+end
+
+local function logKick(reason, vector, target, callerInfo)
+    if not CONFIG.LOG_KICK_REASON then return end
+
+    reason     = tostring(reason or "unknown")
+    vector     = tostring(vector or "unknown")
+    target     = tostring(target or "unknown")
+    callerInfo = callerInfo or "n/a"
+
+    table.insert(KickLogger.events, {
+        time   = fmtTime(),
+        reason = reason,
+        vector = vector,
+        target = target,
+        caller = callerInfo,
+    })
+    while #KickLogger.events > KickLogger.max_events do
+        table.remove(KickLogger.events, 1)
+    end
+
+    banner({
+        "Reason : " .. reason,
+        "Vector : " .. vector,
+        "Target : " .. target,
+        "Caller : " .. callerInfo,
+        "Time   : " .. fmtTime(),
+    })
+end
+
+local function callerDebug()
+    -- Пытаемся вытащить имя скрипта-источника через debug/gcinfo
+    local ok, info = pcall(function()
+        if type(debug) == "table" and type(debug.info) == "function" then
+            local _, name = debug.info(3, "sn")
+            return name or "?"
+        elseif type(debug) == "table" and type(debug.getinfo) == "function" then
+            local d = debug.getinfo(3, "Sn")
+            return (d and (d.short_src or d.source)) or "?"
+        end
+        return "?"
+    end)
+    return ok and info or "?"
+end
+
+local function installKickLogger()
+    if KickLogger.hooked then return true end
+
+    local hook      = rawget(_G, "hookmetamethod")
+              or (GENV() and rawget(GENV(), "hookmetamethod"))
+    local getMethod = rawget(_G, "getnamecallmethod")
+              or (GENV() and rawget(GENV(), "getnamecallmethod"))
+    local newc      = rawget(_G, "newcclosure")
+              or (GENV() and rawget(GENV(), "newcclosure"))
+    local checkC    = rawget(_G, "checkcaller")
+              or (GENV() and rawget(GENV(), "checkcaller"))
+
+    if not hook or not getMethod then
+        return false, "hookmetamethod/getnamecallmethod unavailable"
+    end
+
+    -- Сохраняем оригинал до подмены
+    local getmt = rawget(_G, "getrawmetatable")
+           or (GENV() and rawget(GENV(), "getrawmetatable"))
+    if getmt then
+        pcall(function()
+            local mt = getmt(game)
+            if type(mt) == "table" then
+                KickLogger.original_nc = rawget(mt, "__namecall")
+            end
+        end)
+    end
+
+    local Players = game:GetService("Players")
+    local LP      = Players.LocalPlayer
+
+    local ok, err = pcall(function()
+        local old
+        local wrapper = function(self, ...)
+            local method = getMethod()
+            if type(method) == "string" then
+                local m = method:lower()
+
+                -- Player:Kick(reason)
+                if m == "kick" then
+                    local reason = ...
+                    local target = "unknown"
+                    if type(self) == "Instance" then
+                        if self == LP then target = "LocalPlayer"
+                        elseif self:IsA("Player") then target = self.Name
+                        else target = tostring(self) end
+                    end
+                    logKick(reason, "Player:Kick", target, callerDebug())
+
+                    if CONFIG.BLOCK_KICK then
+                        -- Спуфим успех — античит думает, что кикнул
+                        return nil
+                    end
+                end
+
+                -- Player:Disconnect() — тоже вектор выкидывания
+                if m == "disconnect" and type(self) == "Instance" and self == LP then
+                    logKick("client disconnect", "Player:Disconnect", "LocalPlayer", callerDebug())
+                    if CONFIG.BLOCK_KICK then return nil end
+                end
+            end
+            return old(self, ...)
+        end
+
+        if newc then pcall(function() wrapper = newc(wrapper) end) end
+        KickLogger.wrapper = wrapper
+        old = hook(game, "__namecall", wrapper)
+    end)
+
+    if ok then
+        KickLogger.hooked = true
+        return true, nil
+    end
+    return false, tostring(err)
+end
+
 --// ---------------------------------------------------------------------------
---// Список обходов для меню — пользователь выбирает, что включать
+//// Ловим PlayerRemoving — если уходит LocalPlayer, значит кикнули
 --// ---------------------------------------------------------------------------
+local function installPlayerRemovingLogger()
+    local Players = game:GetService("Players")
+    local LP = Players.LocalPlayer
+    if not LP then return end
+
+    pcall(function()
+        Players.PlayerRemoving:Connect(function(plr)
+            if plr == LP then
+                logKick("removed from game", "PlayerRemoving", "LocalPlayer", callerDebug())
+            end
+        end)
+    end)
+end
+
+--// ---------------------------------------------------------------------------
+--// Ловим Moderator-сообщения Adonis (уже внутри remotes)
+--// ---------------------------------------------------------------------------
+local function installModeratorLogger()
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    pcall(function()
+        for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                local n = obj.Name:lower()
+                if n:find("moderator") or n:find("mod message") or n:find("modkick") then
+                    pcall(function()
+                        obj.OnClientEvent:Connect(function(...)
+                            local args = { ... }
+                            local reason = "moderator message"
+                            for _, a in ipairs(args) do
+                                if type(a) == "string" and #a > 0 then
+                                    reason = a
+                                    break
+                                end
+                            end
+                            logKick(reason, "Moderator:OnClientEvent", "LocalPlayer", obj.Name)
+                        end)
+                    end)
+                end
+            end
+        end
+    end)
+end
+
+--// ---------------------------------------------------------------------------
+//// Публичный API: получить историю киков
+--// ---------------------------------------------------------------------------
+local function getKickHistory()
+    return KickLogger.events
+end
+
+--// ===========================================================================
+--// Меню
+--// ===========================================================================
 local BYPASS_OPTIONS = {
     { id = "metamethod",     label = "Metamethod Bypass",       default = true  },
     { id = "handshake",      label = "Handshake Bypass",        default = true  },
@@ -163,11 +381,9 @@ local BYPASS_OPTIONS = {
     { id = "thread_detect",  label = "Thread Detection Bypass", default = true  },
     { id = "rate_limit",     label = "Rate Limit Bypass",       default = true  },
     { id = "environment",    label = "Environment Bypass",      default = true  },
+    { id = "kick_logger",    label = "Kick Reason Logger",      default = true  },
 }
 
---// ---------------------------------------------------------------------------
---// Меню — создаём ScreenGui с чекбоксами и кнопками
---// ---------------------------------------------------------------------------
 local MenuGui = nil
 local MenuState = { selected = {}, done = false }
 
@@ -176,7 +392,6 @@ local function buildMenu(onInject, onCancel)
     local CoreGui  = game:GetService("CoreGui")
     local LP       = Players.LocalPlayer
 
-    -- Инициализация состояния
     for _, opt in ipairs(BYPASS_OPTIONS) do
         MenuState.selected[opt.id] = opt.default
     end
@@ -193,11 +408,10 @@ local function buildMenu(onInject, onCancel)
         if pg then pcall(function() gui.Parent = pg end) end
     end
 
-    -- Основной контейнер
     local frame = Instance.new("Frame", gui)
     frame.Name = "Main"
-    frame.Size = UDim2.new(0, 460, 0, 560)
-    frame.Position = UDim2.new(0.5, -230, 0.5, -280)
+    frame.Size = UDim2.new(0, 460, 0, 600)
+    frame.Position = UDim2.new(0.5, -230, 0.5, -300)
     frame.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
     frame.BorderSizePixel = 0
     Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
@@ -206,7 +420,6 @@ local function buildMenu(onInject, onCancel)
     stroke.Thickness = 1
     stroke.Color = Color3.fromRGB(60, 60, 70)
 
-    -- Заголовок
     local title = Instance.new("TextLabel", frame)
     title.Size = UDim2.new(1, -24, 0, 40)
     title.Position = UDim2.new(0, 12, 0, 8)
@@ -217,7 +430,6 @@ local function buildMenu(onInject, onCancel)
     title.TextXAlignment = Enum.TextXAlignment.Left
     title.Text = CONFIG.MENU_TITLE
 
-    -- Подзаголовок
     local subtitle = Instance.new("TextLabel", frame)
     subtitle.Size = UDim2.new(1, -24, 0, 20)
     subtitle.Position = UDim2.new(0, 12, 0, 46)
@@ -228,7 +440,6 @@ local function buildMenu(onInject, onCancel)
     subtitle.TextXAlignment = Enum.TextXAlignment.Left
     subtitle.Text = "Выбери обходы и нажми «Inject AirHub»"
 
-    -- Скроллящийся список обходов
     local scroll = Instance.new("ScrollingFrame", frame)
     scroll.Size = UDim2.new(1, -24, 1, -180)
     scroll.Position = UDim2.new(0, 12, 0, 76)
@@ -249,7 +460,6 @@ local function buildMenu(onInject, onCancel)
     padding.PaddingLeft   = UDim.new(0, 8)
     padding.PaddingRight  = UDim.new(0, 8)
 
-    -- Чекбоксы
     local checkboxes = {}
     for i, opt in ipairs(BYPASS_OPTIONS) do
         local row = Instance.new("Frame", scroll)
@@ -295,7 +505,6 @@ local function buildMenu(onInject, onCancel)
         end)
     end
 
-    -- Кнопка "Все" / "Ничего"
     local btnAll = Instance.new("TextButton", frame)
     btnAll.Size = UDim2.new(0, 90, 0, 26)
     btnAll.Position = UDim2.new(0, 12, 1, -66)
@@ -328,7 +537,6 @@ local function buildMenu(onInject, onCancel)
     btnAll.MouseButton1Click:Connect(function() setAll(true)  end)
     btnNone.MouseButton1Click:Connect(function() setAll(false) end)
 
-    -- Кнопка "Inject AirHub"
     local btnInject = Instance.new("TextButton", frame)
     btnInject.Size = UDim2.new(0, 180, 0, 34)
     btnInject.Position = UDim2.new(1, -192, 1, -70)
@@ -340,7 +548,6 @@ local function buildMenu(onInject, onCancel)
     btnInject.Text = "Inject AirHub"
     Instance.new("UICorner", btnInject).CornerRadius = UDim.new(0, 8)
 
-    -- Кнопка "Cancel"
     local btnCancel = Instance.new("TextButton", frame)
     btnCancel.Size = UDim2.new(0, 40, 0, 34)
     btnCancel.Position = UDim2.new(1, -42, 1, -70)
@@ -378,16 +585,25 @@ local function destroyMenu()
 end
 
 --// ---------------------------------------------------------------------------
---// Запуск античит-байпаса с выбранным конфигом.
---//   Кладём конфиг в getgenv().ACBypassConfig
---//   Сбрасываем getgenv().ACBypassReady = false
---//   После успешного прогона ставим getgenv().ACBypassReady = true
---//   (или ждём, что сам байпас поставит — если он так умеет)
+--// Запуск античит-байпаса с выбранным конфигом
 --// ---------------------------------------------------------------------------
 local function runBypassWithConfig(url, cfg)
     local genv = GENV()
     genv[CONFIG.CONFIG_SIGNAL] = cfg
     genv[CONFIG.READY_SIGNAL]  = false
+
+    -- Перед байпасом — ставим Kick Reason Logger.
+    -- Он должен стоять ПЕРВЫМ, чтобы поймать кик, даже если байпас упадёт.
+    if CONFIG.LOG_KICK_REASON and cfg.kick_logger ~= false then
+        local ok, err = installKickLogger()
+        if ok then
+            say("[AirHub] kick logger installed")
+        else
+            swarn("[AirHub] kick logger failed: " .. tostring(err))
+        end
+        installPlayerRemovingLogger()
+        installModeratorLogger()
+    end
 
     local src = Fetch(url)
     if not src then
@@ -404,7 +620,6 @@ local function runBypassWithConfig(url, cfg)
         return false, "runtime error: " .. tostring(err)
     end
 
-    -- Если байпас сам не выставил READY — выставляем мы
     if genv[CONFIG.READY_SIGNAL] ~= true then
         genv[CONFIG.READY_SIGNAL] = true
     end
@@ -412,12 +627,8 @@ local function runBypassWithConfig(url, cfg)
     return true, nil
 end
 
---// ---------------------------------------------------------------------------
---// Ожидание сигнала READY с таймаутом
---// ---------------------------------------------------------------------------
 local function waitForReady(timeout)
     local genv = GENV()
-    local t0 = os.clock and os.clock() or 0
     local waited = 0
 
     while not genv[CONFIG.READY_SIGNAL] do
@@ -480,18 +691,11 @@ end
 
 --// ---------------------------------------------------------------------------
 --// MAIN FLOW
---//   1) Показать меню
---//   2) Ждать клик "Inject"
---//   3) Запустить байпас с выбранным конфигом
---//   4) Дождаться READY-сигнала
---//   5) Загрузить AirHub
---//   6) Уничтожить меню (уже сделано в onInject)
 --// ---------------------------------------------------------------------------
 local function startFlow()
     local bypassUrl = PRE_FILES[1]
 
     buildMenu(function(cfg)
-        -- Меню скрываем сразу после клика
         destroyMenu()
 
         say("[AirHub] bypass config: " ..
@@ -503,16 +707,13 @@ local function startFlow()
                 return table.concat(parts, ", ")
             end)())
 
-        -- 1) Запуск байпаса
         local ok, err = runBypassWithConfig(bypassUrl, cfg)
         if ok then
             say("[AirHub] anticheat bypassed")
         else
             swarn("[AirHub] anticheat bypass failed: " .. tostring(err))
-            -- продолжаем — вдруг и без байпаса прокатит
         end
 
-        -- 2) Ждём сигнал READY
         say("[AirHub] waiting for bypass ready signal...")
         local ready = waitForReady(CONFIG.READY_TIMEOUT)
         if not ready then
@@ -521,17 +722,26 @@ local function startFlow()
             say("[AirHub] bypass ready → injecting modules")
         end
 
-        -- 3) Грузим AirHub
         loadAllModules()
     end, function()
-        -- Cancel
         destroyMenu()
         say("[AirHub] injection cancelled by user")
     end)
 end
 
 --// ---------------------------------------------------------------------------
---// AUTO_INJECT — если включён, сразу грузим без меню (для отладки)
+//// Публичный API для внешнего доступа
+//// ---------------------------------------------------------------------------
+pcall(function()
+    GENV().AirHubLoader = {
+        getKickHistory = getKickHistory,
+        installKickLogger = installKickLogger,
+        logKick = logKick,
+    }
+end)
+
+--// ---------------------------------------------------------------------------
+--// AUTO_INJECT
 --// ---------------------------------------------------------------------------
 if CONFIG.AUTO_INJECT then
     local cfg = {}
