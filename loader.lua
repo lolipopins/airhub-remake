@@ -1,7 +1,6 @@
 local REPO = "https://raw.githubusercontent.com/lolipopins/airhub-remake/main/src/"
 
 local PRE_FILES = {
-    -- Античит-байпас грузится ПЕРВЫМ, до всех модулей
     "https://raw.githubusercontent.com/lolipopins/airhub-remake/refs/heads/main/anticheat%20bypass",
 }
 
@@ -29,38 +28,75 @@ local function Fetch(url)
     return nil
 end
 
-local function RunFromURL(url, label, required)
+--// ---------------------------------------------------------------------------
+--// Античит-байпас — глушим весь его вывод, отчёт делает лоадер.
+--// ---------------------------------------------------------------------------
+local realWarn = warn
+local realPrint = print
+
+local function RunBypassSilently(url)
     local src = Fetch(url)
     if not src then
-        warn("[AirHub] Failed to download: " .. label .. " (" .. url .. ")")
-        return not required
+        return false, "download failed"
     end
-    local chunk, compileErr = loadstring(src, "@" .. label)
+    local chunk, compileErr = loadstring(src, "@anticheat_bypass")
     if not chunk then
-        warn("[AirHub] Compile error in " .. label .. ": " .. tostring(compileErr))
-        return not required
+        return false, "compile error: " .. tostring(compileErr)
     end
-    local runOk, runErr = pcall(chunk)
-    if not runOk then
-        warn("[AirHub] Runtime error in " .. label .. ": " .. tostring(runErr))
-        return not required
+
+    warn = function() end
+    print = function() end
+    local ok, err = pcall(chunk)
+    warn = realWarn
+    print = realPrint
+
+    if not ok then
+        return false, "runtime error: " .. tostring(err)
     end
-    return true
+    return true, nil
 end
 
---// Античит-байпас (если упадёт — грузим остальное всё равно)
-for i, url in ipairs(PRE_FILES) do
-    RunFromURL(url, "pre_" .. i, false)
+for _, url in ipairs(PRE_FILES) do
+    local ok, err = RunBypassSilently(url)
+    if ok then
+        print("[AirHub] anticheat bypassed")
+    else
+        warn("[AirHub] anticheat bypass failed: " .. tostring(err))
+    end
     task.wait()
 end
 
---// Основные модули (если хоть один упадёт — прерываем загрузку)
+--// ---------------------------------------------------------------------------
+--// Основные модули — лоадер отчитывается по каждому.
+--// ---------------------------------------------------------------------------
+local loaded, failed = 0, 0
 for _, file in ipairs(FILES) do
-    if not RunFromURL(REPO .. file, file, true) then
-        warn("[AirHub] Aborting — module '" .. file .. "' failed.")
-        return
+    local url = REPO .. file
+    local src = Fetch(url)
+    if not src then
+        warn("[AirHub] FAILED to download: " .. file)
+        failed = failed + 1
+        goto continue
     end
+    local chunk, compileErr = loadstring(src, "@" .. file)
+    if not chunk then
+        warn("[AirHub] COMPILE ERROR in " .. file .. ": " .. tostring(compileErr))
+        failed = failed + 1
+        goto continue
+    end
+    local ok, err = pcall(chunk)
+    if not ok then
+        warn("[AirHub] RUNTIME ERROR in " .. file .. ": " .. tostring(err))
+        failed = failed + 1
+        goto continue
+    end
+    loaded = loaded + 1
+    ::continue::
     task.wait()
 end
 
-warn("[AirHub] All modules loaded successfully")
+if failed > 0 then
+    warn("[AirHub] modules loaded: " .. loaded .. "/" .. #FILES .. " (failed: " .. failed .. ")")
+else
+    print("[AirHub] modules loaded: " .. loaded .. "/" .. #FILES)
+end
