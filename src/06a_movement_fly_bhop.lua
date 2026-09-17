@@ -1,32 +1,18 @@
---// ============================================================================
---// AirHub — 06_movement.lua
---//  Fly, Bhop (+Spider), Speed, FastStop, AutoStrafer, Noclip.
---//  Requires: 01_core.lua
---// ============================================================================
+--// AirHub - 06a_movement_fly_bhop.lua
+--// Fly + Bhop + Spider.
 
 local H = getgenv().AirHub
-if not H or not H._CoreLoaded then
-    warn("[AirHub] 06_movement: core not loaded")
-    return
-end
-if H.Fly then
-    warn("[AirHub] Movement already loaded")
-    return
-end
+if not H or not H._CoreLoaded then warn("[AirHub] 06a: core not loaded"); return end
 
 local Util = H.Util
 local RunService = Util.RunService
 local UserInputService = Util.UserInputService
-local VirtualInputManager = Util.VirtualInputManager
 local LocalPlayer = Util.LocalPlayer
 local Track = Util.Track
 local HandleError = Util.HandleError
 local SafeKeyCode = Util.SafeKeyCode
 local RAY_FILTER = Util.RAY_FILTER
 
---// ===========================================================================
---// FLY
---// ===========================================================================
 H.Fly = {
     Settings = {
         Enabled = false, ToggleKey = "F", Toggle = false,
@@ -234,9 +220,6 @@ Fly.Functions = {
 }
 Fly.ClearInstances = Fly_ClearInstances
 
---// ===========================================================================
---// BHOP + SPIDER
---// ===========================================================================
 H.Bhop = {
     Settings = {
         Enabled = false,
@@ -280,7 +263,6 @@ local function Spider_DetectWall(char, hrp)
     rayParams.FilterDescendantsInstances = { char }
     rayParams.FilterType = RAY_FILTER
     rayParams.IgnoreWater = true
-
     local range = Bhop.Settings.Spider.Range
     local rayCount = math.max(4, Bhop.Settings.Spider.RayCount or 8)
     local step = (math.pi * 2) / rayCount
@@ -349,186 +331,3 @@ Bhop.Functions = {
         }
     end,
 }
-
---// ===========================================================================
---// SPEED
---// ===========================================================================
-H.Speed = {
-    Settings = {
-        Enabled = false,
-        Method = "WalkSpeed",
-        GroundSpeed = 30,
-        AirSpeed = 30,
-        UseAirSpeed = false,
-        InAirOnly = false,
-    },
-    Internal = { Active = false, OriginalWalkSpeed = 16, LastClock = 0 },
-}
-local Speed = H.Speed
-
-local function IsGrounded(character)
-    if not character then return false end
-    local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return false end
-    local hum = character:FindFirstChildOfClass("Humanoid")
-    if hum then
-        if hum.FloorMaterial ~= Enum.Material.Air then return true end
-    end
-    local params = RaycastParams.new()
-    params.FilterDescendantsInstances = { character }
-    params.FilterType = RAY_FILTER
-    return workspace:Raycast(hrp.Position, Vector3.new(0, -2.2, 0), params) ~= nil
-end
-
-local function GetMoveDirection()
-    local char = LocalPlayer.Character
-    if not char then return Vector3.new(0, 0, 0) end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return Vector3.new(0, 0, 0) end
-    local w = UserInputService:IsKeyDown(Enum.KeyCode.W)
-    local s = UserInputService:IsKeyDown(Enum.KeyCode.S)
-    local a = UserInputService:IsKeyDown(Enum.KeyCode.A)
-    local d = UserInputService:IsKeyDown(Enum.KeyCode.D)
-    if not (w or s or a or d) then return Vector3.new(0, 0, 0) end
-    local camForward = workspace.CurrentCamera.CFrame.LookVector
-    local camRight = workspace.CurrentCamera.CFrame.RightVector
-    local forward = Vector3.new(camForward.X, 0, camForward.Z).Unit
-    local right = Vector3.new(camRight.X, 0, camRight.Z).Unit
-    local dir = Vector3.new(0, 0, 0)
-    if w then dir = dir + forward end
-    if s then dir = dir - forward end
-    if a then dir = dir - right end
-    if d then dir = dir + right end
-    if dir.Magnitude > 0 then dir = dir.Unit end
-    return dir
-end
-
-task.spawn(function()
-    Speed.Internal.LastClock = os.clock()
-    while not H.ShuttingDown and task.wait(0.016) do
-        local nowClock = os.clock()
-        local dt = nowClock - Speed.Internal.LastClock
-        Speed.Internal.LastClock = nowClock
-        if dt <= 0 or dt > 0.5 then dt = 0.016 end
-
-        if not Speed.Settings.Enabled then
-            if Speed.Internal.Active then
-                Speed.Internal.Active = false
-                local char = LocalPlayer.Character
-                if char then
-                    local hum = char:FindFirstChildOfClass("Humanoid")
-                    if hum and hum.WalkSpeed ~= Speed.Internal.OriginalWalkSpeed then
-                        hum.WalkSpeed = Speed.Internal.OriginalWalkSpeed
-                    end
-                end
-            end
-            continue
-        end
-        local char = LocalPlayer.Character
-        if not char then continue end
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        if not hum or not hrp then continue end
-        if not Speed.Internal.Active then
-            Speed.Internal.OriginalWalkSpeed = hum.WalkSpeed
-            Speed.Internal.Active = true
-        end
-        local method = Speed.Settings.Method
-        local grounded = IsGrounded(char)
-        local spd
-        if Speed.Settings.UseAirSpeed and not grounded then
-            spd = Speed.Settings.AirSpeed
-        else
-            spd = Speed.Settings.GroundSpeed
-        end
-        if Speed.Settings.InAirOnly then
-            if grounded then
-                if method == "WalkSpeed" and hum.WalkSpeed ~= Speed.Internal.OriginalWalkSpeed then
-                    hum.WalkSpeed = Speed.Internal.OriginalWalkSpeed
-                end
-                continue
-            end
-        end
-        if method == "WalkSpeed" then
-            if hum.WalkSpeed ~= spd then hum.WalkSpeed = spd end
-        elseif method == "CFrame" then
-            local dir = GetMoveDirection()
-            if dir.Magnitude > 0 then hrp.CFrame = hrp.CFrame + dir * spd * dt end
-        elseif method == "Velocity" then
-            local dir = GetMoveDirection()
-            if dir.Magnitude > 0 then
-                hrp.Velocity = Vector3.new(dir.X * spd, hrp.Velocity.Y, dir.Z * spd)
-            end
-        end
-    end
-end)
-
-Speed.Functions = {
-    ResetSettings = function()
-        Speed.Settings = {
-            Enabled = false, Method = "WalkSpeed", GroundSpeed = 30, AirSpeed = 30,
-            UseAirSpeed = false, InAirOnly = false,
-        }
-        Speed.Internal = { Active = false, OriginalWalkSpeed = 16, LastClock = 0 }
-        local char = LocalPlayer.Character
-        if char then
-            local hum = char:FindFirstChildOfClass("Humanoid")
-            if hum and hum.WalkSpeed ~= 16 then hum.WalkSpeed = 16 end
-        end
-    end,
-}
-
---// ===========================================================================
---// FASTSTOP
---// ===========================================================================
-H.FastStop = {
-    Settings = { Enabled = false, StopY = false },
-    Internal = { LastActive = false },
-}
-local FastStop = H.FastStop
-
-local function FS_AnyMoveHeld()
-    return UserInputService:IsKeyDown(Enum.KeyCode.W)
-        or UserInputService:IsKeyDown(Enum.KeyCode.A)
-        or UserInputService:IsKeyDown(Enum.KeyCode.S)
-        or UserInputService:IsKeyDown(Enum.KeyCode.D)
-end
-
-task.spawn(function()
-    while not H.ShuttingDown and task.wait(0.01) do
-        if not FastStop.Settings.Enabled then
-            FastStop.Internal.LastActive = false
-            continue
-        end
-        if FS_AnyMoveHeld() then
-            FastStop.Internal.LastActive = false
-            continue
-        end
-        local char = LocalPlayer.Character
-        if not char then continue end
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if not hrp or not hum then continue end
-        if hum.Health <= 0 then continue end
-        if FastStop.Settings.StopY then
-            hrp.Velocity = Vector3.new(0, 0, 0)
-        else
-            hrp.Velocity = Vector3.new(0, hrp.Velocity.Y, 0)
-        end
-        FastStop.Internal.LastActive = true
-    end
-end)
-
-FastStop.Functions = {
-    ResetSettings = function()
-        FastStop.Settings = { Enabled = false, StopY = false }
-        FastStop.Internal = { LastActive = false }
-    end,
-}
-
---// ===========================================================================
---// AUTOSTRAFER
---// ===========================================================================
-H.AutoStrafer = {
-    Settings = { Enabled = false, Mode = "Legit", Key = "Space", Toggle = false, Invert = false, SpamDelay = 0.05 },
-    Internal = { Active = false, LastYaw = nil, KeyA = false, KeyD = false, SpamDir = -
