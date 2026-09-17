@@ -1,21 +1,3 @@
---[[
-    AutoDetect → AutoBypass → Inject AirHub → Self-Cleanup
-    =============================================================================
-    1. Auto-detect        — лог в консоль
-    2. Auto-bypass        — 16 шагов, лог в консоль
-    3. Inject AirHub      — fetch + compile + exec
-    4. Self-Cleanup       — ПОСЛЕ успеха:
-                              • удаляется Loading GUI
-                              • чистятся getgenv() переменные лоадера
-                              • сбрасываются локальные ссылки
-                              • остаются только bypass-хуки (нужны AirHub)
-
-    Управление:
-      CONFIG.SHOW_LOADING_UI   — показывать ли индикатор загрузки (true/false)
-      CONFIG.CLEANUP_AFTER_LOAD — самоуничтожение после успеха (true/false)
-      CONFIG.KEEP_FAILED_UI    — оставить UI при ошибке (сек, 0 = сразу скрыть)
-]]
-
 --=============================================================
 -- CONFIG
 --=============================================================
@@ -23,10 +5,7 @@ local CONFIG = {
     STEP_WAIT          = 0.15,
     SHOW_LOADING_UI    = true,
     CLEANUP_AFTER_LOAD = true,
-    KEEP_FAILED_UI     = 5,     -- сколько секунд держать UI при ошибке
-
-    AIRHUB_URL    = "https://raw.githubusercontent.com/lolipopins/airhub-remake/refs/heads/main/airhub",
-    AIRHUB_SOURCE = nil,
+    KEEP_FAILED_UI     = 5,
 }
 
 --=============================================================
@@ -200,7 +179,7 @@ local DETECT_GROUPS = {
 }
 
 local function autoDetect()
-    SECTION("STEP 1 / 4  —  Auto-Detect")
+    SECTION("STEP 1 / 3  —  Auto-Detect")
     setLoadingStatus("Detecting executor...", Color3.fromRGB(255, 220, 120))
 
     local total, found = 0, 0
@@ -505,7 +484,7 @@ steps[#steps + 1] = { name = "Environment Bypass", fn = function()
 end }
 
 local function autoBypass()
-    SECTION("STEP 2 / 4  —  Auto-Bypass")
+    SECTION("STEP 2 / 3  —  Auto-Bypass")
     setLoadingStatus("Running bypass...", Color3.fromRGB(255, 220, 120))
 
     local ok_count, fail_count = 0, 0
@@ -528,112 +507,18 @@ local function autoBypass()
 end
 
 --=============================================================
--- 3. AIRHUB LOADER
---=============================================================
-local function fetchUrl(url)
-    if type(game.HttpGet) == "function" then
-        local ok, body = pcall(function() return game:HttpGet(url) end)
-        if ok and type(body) == "string" and body ~= "" then return body end
-    end
-    if type(game.HttpGetAsync) == "function" then
-        local ok, body = pcall(function() return game:HttpGetAsync(url) end)
-        if ok and type(body) == "string" and body ~= "" then return body end
-    end
-    local httpGet = getExec("httpget") or getExec("HttpGet")
-    if httpGet then
-        local ok, body = pcall(httpGet, url)
-        if ok and type(body) == "string" and body ~= "" then return body end
-    end
-    local request = getExec("request") or getExec("http_request")
-    if request then
-        local ok, res = pcall(request, { Url = url, Method = "GET" })
-        if ok and type(res) == "table" and type(res.Body) == "string" then return res.Body end
-    end
-    return nil
-end
-
-local function compileLua(source)
-    if type(source) ~= "string" or source == "" then return nil, "empty source" end
-
-    local head = source:sub(1, 200):lower()
-    if head:find("<!doctype html") or head:find("<html") then
-        return nil, "response is HTML (private repo / 404 / wrong path)"
-    end
-
-    if type(loadstring) == "function" then
-        local ok, fn, err = pcall(loadstring, source)
-        if ok and fn then return fn end
-        if err then return nil, "loadstring: " .. tostring(err) end
-    end
-    if type(load) == "function" then
-        local ok, fn, err = pcall(load, source, "=AirHub")
-        if ok and fn then return fn end
-        if err then return nil, "load: " .. tostring(err) end
-    end
-    return nil, "no loadstring/load available"
-end
-
-local function injectAirHub()
-    SECTION("STEP 3 / 4  —  Inject AirHub")
-    setLoadingStatus("Fetching AirHub...", Color3.fromRGB(120, 180, 255))
-
-    local source = CONFIG.AIRHUB_SOURCE
-    local origin = "inline source"
-    local url    = CONFIG.AIRHUB_URL
-
-    if not source then
-        if not url or url == "" then
-            FAIL("AirHub", "no URL or SOURCE configured")
-            return false
-        end
-
-        L("  ↓  Fetching: " .. url)
-        local t0 = tick()
-        source = fetchUrl(url)
-        local dt = tick() - t0
-        if not source then
-            FAIL("AirHub fetch", "request failed (no response)")
-            return false
-        end
-        OK("Downloaded", string.format("%d bytes in %.2fs", #source, dt))
-        origin = url
-    else
-        OK("Using inline source", string.format("%d bytes", #source))
-    end
-
-    setLoadingStatus("Compiling...", Color3.fromRGB(120, 180, 255))
-
-    local fn, err = compileLua(source)
-    if not fn then
-        FAIL("Compile", err)
-        return false
-    end
-    OK("Compiled", "OK")
-
-    setLoadingStatus("Executing AirHub...", Color3.fromRGB(120, 180, 255))
-
-    local ok, runErr = pcall(fn)
-    if not ok then
-        FAIL("Execute", tostring(runErr))
-        return false
-    end
-    OK("Executed", "loaded from " .. origin)
-    return true
-end
-
---=============================================================
--- 4. SELF-CLEANUP
+-- 3. SELF-CLEANUP
 --=============================================================
 local function cleanupLoader()
-    SECTION("STEP 4 / 4  —  Self-Cleanup")
+    SECTION("STEP 3 / 3  —  Self-Cleanup")
 
-    -- 4.1 Loading UI
+    -- 3.1 Loading UI
     if LoadingGui then
         destroyLoadingUI()
         OK("Loading UI", "destroyed")
     end
 
-    -- 4.2 Any extra ScreenGui / Drawing objects left by loader
+    -- 3.2 Any extra ScreenGui left by loader
     local cleaned = 0
     safe(function()
         for _, g in ipairs(CoreGui:GetChildren()) do
@@ -645,7 +530,7 @@ local function cleanupLoader()
     end)
     if cleaned > 0 then OK("Orphan GUIs", cleaned .. " removed") end
 
-    -- 4.3 getgenv() vars set by loader
+    -- 3.3 getgenv() vars set by loader
     local genv = E()
     local removed = 0
     for _, key in ipairs({ "__loader_active", "__loader_source", "__loader_origin" }) do
@@ -656,11 +541,10 @@ local function cleanupLoader()
     end
     if removed > 0 then OK("getgenv vars", removed .. " cleared") end
 
-    -- 4.4 NOTE: NamecallManager hook НЕ удаляется —
-    --     он нужен для bypass'а (Kick-блокировка, handshake-фильтры),
-    --     который продолжает работать под AirHub.
+    -- 3.4 NOTE: NamecallManager hook НЕ удаляется —
+    --     он продолжает работать как bypass (Kick-блокировка, handshake-фильтры).
     if NamecallManager.hooked then
-        OK("Bypass hooks", "kept alive (needed by AirHub)")
+        OK("Bypass hooks", "kept alive")
     end
 
     L("  →  Loader cleanup complete")
@@ -674,7 +558,7 @@ task.spawn(function()
     createLoadingUI()
 
     L("═════════════════════════════════════════")
-    L("  AutoDetect → AutoBypass → AirHub")
+    L("  AutoDetect → AutoBypass → Cleanup")
     L("═════════════════════════════════════════")
 
     local t_start = tick()
@@ -685,32 +569,18 @@ task.spawn(function()
     -- 2) Bypass
     autoBypass()
 
-    -- 3) Inject
-    task.wait(0.2)
-    local injected = injectAirHub()
-
-    -- 4) Self-Cleanup
+    -- 3) Self-Cleanup
     task.wait(0.2)
 
-    if injected then
+    if CONFIG.CLEANUP_AFTER_LOAD then
         cleanupLoader()
-
-        local total_time = tick() - t_start
-        L("═════════════════════════════════════════")
-        L(string.format("  DONE  ✓   AirHub running   (%.2fs)", total_time))
-        L("═════════════════════════════════════════")
     else
-        -- При ошибке — показываем статус, затем через N сек скрываем
-        setLoadingStatus("AirHub injection failed — see console", Color3.fromRGB(255, 100, 100))
-
-        local total_time = tick() - t_start
-        L("═════════════════════════════════════════")
-        L(string.format("  FAILED  ✗   AirHub not loaded   (%.2fs)", total_time))
-        L("═════════════════════════════════════════")
-
-        if CONFIG.KEEP_FAILED_UI > 0 then
-            task.wait(CONFIG.KEEP_FAILED_UI)
-        end
-        destroyLoadingUI()
+        setLoadingStatus("Bypass complete", Color3.fromRGB(120, 220, 120))
+        OK("Bypass active", "cleanup skipped (CLEANUP_AFTER_LOAD = false)")
     end
+
+    local total_time = tick() - t_start
+    L("═════════════════════════════════════════")
+    L(string.format("  DONE  ✓   Bypass active   (%.2fs)", total_time))
+    L("═════════════════════════════════════════")
 end)
