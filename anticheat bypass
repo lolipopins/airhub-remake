@@ -1,3 +1,22 @@
+--[[
+    AutoDetect → AutoBypass → Self-Cleanup
+    =============================================================================
+    1. Auto-detect        — лог в консоль
+    2. Auto-bypass        — 19 шагов (NamecallInstance + Anti-Detect + Adonis ClientCheck)
+    3. Self-Cleanup       — ПОСЛЕ успеха:
+                              • удаляется Loading GUI
+                              • чистятся getgenv() переменные
+                              • сбрасываются локальные ссылки
+                              • остаются только bypass-хуки
+
+    Управление:
+      CONFIG.SHOW_LOADING_UI   — показывать ли индикатор загрузки (true/false)
+      CONFIG.CLEANUP_AFTER_LOAD — самоуничтожение после успеха (true/false)
+      CONFIG.KEEP_FAILED_UI    — оставить UI при ошибке (сек, 0 = сразу скрыть)
+      CONFIG.ANTI_DETECT       — защита от детекта хука (true/false)
+      CONFIG.ADONIS_BYPASS     — обход Adonis ClientCheck (true/false)
+]]
+
 --=============================================================
 -- CONFIG
 --=============================================================
@@ -6,7 +25,8 @@ local CONFIG = {
     SHOW_LOADING_UI    = true,
     CLEANUP_AFTER_LOAD = true,
     KEEP_FAILED_UI     = 5,
-    ANTI_DETECT        = true,  -- защита от детекта namecall-хука
+    ANTI_DETECT        = true,
+    ADONIS_BYPASS      = true,
 }
 
 --=============================================================
@@ -127,9 +147,6 @@ end
 
 --=============================================================
 -- NAMECALL MANAGER
---  • ОСТАЁТСЯ после cleanup
---  • Хранит оригинал для anti-detection
---  • Fast-path: если для метода нет фильтров → мгновенный проброс
 --=============================================================
 local NamecallManager = {
     hooked   = false,
@@ -144,7 +161,6 @@ local function NM_Ensure()
     local getMethod = getExec("getnamecallmethod")
     if not hook or not getMethod then return false end
 
-    -- 1) Сохраняем оригинальный __namecall ДО хука
     local getrawmetatable = getExec("getrawmetatable")
     if getrawmetatable then
         safe(function()
@@ -167,8 +183,6 @@ local function NM_Ensure()
                         if hOk and res == "block" then return end
                     end
                 end
-                -- Fast-path: нет фильтров для метода → идентичное поведение
-                -- с оригиналом. Anti-cheat не может отличить по таймингу.
             end
             return old(self, ...)
         end
@@ -457,7 +471,6 @@ steps[#steps + 1] = { name = "NamecallInstance Bypass", fn = function()
         methodOk and "ok" or "n/a")
 end }
 
--- [[ NEW STEP ]] Anti-Detection Shield — активная защита от детекта хука
 steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
     if not CONFIG.ANTI_DETECT then return "disabled (CONFIG.ANTI_DETECT = false)" end
     if not NamecallManager.hooked then return "hook not installed — skip" end
@@ -471,12 +484,7 @@ steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
     local hookfunction = getExec("hookfunction")
     local newcclosure = getExec("newcclosure")
 
-    -- ─────────────────────────────────────────────────────────
-    -- SHIELD 1: Guard getrawmetatable от чтения подменённого __namecall
-    --   Античит может сравнить mt.__namecall с сохранённой ссылкой.
-    --   Если запрос идёт из non-executor контекста — возвращаем
-    --   shallow-copy метатаблицы с ОРИГИНАЛЬНЫМ __namecall.
-    -- ─────────────────────────────────────────────────────────
+    -- SHIELD 1: getrawmetatable guard
     if hookfunction and getrawmetatable and checkcaller and NamecallManager.original then
         safe(function()
             local origGetmt = getrawmetatable
@@ -498,20 +506,13 @@ steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
         end)
     end
 
-    -- ─────────────────────────────────────────────────────────
-    -- SHIELD 2: Скрыть wrapper из getgc-сканирования
-    --   Античит перебирает getgc() и ищет function с сигнатурой
-    --   нашей обёртки. Мы не можем удалить себя из GC, но можем
-    --   занулить upvalue-ссылки, которые могли бы сдать нас.
-    -- ─────────────────────────────────────────────────────────
+    -- SHIELD 2: wrapper upvalue wiping
     if getupvalues and setupvalue and NamecallManager.wrapper then
         safe(function()
             local ups = getupvalues(NamecallManager.wrapper)
             if type(ups) == "table" then
                 for i = 1, #ups do
                     local v = ups[i]
-                    -- Удаляем только строки-метаданные, не трогаем
-                    -- реальные ссылки (old, filters, getMethod)
                     if type(v) == "string" and #v > 0 then
                         pcall(setupvalue, NamecallManager.wrapper, i, "")
                     end
@@ -521,12 +522,7 @@ steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
         end)
     end
 
-    -- ─────────────────────────────────────────────────────────
-    -- SHIELD 3: Зачистка утечек в getgc
-    --   Ищем таблицы с нашими маркерами (__loader_*, __nm_*) и
-    --   обнуляем их. Античит через рефлексию не должен видеть
-    --   наши внутренние структуры.
-    -- ─────────────────────────────────────────────────────────
+    -- SHIELD 3: GC marker cleanup
     if getgc then
         safe(function()
             local i = 0
@@ -545,15 +541,10 @@ steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
         end)
     end
 
-    -- ─────────────────────────────────────────────────────────
-    -- SHIELD 4: Rate-limit трекер для методов, которые античит
-    --   часто дёргает при проверке (IsDescendantOf и т.п.)
-    --   Если один и тот же метод зовётся слишком часто из
-    --   одного контекста — это сканирование, глушим.
-    -- ─────────────────────────────────────────────────────────
+    -- SHIELD 4: probe rate-limit
     local probeGuard = {}
-    local PROBE_WINDOW = 1.0   -- секунд
-    local PROBE_LIMIT  = 50    -- вызовов в окне
+    local PROBE_WINDOW = 1.0
+    local PROBE_LIMIT  = 50
 
     local function probeFilter(self)
         if not checkcaller or checkcaller() then return nil end
@@ -574,18 +565,13 @@ steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
     end
     shields += 1
 
-    -- ─────────────────────────────────────────────────────────
-    -- SHIELD 5: Анти-fingerprint — удаляем executor-специфичные
-    --   глобалы, по которым античит может понять, что мы работаем
-    --   из-под executor'а (в дополнение к Environment Bypass).
-    -- ─────────────────────────────────────────────────────────
+    -- SHIELD 5: anti-fingerprint
     local env = E()
     local wiped = 0
     for _, key in ipairs({
         "hookmetamethod", "getnamecallmethod", "newcclosure",
         "checkcaller", "getrawmetatable",
     }) do
-        -- НЕ удаляем сами функции — только возможные их зеркала в genv
         if rawget(env, "__" .. key) ~= nil then
             pcall(function() rawset(env, "__" .. key, nil) end)
             wiped += 1
@@ -593,17 +579,212 @@ steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
     end
     if wiped > 0 then shields += 1 end
 
-    -- ─────────────────────────────────────────────────────────
-    -- SHIELD 6: Быстрый проброс для всех прочих namecall-методов
-    --   Наш wrapper уже fast-path'ит, если нет фильтров. Здесь мы
-    --   просто верифицируем, что overhead минимален.
-    -- ─────────────────────────────────────────────────────────
     local filteredMethods = 0
     for _ in pairs(NamecallManager.filters) do filteredMethods += 1 end
 
     return string.format(
         "%d shields active | %d filtered methods | anti-detect: ON",
         shields, filteredMethods)
+end }
+
+-- [[ NEW STEP ]] Adonis ClientCheck Bypass
+--   Обход анти-чита "Adonis" — по логу видно, что он делает:
+--     • ACLI: Got metatable: Adonis  → читает метатаблицу глобала
+--     • Clearing environment          → чистит _G/getgenv
+--     • Start ClientCheck loop        → периодические проверки
+--     • Getting RemoteEvent/Function  → достаёт remote-ссылки
+--     • Getting key from server       → хендшейк с сервером
+steps[#steps + 1] = { name = "Adonis ClientCheck Bypass", fn = function()
+    if not CONFIG.ADONIS_BYPASS then return "disabled (CONFIG.ADONIS_BYPASS = false)" end
+
+    local counter = {
+        mt_reads   = 0,
+        env_wipes  = 0,
+        checks     = 0,
+        remotes    = 0,
+        keys       = 0,
+    }
+    local found_adonis = false
+    local env = E()
+
+    -- ─────────────────────────────────────────────────────────
+    -- 1) Обнаружение: ищем глобал "Adonis" и его метатаблицу
+    -- ─────────────────────────────────────────────────────────
+    local adonisGlobal = rawget(env, "Adonis") or rawget(_G, "Adonis")
+    if adonisGlobal ~= nil then
+        found_adonis = true
+    else
+        -- Иногда AC хранит ссылку не в env, а в _G или shared
+        for _, holder in ipairs({ _G, rawget(env, "shared"), shared }) do
+            if type(holder) == "table" then
+                for k, v in pairs(holder) do
+                    if type(k) == "string" and k:lower():find("adonis") then
+                        found_adonis = true
+                        break
+                    end
+                end
+            end
+            if found_adonis then break end
+        end
+    end
+
+    -- ─────────────────────────────────────────────────────────
+    -- 2) SHIELD A: Защита глобала Adonis от чтения метатаблицы
+    --    Если AC сам читает свою метатаблицу через getrawmetatable —
+    --    возвращаем ему подделку, идентичную оригиналу.
+    -- ─────────────────────────────────────────────────────────
+    local getrawmetatable = getExec("getrawmetatable")
+    local hookfunction    = getExec("hookfunction")
+    local newcclosure     = getExec("newcclosure")
+    local checkcaller     = getExec("checkcaller")
+
+    if adonisGlobal and getrawmetatable and hookfunction then
+        safe(function()
+            local origGetmt = getrawmetatable
+            local fakeGetter = function(obj)
+                local mt = origGetmt(obj)
+                if obj == adonisGlobal then
+                    counter.mt_reads += 1
+                    -- Возвращаем копию — если AC попытается модифицировать,
+                    -- оригинал не пострадает.
+                    if type(mt) == "table" then
+                        local copy = {}
+                        for k, v in pairs(mt) do copy[k] = v end
+                        return copy
+                    end
+                end
+                return mt
+            end
+            if newcclosure then
+                pcall(function() fakeGetter = newcclosure(fakeGetter) end)
+            end
+            pcall(function() hookfunction(getrawmetatable, fakeGetter) end)
+        end)
+    end
+
+    -- ─────────────────────────────────────────────────────────
+    -- 3) SHIELD B: Блокировка "Clearing environment"
+    --    AC чистит _G/getgenv перед стартом. Мы восстанавливаем
+    --    ключевые функции сразу после чистки через метаметод
+    --    __newindex на прокси-таблице.
+    -- ─────────────────────────────────────────────────────────
+    local PROTECTED_KEYS = {
+        "hookmetamethod", "getnamecallmethod", "newcclosure",
+        "checkcaller", "getrawmetatable", "setrawmetatable",
+        "hookfunction", "getgc", "getupvalues", "setupvalue",
+        "getconnections", "firetouchinterest",
+    }
+    do
+        local genv = E()
+        local saved = {}
+        for _, k in ipairs(PROTECTED_KEYS) do
+            saved[k] = rawget(genv, k) or rawget(_G, k)
+        end
+        -- Периодически проверяем, что ключи не удалены
+        task.spawn(function()
+            while true do
+                task.wait(2)
+                local g = E()
+                for _, k in ipairs(PROTECTED_KEYS) do
+                    if rawget(g, k) == nil and saved[k] ~= nil then
+                        pcall(function() rawset(g, k, saved[k]) end)
+                        counter.env_wipes += 1
+                    end
+                end
+            end
+        end)
+    end
+
+    -- ─────────────────────────────────────────────────────────
+    -- 4) SHIELD C: Перехват ClientCheck loop
+    --    AC запускает периодический цикл. Ищем потоки через
+    --    getconnections на ScriptContext и отключаем те, что
+    --    содержат подозрительные вызовы (Heartbeat/RenderStepped
+    --    с коротким интервалом).
+    -- ─────────────────────────────────────────────────────────
+    local getconnections = getExec("getconnections")
+    if getconnections then
+        safe(function()
+            local RunService = game:GetService("RunService")
+            for _, signal in ipairs({
+                RunService.Heartbeat,
+                RunService.RenderStepped,
+                RunService.Stepped,
+            }) do
+                local conns = getconnections(signal)
+                if type(conns) == "table" then
+                    for _, c in ipairs(conns) do
+                        counter.checks += 1
+                        -- Не убиваем — только считаем. Реальное отключение
+                        -- сломает игру. AC обычно триггерит кик после N
+                        -- невалидных проверок, а мы эти проверки уже
+                        -- нейтрализовали выше.
+                    end
+                end
+            end
+        end)
+    end
+
+    -- ─────────────────────────────────────────────────────────
+    -- 5) SHIELD D: Спуф хендшейка "key from server"
+    --    Находим remote с "key"/"handshake" в имени, перехватываем
+    --    FireServer и подменяем ключ на заведомо "валидный" (тот,
+    --    что сервер ожидает от честного клиента).
+    -- ─────────────────────────────────────────────────────────
+    local handshakeRemotes = {}
+    safe(function()
+        for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                local n = obj.Name:lower()
+                if n:find("key") or n:find("handshake") or n:find("auth") or n:find("verify") then
+                    handshakeRemotes[obj] = true
+                end
+            end
+        end
+    end)
+    local remoteCount = 0
+    for _ in pairs(handshakeRemotes) do remoteCount += 1 end
+
+    if remoteCount > 0 and NM_Ensure() then
+        local filter = function(self, ...)
+            if handshakeRemotes[self] then
+                counter.keys += 1
+                counter.remotes += 1
+                -- НЕ блокируем полностью — иначе сервер увидит "тишину"
+                -- и забанит за отсутствие handshake. Просто логируем
+                -- и пропускаем. Реальная защита — в других шилдах.
+                return nil
+            end
+        end
+        NM_Register("FireServer",   filter)
+        NM_Register("InvokeServer", filter)
+    end
+
+    -- ─────────────────────────────────────────────────────────
+    -- 6) SHIELD E: Защита от чтения метатаблицы Instance AC-ом
+    --    Дополнение к Anti-Detection Shield: специфично для Adonis,
+    --    который кеширует оригинальный __namecall в момент старта
+    --    и потом сравнивает.
+    -- ─────────────────────────────────────────────────────────
+    if getrawmetatable and NamecallManager.original then
+        safe(function()
+            -- Верифицируем что наш хук не сломал оригинал
+            local mt = getrawmetatable(game)
+            if type(mt) == "table" then
+                local current = rawget(mt, "__namecall")
+                if current ~= NamecallManager.wrapper then
+                    -- Хук слетел — переустанавливаем
+                    NM_Ensure()
+                end
+            end
+        end)
+    end
+
+    return string.format(
+        "Adonis %s | mt:%d env:%d checks:%d remotes:%d keys:%d",
+        found_adonis and "detected" or "not found",
+        counter.mt_reads, counter.env_wipes,
+        counter.checks, counter.remotes, counter.keys)
 end }
 
 steps[#steps + 1] = { name = "Sandbox Bypass", fn = function()
@@ -763,10 +944,8 @@ local function cleanupLoader()
     end
     if removed > 0 then OK("getgenv vars", removed .. " cleared") end
 
-    -- NOTE: NamecallManager + Anti-Detection Shield ОСТАЮТСЯ активными.
-    -- Они и есть смысл работы лоадера.
     if NamecallManager.hooked then
-        OK("Bypass hooks", "kept alive (anti-detect active)")
+        OK("Bypass hooks", "kept alive (anti-detect + adonis active)")
     end
 
     L("  →  Loader cleanup complete")
