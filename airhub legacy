@@ -1,3 +1,6 @@
+--this version will no longer recive updates
+
+
 --// Error handling
 local ErrorText = Drawing.new("Text")
 ErrorText.Visible = false
