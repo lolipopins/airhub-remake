@@ -1,3 +1,9 @@
+--// AirHub Remake — hardened loader
+--// - nil-safe warn/print (fixes "attempt to call a nil value")
+--// - multi-method HTTP (HttpGet / game:HttpGet / request / syn.request / http_request)
+--// - loadstring OR load fallback
+--// - no goto/labels (works on Lua 5.1 and Luau)
+
 local REPO = "https://raw.githubusercontent.com/lolipopins/airhub-remake/main/src/"
 
 local PRE_FILES = {
@@ -16,40 +22,97 @@ local FILES = {
     "07b_ui_tabs.lua",
 }
 
-local function Fetch(url)
-    local ok, res = pcall(function() return game:HttpGet(url) end)
-    if ok and type(res) == "string" and #res > 0 then return res end
-    if type(request) == "function" then
-        local ok2, r2 = pcall(function()
-            return request({ Url = url, Method = "GET" }).Body
-        end)
-        if ok2 and type(r2) == "string" and #r2 > 0 then return r2 end
+--// ---------- capture originals, nil-safe ----------
+local _print = (type(print) == "function") and print or function() end
+local _warn  = (type(warn)  == "function") and warn  or _print
+
+local function say(...)   _print(...) end
+local function swarn(...) _warn(...)  end
+
+--// ---------- HTTP ----------
+local function httpGet(url)
+    local methods = {
+        function()
+            if type(HttpGet) == "function" then return HttpGet(url) end
+        end,
+        function()
+            if game and type(game.HttpGet) == "function" then
+                return game:HttpGet(url)
+            end
+        end,
+        function()
+            if game and type(game.HttpGetAsync) == "function" then
+                return game:HttpGetAsync(url)
+            end
+        end,
+        function()
+            if type(request) == "function" then
+                local r = request({ Url = url, Method = "GET" })
+                return r and r.Body
+            end
+        end,
+        function()
+            if type(http_request) == "function" then
+                local r = http_request({ Url = url, Method = "GET" })
+                return r and r.Body
+            end
+        end,
+        function()
+            if type(syn) == "table" and type(syn.request) == "function" then
+                local r = syn.request({ Url = url, Method = "GET" })
+                return r and r.Body
+            end
+        end,
+    }
+    for _, m in ipairs(methods) do
+        local ok, res = pcall(m)
+        if ok and type(res) == "string" and #res > 0 then
+            return res
+        end
     end
     return nil
 end
 
---// ---------------------------------------------------------------------------
---// Античит-байпас — глушим весь его вывод, отчёт делает лоадер.
---// ---------------------------------------------------------------------------
-local realWarn = warn
-local realPrint = print
+local function Fetch(url) return httpGet(url) end
 
-local function RunBypassSilently(url)
-    local src = Fetch(url)
-    if not src then
-        return false, "download failed"
+--// ---------- compile ----------
+local function compile(src, name)
+    if type(loadstring) == "function" then
+        return loadstring(src, "@" .. name)
+    elseif type(load) == "function" then
+        return load(src, "@" .. name)
     end
-    local chunk, compileErr = loadstring(src, "@anticheat_bypass")
+    return nil, "loadstring/load unavailable in this executor"
+end
+
+--// ---------- silence globals during bypass ----------
+local function withSilencedOutput(fn)
+    local savedWarn, savedPrint
+    pcall(function() savedWarn  = warn  end)
+    pcall(function() savedPrint = print end)
+
+    pcall(function() warn  = function() end end)
+    pcall(function() print = function() end end)
+
+    local ok, err = pcall(fn)
+
+    pcall(function() warn  = savedWarn  end)
+    pcall(function() print = savedPrint end)
+
+    return ok, err
+end
+
+--// ---------- run bypass silently ----------
+local function runBypassSilently(url)
+    local src = Fetch(url)
+    if not src then return false, "download failed" end
+
+    local chunk, compileErr = compile(src, "anticheat_bypass")
     if not chunk then
         return false, "compile error: " .. tostring(compileErr)
     end
 
-    warn = function() end
-    print = function() end
-    local ok, err = pcall(chunk)
-    warn = realWarn
-    print = realPrint
-
+    local ok, err = withSilencedOutput(chunk)
     if not ok then
         return false, "runtime error: " .. tostring(err)
     end
@@ -57,46 +120,55 @@ local function RunBypassSilently(url)
 end
 
 for _, url in ipairs(PRE_FILES) do
-    local ok, err = RunBypassSilently(url)
+    local ok, err = runBypassSilently(url)
     if ok then
-        print("[AirHub] anticheat bypassed")
+        say("[AirHub] anticheat bypassed")
     else
-        warn("[AirHub] anticheat bypass failed: " .. tostring(err))
+        swarn("[AirHub] anticheat bypass failed: " .. tostring(err))
     end
-    task.wait()
+    if type(task) == "table" and type(task.wait) == "function" then
+        task.wait()
+    elseif type(wait) == "function" then
+        wait()
+    end
 end
 
---// ---------------------------------------------------------------------------
---// Основные модули — лоадер отчитывается по каждому.
---// ---------------------------------------------------------------------------
+--// ---------- load modules ----------
 local loaded, failed = 0, 0
+
 for _, file in ipairs(FILES) do
     local url = REPO .. file
     local src = Fetch(url)
+
     if not src then
-        warn("[AirHub] FAILED to download: " .. file)
+        swarn("[AirHub] FAILED to download: " .. file)
         failed = failed + 1
-        goto continue
+    else
+        local chunk, compileErr = compile(src, file)
+        if not chunk then
+            swarn("[AirHub] COMPILE ERROR in " .. file .. ": " .. tostring(compileErr))
+            failed = failed + 1
+        else
+            local ok, err = pcall(chunk)
+            if not ok then
+                swarn("[AirHub] RUNTIME ERROR in " .. file .. ": " .. tostring(err))
+                failed = failed + 1
+            else
+                loaded = loaded + 1
+            end
+        end
     end
-    local chunk, compileErr = loadstring(src, "@" .. file)
-    if not chunk then
-        warn("[AirHub] COMPILE ERROR in " .. file .. ": " .. tostring(compileErr))
-        failed = failed + 1
-        goto continue
+
+    if type(task) == "table" and type(task.wait) == "function" then
+        task.wait()
+    elseif type(wait) == "function" then
+        wait()
     end
-    local ok, err = pcall(chunk)
-    if not ok then
-        warn("[AirHub] RUNTIME ERROR in " .. file .. ": " .. tostring(err))
-        failed = failed + 1
-        goto continue
-    end
-    loaded = loaded + 1
-    ::continue::
-    task.wait()
 end
 
 if failed > 0 then
-    warn("[AirHub] modules loaded: " .. loaded .. "/" .. #FILES .. " (failed: " .. failed .. ")")
+    swarn("[AirHub] modules loaded: " .. loaded .. "/" .. #FILES ..
+          " (failed: " .. failed .. ")")
 else
-    print("[AirHub] modules loaded: " .. loaded .. "/" .. #FILES)
+    say("[AirHub] modules loaded: " .. loaded .. "/" .. #FILES)
 end
