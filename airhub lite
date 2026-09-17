@@ -8,8 +8,54 @@ ErrorText.Visible = false
 ErrorText.Size = 16
 ErrorText.Color = Color3.fromRGB(255, 0, 0)
 ErrorText.Position = Vector2.new(20, 20)
-local function ShowError(msg) ErrorText.Text = tostring(msg) ErrorText.Visible = true task.delay(3, function() ErrorText.Visible = false end) end
-local function HandleError(err) ShowError("⚠️ " .. tostring(err)) warn("[AirHub] " .. tostring(err)) end
+
+--====================================================================================
+--  Stealth helpers (used across whole script)
+--====================================================================================
+local function RandStr(len)
+    len = len or 10
+    local chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    local out = {}
+    for i = 1, len do
+        local idx = math.random(1, #chars)
+        out[i] = chars:sub(idx, idx)
+    end
+    return table.concat(out)
+end
+
+local function GetSafeGuiParent()
+    if type(gethui) == "function" then
+        local ok, hui = pcall(gethui)
+        if ok and hui then return hui, true end
+    end
+    local ok, cg = pcall(function() return game:GetService("CoreGui") end)
+    if ok and cg then return cg, false end
+    return LocalPlayer and LocalPlayer:WaitForChild("PlayerGui") or game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui"), false
+end
+
+local function ProtectGui(gui)
+    local protected = false
+    if syn and type(syn.protect_gui) == "function" then
+        protected = pcall(function() syn.protect_gui(gui) end) or protected
+    end
+    if type(protect_gui) == "function" then
+        protected = pcall(function() protect_gui(gui) end) or protected
+    end
+    if type(protectgui) == "function" then
+        protected = pcall(function() protectgui(gui) end) or protected
+    end
+    return protected
+end
+
+local function ShowError(msg)
+    ErrorText.Text = tostring(msg)
+    ErrorText.Visible = true
+    task.delay(3, function() ErrorText.Visible = false end)
+end
+local function HandleError(err)
+    ShowError(tostring(err))
+    warn(tostring(err))
+end
 
 local function SafeKeyCode(name)
     if type(name) ~= "string" then return nil end
@@ -94,14 +140,14 @@ RunService.Heartbeat:Connect(function()
     for i = #ActiveLogs, 1, -1 do
         local log = ActiveLogs[i]
         if now - log.created >= log.duration then
-            log.text:Remove()
+            pcall(function() log.text:Remove() end)
             table.remove(ActiveLogs, i)
         end
     end
 end)
 
 local Running, Typing, LastShotTime = false, false, 0
-local OriginalSensitivity, MenuVisible = nil, true
+local MenuVisible = true
 
 getgenv().AirHub.Logging = { Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18 }
 getgenv().AirHub.Sound = {
@@ -264,7 +310,6 @@ local function CancelLock()
     Aimbot.Locked = nil
     Aimbot.LockPartInstance = nil
     Aimbot.FOVCircle.Color = Color3.fromRGB(255,255,255)
-    if OriginalSensitivity then UserInputService.MouseDeltaSensitivity = OriginalSensitivity end
 end
 
 local function GetClosestPlayer()
@@ -346,15 +391,15 @@ local function LogShot(targetPlayer, startHealth, hitPartName, wasVisible)
     local msg, color
     if hit then
         if hum.Health <= 0 then
-            msg = "💀 Killed " .. targetPlayer.Name .. " (" .. hitPartName .. ")"
+            msg = "Killed " .. targetPlayer.Name .. " (" .. hitPartName .. ")"
             color = Color3.fromRGB(255, 255, 0)
         else
-            msg = "✅ Hit " .. targetPlayer.Name .. " (" .. hitPartName .. " - " .. math.floor(startHealth - endHealth) .. " dmg)"
+            msg = "Hit " .. targetPlayer.Name .. " (" .. hitPartName .. " - " .. math.floor(startHealth - endHealth) .. " dmg)"
             color = Color3.fromRGB(0, 255, 0)
         end
     else
-        if not wasVisible then msg = "❌ Missed (wall) " .. targetPlayer.Name
-        else msg = "❌ Missed " .. targetPlayer.Name end
+        if not wasVisible then msg = "Missed (wall) " .. targetPlayer.Name
+        else msg = "Missed " .. targetPlayer.Name end
         color = Color3.fromRGB(255, 80, 80)
     end
     AddLog(msg, color)
@@ -405,7 +450,6 @@ end
 local GunHandlerHooked = false
 local function SetupGunHandlerHook()
     if GunHandlerHooked then return end
-    GunHandlerHooked = true
     local modules = ReplicatedStorage:FindFirstChild("Modules")
     if not modules then return end
     local guns = modules:FindFirstChild("Guns")
@@ -415,6 +459,7 @@ local function SetupGunHandlerHook()
     local success, GunHandler = pcall(require, gunHandlerModule)
     if not success or not GunHandler then return end
     if not GunHandler.Shoot then return end
+    GunHandlerHooked = true
     local oldShoot = GunHandler.Shoot
     GunHandler.Shoot = function(p1, p2, p3, p4, p5, p6, p7, p8)
         if Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim and Aimbot.Settings.SilentAimMode == "GunHandler" and Running and Aimbot.Locked and Aimbot.LockPartInstance then
@@ -514,7 +559,6 @@ local function RemoveMouseHitHook()
 end
 
 local function LoadAimbot()
-    OriginalSensitivity = UserInputService.MouseDeltaSensitivity
     RunService.RenderStepped:Connect(function()
         local now = tick()
         local dt = math.min(0.033, now - lastDelta)
@@ -626,7 +670,8 @@ local function LoadAimbot()
                 if Aimbot.Settings.AutoShoot.OnlyWhenAiming and not Running then return end
                 if not Aimbot.Locked or not Aimbot.LockPartInstance then return end
                 local nowt = tick()
-                if nowt - LastShotTime < Aimbot.Settings.AutoShoot.FireRate then return end
+                local rate = math.clamp(tonumber(Aimbot.Settings.AutoShoot.FireRate) or 0.05, 0.001, 1)
+                if nowt - LastShotTime < rate then return end
                 local targetPart = Aimbot.LockPartInstance
                 if not targetPart then return end
                 local targetChar = targetPart.Parent
@@ -674,7 +719,9 @@ end
 
 UserInputService.TextBoxFocused:Connect(function() Typing = true end)
 UserInputService.TextBoxFocusReleased:Connect(function() Typing = false end)
-LoadAimbot()--====================================================================================
+LoadAimbot()
+
+--====================================================================================
 --  AntiAim + Desync
 --====================================================================================
 getgenv().AirHub.AntiAim = {
@@ -684,13 +731,13 @@ getgenv().AirHub.AntiAim = {
             JitterSpeed = 10, SwayAmount = 30, SwaySpeed = 2,
             IgnoreMoving = false, MoveSpeedThreshold = 0.5 }
     },
-    Desync = { 
-        Settings = { 
-            Enabled = false, 
+    Desync = {
+        Settings = {
+            Enabled = false,
             Mode = "Random",
             RadiusX = 5, RadiusY = 5, RadiusZ = 5,
-            UpdateInterval = 0.05, 
-            Smoothness = 0.2, 
+            UpdateInterval = 0.05,
+            Smoothness = 0.2,
             OnlyInAir = false,
             NotInAir = false,
             FreezeOldPos = true,
@@ -698,21 +745,21 @@ getgenv().AirHub.AntiAim = {
             AutoUpdateMin = 0.2,
             AutoUpdateMax = 1.0
         },
-        Internal = { 
-            Connection = nil, 
-            RenderBindName = "AirHubDesync", 
-            Acc = 0, 
-            CurrentOffset = Vector3.new(0,0,0), 
+        Internal = {
+            Connection = nil,
+            RenderBindName = "AirHubDesync",
+            Acc = 0,
+            CurrentOffset = Vector3.new(0,0,0),
             TargetOffset = Vector3.new(0,0,0),
             SavedCFrame = nil,
             OldPosTimer = 0,
             NextUpdate = 0,
             PendingRefresh = false
-        } 
+        }
     },
     Internal = { BodyLastUpdate = 0, BodyJitterTime = 0, BodyJitterOffset = 0,
         BodyGyro = nil, AlignOrientation = nil, Attachment = nil,
-        AngularVelocity = nil, CurrentMotor = nil, OriginalC0 = nil }
+        AngularVelocity = nil, CurrentMotor = nil, OriginalC0 = nil, MotorSearched = false }
 }
 local AntiAim = getgenv().AirHub.AntiAim
 
@@ -724,7 +771,7 @@ local function GetBaseYaw(reference, char)
     elseif reference == "Movement" then
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         if hrp then
-            local vel = hrp.Velocity
+            local vel = hrp.AssemblyLinearVelocity or hrp.Velocity
             local horizontal = Vector3.new(vel.X, 0, vel.Z)
             if horizontal.Magnitude > 0.5 then return math.atan2(horizontal.X, horizontal.Z) end
         end
@@ -778,7 +825,7 @@ local function StartDesync()
         if desync.Settings.OnlyInAir and not inAir then return end
         if desync.Settings.NotInAir and inAir and desync.Settings.Mode ~= "OldPosition" then return end
         local oldcf = hrp.CFrame
-        local oldvel = hrp.Velocity
+        local oldvel = hrp.AssemblyLinearVelocity or hrp.Velocity
         local oldrotvel = hrp.RotVelocity
         local targetCF
         if desync.Settings.Mode == "OldPosition" then
@@ -856,6 +903,7 @@ local function CleanupAntiAim()
         AntiAim.Internal.CurrentMotor = nil
         AntiAim.Internal.OriginalC0 = nil
     end
+    AntiAim.Internal.MotorSearched = false
 end
 
 local function ApplyAntiAim()
@@ -871,7 +919,8 @@ local function ApplyAntiAim()
     local method = AntiAim.Settings.Method
     local shouldApply = true
     if bodySet.IgnoreMoving then
-        if root.Velocity.Magnitude > bodySet.MoveSpeedThreshold then shouldApply = false end
+        local vel = root.AssemblyLinearVelocity or root.Velocity
+        if vel.Magnitude > bodySet.MoveSpeedThreshold then shouldApply = false end
     end
     if shouldApply then
         local baseYaw = GetBaseYaw(bodySet.Reference, char)
@@ -903,19 +952,20 @@ local function ApplyAntiAim()
             AntiAim.Internal.BodyGyro.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
         elseif method == "Motor6D" then
             if AntiAim.Internal.BodyGyro or AntiAim.Internal.AlignOrientation or AntiAim.Internal.AngularVelocity then CleanupAntiAim() end
-            local motor
-            for _, child in ipairs(char:GetDescendants()) do
-                if child:IsA("Motor6D") and (child.Name == "Neck" or child.Name == "Waist" or child.Name:lower():find("neck") or child.Name:lower():find("waist")) then
-                    motor = child
-                    break
+            if not AntiAim.Internal.CurrentMotor or not AntiAim.Internal.MotorSearched or (AntiAim.Internal.CurrentMotor and not AntiAim.Internal.CurrentMotor.Parent) then
+                AntiAim.Internal.CurrentMotor = nil
+                AntiAim.Internal.OriginalC0 = nil
+                AntiAim.Internal.MotorSearched = true
+                for _, child in ipairs(char:GetDescendants()) do
+                    if child:IsA("Motor6D") and (child.Name == "Neck" or child.Name == "Waist" or child.Name:lower():find("neck") or child.Name:lower():find("waist")) then
+                        AntiAim.Internal.CurrentMotor = child
+                        AntiAim.Internal.OriginalC0 = child.C0
+                        break
+                    end
                 end
             end
-            if motor then
-                if not AntiAim.Internal.CurrentMotor or AntiAim.Internal.CurrentMotor ~= motor then
-                    if AntiAim.Internal.CurrentMotor then AntiAim.Internal.CurrentMotor.C0 = AntiAim.Internal.OriginalC0 end
-                    AntiAim.Internal.CurrentMotor = motor
-                    AntiAim.Internal.OriginalC0 = motor.C0
-                end
+            local motor = AntiAim.Internal.CurrentMotor
+            if motor and AntiAim.Internal.OriginalC0 then
                 motor.C0 = AntiAim.Internal.OriginalC0 * CFrame.Angles(0, yaw, 0)
             else CleanupAntiAim() end
         elseif method == "AlignOrientation" then
@@ -933,11 +983,10 @@ local function ApplyAntiAim()
                 align.Parent = root
                 align.Attachment0 = AntiAim.Internal.Attachment
                 align.RigidityEnabled = false
+                align.Mode = Enum.OrientationAlignmentMode.OneAttachment
                 AntiAim.Internal.AlignOrientation = align
             end
             AntiAim.Internal.AlignOrientation.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
-            AntiAim.Internal.AlignOrientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
-            AntiAim.Internal.AlignOrientation.RigidityEnabled = false
         elseif method == "AngularVelocity" then
             if AntiAim.Internal.BodyGyro or AntiAim.Internal.AlignOrientation or AntiAim.Internal.CurrentMotor then CleanupAntiAim() end
             if not AntiAim.Internal.AngularVelocity then
@@ -953,6 +1002,7 @@ local function ApplyAntiAim()
     else CleanupAntiAim() end
 end
 RunService.RenderStepped:Connect(function() xpcall(ApplyAntiAim, HandleError) end)
+
 AntiAim.Functions = {
     ResetSettings = function()
         AntiAim.Settings = { Enabled = false, Mode = "Static", Method = "CFrame",
@@ -963,7 +1013,7 @@ AntiAim.Functions = {
             FreezeOldPos = true, RandomDelayEnabled = false, AutoUpdateMin = 0.2, AutoUpdateMax = 1.0 }
         AntiAim.Internal = { BodyLastUpdate = 0, BodyJitterTime = 0, BodyJitterOffset = 0,
             BodyGyro = nil, AlignOrientation = nil, Attachment = nil,
-            AngularVelocity = nil, CurrentMotor = nil, OriginalC0 = nil }
+            AngularVelocity = nil, CurrentMotor = nil, OriginalC0 = nil, MotorSearched = false }
         AntiAim.Desync.Internal.SavedCFrame = nil
         AntiAim.Desync.Internal.OldPosTimer = 0
         AntiAim.Desync.Internal.NextUpdate = 0
@@ -1012,7 +1062,7 @@ local function ApplyGlowForPlayer(plr)
         if char and hum and hum.Health > 0 then
             if not data.Glow then
                 local highlight = Instance.new("Highlight")
-                highlight.Name = "AirHub_Glow"
+                highlight.Name = RandStr(math.random(8, 14))
                 highlight.Adornee = char
                 highlight.Parent = char
                 highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
@@ -1169,13 +1219,13 @@ local function Wrap(plr)
 end
 
 local function UnWrap(plr)
-    for i, v in pairs(WallHack.WrappedPlayers) do
+    for i = #WallHack.WrappedPlayers, 1, -1 do
+        local v = WallHack.WrappedPlayers[i]
         if v.Name == plr.Name then
             for _, c in pairs(v.Connections) do c:Disconnect() end
             for _, b in pairs(v.Box) do if b and b.Remove then b:Remove() end end
             if v.Glow then v.Glow:Destroy() end
-            WallHack.WrappedPlayers[i] = nil
-            break
+            table.remove(WallHack.WrappedPlayers, i)
         end
     end
 end
@@ -1516,21 +1566,21 @@ Fly.Functions = {
 --  Bhop + Spider
 --====================================================================================
 getgenv().AirHub.Bhop = {
-    Settings = { 
-        Enabled = false, 
-        AutoJumpKey = "Space", 
-        BypassJump = true, 
+    Settings = {
+        Enabled = false,
+        AutoJumpKey = "Space",
+        BypassJump = true,
         JumpCooldown = 0.1,
-        Spider = { 
-            Enabled = false, 
-            Range = 2.5, 
+        Spider = {
+            Enabled = false,
+            Range = 2.5,
             RayCount = 8
-        } 
+        }
     },
-    Internal = { 
-        KeyHeld = false, 
-        LastJumpTime = 0, 
-        Active = false, 
+    Internal = {
+        KeyHeld = false,
+        LastJumpTime = 0,
+        Active = false,
         SpiderTouching = false,
         WallNormal = nil
     }
@@ -1624,13 +1674,13 @@ Bhop.Functions = {
 --  Speed
 --====================================================================================
 getgenv().AirHub.Speed = {
-    Settings = { 
-        Enabled = false, 
-        Method = "WalkSpeed", 
-        GroundSpeed = 30, 
-        AirSpeed = 30, 
+    Settings = {
+        Enabled = false,
+        Method = "WalkSpeed",
+        GroundSpeed = 30,
+        AirSpeed = 30,
         UseAirSpeed = false,
-        InAirOnly = false 
+        InAirOnly = false
     },
     Internal = {Active = false, OriginalWalkSpeed = 16}
 }
@@ -1660,8 +1710,10 @@ local function GetMoveDirection()
     if not (w or s or a or d) then return Vector3.new(0,0,0) end
     local camForward = Camera.CFrame.LookVector
     local camRight = Camera.CFrame.RightVector
-    local forward = Vector3.new(camForward.X, 0, camForward.Z).Unit
-    local right = Vector3.new(camRight.X, 0, camRight.Z).Unit
+    local fwdRaw = Vector3.new(camForward.X, 0, camForward.Z)
+    local rgtRaw = Vector3.new(camRight.X, 0, camRight.Z)
+    local forward = fwdRaw.Magnitude > 0.001 and fwdRaw.Unit or Vector3.new(0, 0, -1)
+    local right   = rgtRaw.Magnitude > 0.001 and rgtRaw.Unit or Vector3.new(1, 0, 0)
     local dir = Vector3.new(0,0,0)
     if w then dir = dir + forward end
     if s then dir = dir - forward end
@@ -1917,7 +1969,7 @@ local function NoclipLoop()
         local char = LocalPlayer.Character
         if char then
             for _, part in ipairs(char:GetDescendants()) do
-                if part:IsA("BasePart") then part.CanCollide = false end
+                if part:IsA("BasePart") then part.Collide = false end
             end
         end
     end
@@ -1937,48 +1989,7 @@ Noclip.Functions = {
 }
 
 --====================================================================================
---  Post-Config Hook
---====================================================================================
-local function ApplyAllEnabledStates()
-    local H = getgenv().AirHub
-    if not H then return end
-    if WallHack.Settings.Enabled then ApplyGlowToAll() end
-    if H.AntiAim and H.AntiAim.Desync.Settings.Enabled then
-        StopDesync()
-        task.defer(function()
-            if getgenv().AirHub and getgenv().AirHub.AntiAim.Desync.Settings.Enabled then
-                StartDesync()
-            end
-        end)
-    else StopDesync() end
-    if H.ServerPosition and H.ServerPosition.Settings.Enabled then
-        StopServerPosition()
-        task.defer(function()
-            if getgenv().AirHub and getgenv().AirHub.ServerPosition.Settings.Enabled then
-                StartServerPosition()
-            end
-        end)
-    else StopServerPosition() end
-    if H.Fly then
-        Fly_ClearInstances()
-        if H.Fly.Settings.Enabled and H.Fly.Settings.Toggle then
-            H.Fly.Internal.Active = true
-        else H.Fly.Internal.Active = false end
-    end
-    if H.Bhop then
-        H.Bhop.Internal.KeyHeld = false
-        H.Bhop.Internal.Active = false
-        H.Bhop.Internal.SpiderTouching = false
-    end
-    if H.Speed then H.Speed.Internal.Active = false end
-    if H.Noclip then H.Noclip.Internal.Active = false end
-    if H.AutoStrafer then
-        AutoStrafer.Internal.Active = false
-        AS_ReleaseAll()
-    end
-    if H.FastStop then FastStop.Internal.LastActive = false end
-end--====================================================================================
---  Custom GUI Library (inline, no dependencies)
+--  Custom GUI Library (stealth hardened, inline, no dependencies)
 --====================================================================================
 local function CreateCustomGUI()
     local LIB = {}
@@ -2005,6 +2016,9 @@ local function CreateCustomGUI()
     local function new(cls, props)
         local i = Instance.new(cls)
         for k, v in pairs(props or {}) do i[k] = v end
+        if not (props and props.Name) then
+            i.Name = RandStr(math.random(6, 14))
+        end
         return i
     end
     local function corner(p, r) return new("UICorner", { CornerRadius = UDim.new(0, r), Parent = p }) end
@@ -2073,17 +2087,20 @@ local function CreateCustomGUI()
         return Color3.fromRGB(r, g, b)
     end
 
-    local ScreenGui = new("ScreenGui", {
-        Name = "AirHub_Custom_GUI",
-        ResetOnSpawn = false,
-        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-        IgnoreGuiInset = true,
-    })
-    pcall(function() ScreenGui.Parent = game:GetService("CoreGui") end)
-    if not ScreenGui.Parent then
-        ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
-    end
+    local parentGui, usedHui = GetSafeGuiParent()
+
+    local ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name           = RandStr(math.random(8, 16))
+    ScreenGui.ResetOnSpawn   = false
+    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    ScreenGui.IgnoreGuiInset = true
+    ScreenGui.DisplayOrder   = 2147483647
+    ScreenGui.Enabled        = true
+
+    ProtectGui(ScreenGui)
+    ScreenGui.Parent = parentGui
     LIB._screen = ScreenGui
+    LIB._protected = usedHui
 
     -- Notifications
     local NotifyFolder = new("Frame", {
@@ -2139,7 +2156,6 @@ local function CreateCustomGUI()
         w.Visible = true
 
         local frame = new("Frame", {
-            Name = "Window",
             Size = UDim2.new(0, 640, 0, 420),
             Position = UDim2.new(0.5, -320, 0.5, -210),
             BackgroundColor3 = Theme.Window, BorderSizePixel = 0, Parent = ScreenGui,
@@ -2149,7 +2165,7 @@ local function CreateCustomGUI()
         w.Frame = frame
 
         local header = new("Frame", {
-            Name = "Header", Size = UDim2.new(1, 0, 0, 40),
+            Size = UDim2.new(1, 0, 0, 40),
             BackgroundColor3 = Theme.Header, BorderSizePixel = 0, Parent = frame,
         })
         corner(header, 12)
@@ -2169,7 +2185,7 @@ local function CreateCustomGUI()
         })
 
         local closeBtn = new("TextButton", {
-            Text = "✕", Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = Theme.SubText,
+            Text = "X", Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = Theme.SubText,
             BackgroundColor3 = Theme.Control, BackgroundTransparency = 1,
             Size = UDim2.new(0, 26, 0, 26), Position = UDim2.new(1, -34, 0.5, -13),
             AutoButtonColor = false, Parent = header,
@@ -2180,14 +2196,14 @@ local function CreateCustomGUI()
         closeBtn.MouseButton1Click:Connect(function() w:Hide() end)
 
         local body = new("Frame", {
-            Name = "Body", Position = UDim2.new(0, 0, 0, 40),
+            Position = UDim2.new(0, 0, 0, 40),
             Size = UDim2.new(1, 0, 1, -40), BackgroundColor3 = Theme.Content,
             BorderSizePixel = 0, Parent = frame,
         })
         corner(body, 12)
 
         local sidebar = new("Frame", {
-            Name = "Sidebar", Size = UDim2.new(0, 150, 1, 0),
+            Size = UDim2.new(0, 150, 1, 0),
             BackgroundColor3 = Theme.Sidebar, BorderSizePixel = 0, Parent = body,
         })
         corner(sidebar, 12)
@@ -2202,19 +2218,12 @@ local function CreateCustomGUI()
         list(sidebarPad, Enum.FillDirection.Vertical, 4)
 
         local content = new("Frame", {
-            Name = "Content", Position = UDim2.new(0, 158, 0, 8),
+            Position = UDim2.new(0, 158, 0, 8),
             Size = UDim2.new(1, -166, 1, -16), BackgroundTransparency = 1, Parent = body,
         })
         w.Sidebar = sidebarPad
         w.Content = content
         mkdrag(frame, header)
-
-        UserInputService.InputBegan:Connect(function(inp, gp)
-            if gp then return end
-            if inp.KeyCode == Enum.KeyCode.RightShift then
-                if w.Visible then w:Hide() else w:Show() end
-            end
-        end)
 
         table.insert(LIB._windows, w)
         return w
@@ -2245,7 +2254,7 @@ local function CreateCustomGUI()
         local tab = setmetatable({ Name = tabName, Sections = {}, Window = self }, Tab)
 
         local btn = new("TextButton", {
-            Name = tabName, Text = "  " .. tabName, Font = Enum.Font.GothamMedium,
+            Text = "  " .. tabName, Font = Enum.Font.GothamMedium,
             TextSize = 13, TextColor3 = Theme.SubText, TextXAlignment = Enum.TextXAlignment.Left,
             BackgroundColor3 = Theme.Panel, BackgroundTransparency = 1,
             Size = UDim2.new(1, 0, 0, 30), AutoButtonColor = false, Parent = self.Sidebar,
@@ -2254,7 +2263,7 @@ local function CreateCustomGUI()
         tab.Button = btn
 
         local page = new("Frame", {
-            Name = "Page_" .. tabName, Size = UDim2.new(1, 0, 1, 0),
+            Size = UDim2.new(1, 0, 1, 0),
             BackgroundTransparency = 1, Visible = false, Parent = self.Content,
         })
 
@@ -2313,7 +2322,7 @@ local function CreateCustomGUI()
         local sec = setmetatable({ Name = name, Controls = {}, _order = 0 }, Section)
 
         local frame = new("Frame", {
-            Name = "Section_" .. name, BackgroundColor3 = Theme.Panel, BorderSizePixel = 0,
+            BackgroundColor3 = Theme.Panel, BorderSizePixel = 0,
             Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
             LayoutOrder = #self.Sections + 1, Parent = parent,
         })
@@ -2499,7 +2508,7 @@ local function CreateCustomGUI()
             TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
         })
         local btn = new("TextButton", {
-            Text = tostring(value) .. " ▾", Font = Enum.Font.GothamMedium, TextSize = 12,
+            Text = tostring(value) .. " v", Font = Enum.Font.GothamMedium, TextSize = 12,
             TextColor3 = Theme.Text, BackgroundColor3 = Theme.Control, AutoButtonColor = false,
             TextTruncate = Enum.TextTruncate.AtEnd, Size = UDim2.new(0.5, -4, 1, 0),
             Position = UDim2.new(0.5, 4, 0, 0), Parent = row,
@@ -2543,7 +2552,7 @@ local function CreateCustomGUI()
                 ob.MouseLeave:Connect(function() tw(ob, 0.1, { BackgroundTransparency = 1 }) end)
                 ob.MouseButton1Click:Connect(function()
                     obj.Value = opt
-                    btn.Text = tostring(opt) .. " ▾"
+                    btn.Text = tostring(opt) .. " v"
                     task.spawn(function() callback(opt) end)
                     destroyPopup()
                 end)
@@ -2570,7 +2579,7 @@ local function CreateCustomGUI()
         end)
         function obj:Set(v)
             obj.Value = v
-            btn.Text = tostring(v) .. " ▾"
+            btn.Text = tostring(v) .. " v"
             task.spawn(function() callback(v) end)
         end
         function obj:GetValue() return self.Value end
@@ -2816,9 +2825,9 @@ end
 --====================================================================================
 --  UI
 --====================================================================================
-task.delay(math.random(1,3), function()
+task.spawn(function()
     local Library = CreateCustomGUI()
-    if not Library then ShowError("GUI failed to load") return end
+    if not Library then ShowError("init failed") return end
 
     local function SafeShow()
         if not Library then return end
@@ -2874,7 +2883,9 @@ task.delay(math.random(1,3), function()
         else ShowError("No other servers") end
     end
 
-    UserInputService.InputBegan:Connect(function(inp)
+    -- Единственная подписка на RightShift (без дубля):
+    UserInputService.InputBegan:Connect(function(inp, gpe)
+        if gpe then return end
         if inp.KeyCode == Enum.KeyCode.RightShift then
             MenuVisible = not MenuVisible
             if MenuVisible then SafeShow() else SafeHide() end
@@ -2933,16 +2944,6 @@ task.delay(math.random(1,3), function()
         pcall(function() if Hitsound then Hitsound:Destroy() end end)
         pcall(function() if Killsound then Killsound:Destroy() end end)
         getgenv().AirHub = nil
-        pcall(function()
-            local t = Drawing.new("Text")
-            t.Text = "AirHub unloaded"
-            t.Size = 20
-            t.Color = Color3.fromRGB(255, 80, 80)
-            t.Center = true
-            t.Outline = true
-            t.Position = workspace.CurrentCamera.ViewportSize / 2
-            task.delay(2, function() t:Remove() end)
-        end)
     end
 
     local MainFrame = Library:CreateWindow({
@@ -2960,7 +2961,7 @@ task.delay(math.random(1,3), function()
     local secA = AimbotTab:CreateSection({ Name = "Main" })
     secA:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.Enabled, Callback = function(v) Aimbot.Settings.Enabled = v end })
     secA:AddToggle({ Name = "Toggle", Value = Aimbot.Settings.Toggle, Callback = function(v) Aimbot.Settings.Toggle = v end })
-    secA:AddToggle({ Name = "360° (Ignore FOV)", Value = Aimbot.Settings.IgnoreFOV, Callback = function(v) Aimbot.Settings.IgnoreFOV = v end })
+    secA:AddToggle({ Name = "360 (Ignore FOV)", Value = Aimbot.Settings.IgnoreFOV, Callback = function(v) Aimbot.Settings.IgnoreFOV = v end })
     secA:AddToggle({ Name = "Check visibility from player on TP", Value = Aimbot.Settings.CheckFromPlayerOnTP, Callback = function(v) Aimbot.Settings.CheckFromPlayerOnTP = v end })
     secA:AddDropdown({ Name = "Lock Part", Value = Aimbot.Settings.LockPart, List = {"Head","Torso","Nearest"}, Callback = function(v) Aimbot.Settings.LockPart = v end })
     secA:AddToggle({ Name = "Fallback to visible parts", Value = Aimbot.Settings.FallbackToVisible, Callback = function(v) Aimbot.Settings.FallbackToVisible = v end })
@@ -3212,5 +3213,5 @@ task.delay(math.random(1,3), function()
     mainSec:AddButton({ Name = "Server Hop", Callback = ServerHop })
     mainSec:AddButton({ Name = "Exit (Unload All)", Callback = function() SafeUnload() end })
 
-    ShowError("AirHub loaded")
+    task.wait(0.1)
 end)
