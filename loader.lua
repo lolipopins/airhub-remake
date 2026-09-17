@@ -1,10 +1,14 @@
 --// Features:
---//   • Supports THREE AirHub versions:
---//         - Full     (modules from /src/)
---//         - Lite     (single-file, anticheat GUI bypass)
---//         - Legacy   (single-file, no longer updated)
---//         - anticheat bypasses
-
+--//   • Supports FIVE AirHub versions:
+--//         - Full     (lolipopins modular, 9 files from /src/)
+--//         - Lite     (lolipopins single-file)
+--//         - Legacy   (lolipopins single-file, archived)
+--//         - Original V2 (Exunys official V2, single-file)
+--//         - Original    (Exunys official V1, single-file)
+--//   • Version picker in the menu (5 buttons, wraps into 2 rows)
+--//   • Kick Logger with reason-change detection
+--//   • All bypasses embedded, selectable from menu
+--// ============================================================================
 local AIRHUB_VERSIONS = {
     full = {
         id          = "full",
@@ -38,10 +42,24 @@ local AIRHUB_VERSIONS = {
         type        = "single",
         url         = "https://raw.githubusercontent.com/lolipopins/airhub-remake/refs/heads/main/airhub%20legacy",
     },
+    original_v2 = {
+        id          = "original_v2",
+        label       = "Original V2",
+        description = "Exunys official V2 (Aimbot + ESP + Crosshair)",
+        type        = "single",
+        url         = "https://raw.githubusercontent.com/Exunys/AirHub-V2/main/src/Main.lua",
+    },
+    original = {
+        id          = "original",
+        label       = "Original",
+        description = "Exunys official V1 (Aimbot + WallHack)",
+        type        = "single",
+        url         = "https://raw.githubusercontent.com/Exunys/AirHub/main/AirHub.lua",
+    },
 }
 
---// Ordered list for UI
-local AIRHUB_VERSION_ORDER = { "full", "lite", "legacy" }
+--// Ordered list for UI (5 items - row 1: full, lite, legacy  |  row 2: original_v2, original)
+local AIRHUB_VERSION_ORDER = { "full", "lite", "legacy", "original_v2", "original" }
 
 local CONFIG = {
     MENU_TITLE      = "AirHub Loader",
@@ -870,8 +888,8 @@ local function buildMenu(onInject, onCancel)
 
     --// Main frame
     local frame = Instance.new("Frame", gui)
-    frame.Size = UDim2.new(0, 460, 0, 680)
-    frame.Position = UDim2.new(0.5, -230, 0.5, -340)
+    frame.Size = UDim2.new(0, 480, 0, 740)
+    frame.Position = UDim2.new(0.5, -240, 0.5, -370)
     frame.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
     frame.BorderSizePixel = 0
     Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
@@ -912,30 +930,30 @@ local function buildMenu(onInject, onCancel)
     versionLabel.TextXAlignment = Enum.TextXAlignment.Left
     versionLabel.Text = "AirHub version:"
 
+    --// Version buttons container (wraps into multiple rows)
     local versionRow = Instance.new("Frame", frame)
-    versionRow.Size = UDim2.new(1, -24, 0, 34)
+    versionRow.Size = UDim2.new(1, -24, 0, 76)
     versionRow.Position = UDim2.new(0, 12, 0, 92)
     versionRow.BackgroundTransparency = 1
 
-    local versionLayout = Instance.new("UIListLayout", versionRow)
-    versionLayout.FillDirection = Enum.FillDirection.Horizontal
-    versionLayout.Padding = UDim.new(0, 6)
-    versionLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    local versionGrid = Instance.new("UIGridLayout", versionRow)
+    versionGrid.CellSize = UDim2.new(0, 146, 0, 32)
+    versionGrid.CellPadding = UDim2.new(0, 6, 0, 6)
+    versionGrid.SortOrder = Enum.SortOrder.LayoutOrder
 
     local versionButtons = {}
-    for _, vid in ipairs(AIRHUB_VERSION_ORDER) do
+    for i, vid in ipairs(AIRHUB_VERSION_ORDER) do
         local v = AIRHUB_VERSIONS[vid]
         local btn = Instance.new("TextButton", versionRow)
-        btn.Size = UDim2.new(0, 138, 1, 0)
         btn.BackgroundColor3 = (MenuState.version == vid)
             and Color3.fromRGB(90, 140, 255)
             or Color3.fromRGB(40, 40, 48)
         btn.BorderSizePixel = 0
         btn.Font = Enum.Font.GothamMedium
-        btn.TextSize = 13
+        btn.TextSize = 12
         btn.TextColor3 = Color3.fromRGB(230, 230, 240)
         btn.Text = v.label
-        btn.LayoutOrder = table.find(AIRHUB_VERSION_ORDER, vid) or 0
+        btn.LayoutOrder = i
         Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
 
         btn.MouseButton1Click:Connect(function()
@@ -954,7 +972,7 @@ local function buildMenu(onInject, onCancel)
     --// Version description
     local versionDesc = Instance.new("TextLabel", frame)
     versionDesc.Size = UDim2.new(1, -24, 0, 16)
-    versionDesc.Position = UDim2.new(0, 12, 0, 130)
+    versionDesc.Position = UDim2.new(0, 12, 0, 172)
     versionDesc.BackgroundTransparency = 1
     versionDesc.Font = Enum.Font.Gotham
     versionDesc.TextSize = 11
@@ -971,8 +989,8 @@ local function buildMenu(onInject, onCancel)
 
     --// Bypass scroll
     local scroll = Instance.new("ScrollingFrame", frame)
-    scroll.Size = UDim2.new(1, -24, 1, -300)
-    scroll.Position = UDim2.new(0, 12, 0, 156)
+    scroll.Size = UDim2.new(1, -24, 1, -310)
+    scroll.Position = UDim2.new(0, 12, 0, 194)
     scroll.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
     scroll.BorderSizePixel = 0
     scroll.ScrollBarThickness = 6
