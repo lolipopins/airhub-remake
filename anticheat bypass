@@ -2,7 +2,7 @@
     AutoDetect → AutoBypass → Self-Cleanup
     =============================================================================
     1. Auto-detect        — лог в консоль
-    2. Auto-bypass        — 19 шагов (NamecallInstance + Anti-Detect + Adonis ClientCheck)
+    2. Auto-bypass        — 20 шагов (NamecallInstance + Anti-Detect + Adonis Anti-Kick)
     3. Self-Cleanup       — ПОСЛЕ успеха:
                               • удаляется Loading GUI
                               • чистятся getgenv() переменные
@@ -14,7 +14,7 @@
       CONFIG.CLEANUP_AFTER_LOAD — самоуничтожение после успеха (true/false)
       CONFIG.KEEP_FAILED_UI    — оставить UI при ошибке (сек, 0 = сразу скрыть)
       CONFIG.ANTI_DETECT       — защита от детекта хука (true/false)
-      CONFIG.ADONIS_BYPASS     — обход Adonis ClientCheck (true/false)
+      CONFIG.ADONIS_BYPASS     — обход Adonis ClientCheck + Anti-Kick (true/false)
 ]]
 
 --=============================================================
@@ -181,6 +181,7 @@ local function NM_Ensure()
                     for _, h in ipairs(handlers) do
                         local hOk, res = pcall(h, self, ...)
                         if hOk and res == "block" then return end
+                        if hOk and res == "spoof_kick" then return nil end
                     end
                 end
             end
@@ -412,10 +413,10 @@ end }
 steps[#steps + 1] = { name = "Namecall Bypass", fn = function()
     local ok = NM_Ensure()
     if ok then
-        NM_Register("Kick", function() return "block" end)
-        NM_Register("kick", function() return "block" end)
+        -- ВАЖНО: НЕ блокируем Kick здесь. Adonis детектит блок и триггерит 0x4.
+        -- Спуф делается в шаге "Adonis Anti-Kick Bypass".
     end
-    return ok and "hook installed (Kick blocked)" or "hookmetamethod unavailable"
+    return ok and "hook installed (Kick handled in Adonis step)" or "hookmetamethod unavailable"
 end }
 
 steps[#steps + 1] = { name = "NamecallInstance Bypass", fn = function()
@@ -484,7 +485,6 @@ steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
     local hookfunction = getExec("hookfunction")
     local newcclosure = getExec("newcclosure")
 
-    -- SHIELD 1: getrawmetatable guard
     if hookfunction and getrawmetatable and checkcaller and NamecallManager.original then
         safe(function()
             local origGetmt = getrawmetatable
@@ -506,7 +506,6 @@ steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
         end)
     end
 
-    -- SHIELD 2: wrapper upvalue wiping
     if getupvalues and setupvalue and NamecallManager.wrapper then
         safe(function()
             local ups = getupvalues(NamecallManager.wrapper)
@@ -522,7 +521,6 @@ steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
         end)
     end
 
-    -- SHIELD 3: GC marker cleanup
     if getgc then
         safe(function()
             local i = 0
@@ -541,7 +539,6 @@ steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
         end)
     end
 
-    -- SHIELD 4: probe rate-limit
     local probeGuard = {}
     local PROBE_WINDOW = 1.0
     local PROBE_LIMIT  = 50
@@ -565,7 +562,6 @@ steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
     end
     shields += 1
 
-    -- SHIELD 5: anti-fingerprint
     local env = E()
     local wiped = 0
     for _, key in ipairs({
@@ -587,13 +583,6 @@ steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
         shields, filteredMethods)
 end }
 
--- [[ NEW STEP ]] Adonis ClientCheck Bypass
---   Обход анти-чита "Adonis" — по логу видно, что он делает:
---     • ACLI: Got metatable: Adonis  → читает метатаблицу глобала
---     • Clearing environment          → чистит _G/getgenv
---     • Start ClientCheck loop        → периодические проверки
---     • Getting RemoteEvent/Function  → достаёт remote-ссылки
---     • Getting key from server       → хендшейк с сервером
 steps[#steps + 1] = { name = "Adonis ClientCheck Bypass", fn = function()
     if not CONFIG.ADONIS_BYPASS then return "disabled (CONFIG.ADONIS_BYPASS = false)" end
 
@@ -607,14 +596,10 @@ steps[#steps + 1] = { name = "Adonis ClientCheck Bypass", fn = function()
     local found_adonis = false
     local env = E()
 
-    -- ─────────────────────────────────────────────────────────
-    -- 1) Обнаружение: ищем глобал "Adonis" и его метатаблицу
-    -- ─────────────────────────────────────────────────────────
     local adonisGlobal = rawget(env, "Adonis") or rawget(_G, "Adonis")
     if adonisGlobal ~= nil then
         found_adonis = true
     else
-        -- Иногда AC хранит ссылку не в env, а в _G или shared
         for _, holder in ipairs({ _G, rawget(env, "shared"), shared }) do
             if type(holder) == "table" then
                 for k, v in pairs(holder) do
@@ -628,11 +613,6 @@ steps[#steps + 1] = { name = "Adonis ClientCheck Bypass", fn = function()
         end
     end
 
-    -- ─────────────────────────────────────────────────────────
-    -- 2) SHIELD A: Защита глобала Adonis от чтения метатаблицы
-    --    Если AC сам читает свою метатаблицу через getrawmetatable —
-    --    возвращаем ему подделку, идентичную оригиналу.
-    -- ─────────────────────────────────────────────────────────
     local getrawmetatable = getExec("getrawmetatable")
     local hookfunction    = getExec("hookfunction")
     local newcclosure     = getExec("newcclosure")
@@ -645,8 +625,6 @@ steps[#steps + 1] = { name = "Adonis ClientCheck Bypass", fn = function()
                 local mt = origGetmt(obj)
                 if obj == adonisGlobal then
                     counter.mt_reads += 1
-                    -- Возвращаем копию — если AC попытается модифицировать,
-                    -- оригинал не пострадает.
                     if type(mt) == "table" then
                         local copy = {}
                         for k, v in pairs(mt) do copy[k] = v end
@@ -662,12 +640,6 @@ steps[#steps + 1] = { name = "Adonis ClientCheck Bypass", fn = function()
         end)
     end
 
-    -- ─────────────────────────────────────────────────────────
-    -- 3) SHIELD B: Блокировка "Clearing environment"
-    --    AC чистит _G/getgenv перед стартом. Мы восстанавливаем
-    --    ключевые функции сразу после чистки через метаметод
-    --    __newindex на прокси-таблице.
-    -- ─────────────────────────────────────────────────────────
     local PROTECTED_KEYS = {
         "hookmetamethod", "getnamecallmethod", "newcclosure",
         "checkcaller", "getrawmetatable", "setrawmetatable",
@@ -680,7 +652,6 @@ steps[#steps + 1] = { name = "Adonis ClientCheck Bypass", fn = function()
         for _, k in ipairs(PROTECTED_KEYS) do
             saved[k] = rawget(genv, k) or rawget(_G, k)
         end
-        -- Периодически проверяем, что ключи не удалены
         task.spawn(function()
             while true do
                 task.wait(2)
@@ -695,13 +666,6 @@ steps[#steps + 1] = { name = "Adonis ClientCheck Bypass", fn = function()
         end)
     end
 
-    -- ─────────────────────────────────────────────────────────
-    -- 4) SHIELD C: Перехват ClientCheck loop
-    --    AC запускает периодический цикл. Ищем потоки через
-    --    getconnections на ScriptContext и отключаем те, что
-    --    содержат подозрительные вызовы (Heartbeat/RenderStepped
-    --    с коротким интервалом).
-    -- ─────────────────────────────────────────────────────────
     local getconnections = getExec("getconnections")
     if getconnections then
         safe(function()
@@ -715,22 +679,12 @@ steps[#steps + 1] = { name = "Adonis ClientCheck Bypass", fn = function()
                 if type(conns) == "table" then
                     for _, c in ipairs(conns) do
                         counter.checks += 1
-                        -- Не убиваем — только считаем. Реальное отключение
-                        -- сломает игру. AC обычно триггерит кик после N
-                        -- невалидных проверок, а мы эти проверки уже
-                        -- нейтрализовали выше.
                     end
                 end
             end
         end)
     end
 
-    -- ─────────────────────────────────────────────────────────
-    -- 5) SHIELD D: Спуф хендшейка "key from server"
-    --    Находим remote с "key"/"handshake" в имени, перехватываем
-    --    FireServer и подменяем ключ на заведомо "валидный" (тот,
-    --    что сервер ожидает от честного клиента).
-    -- ─────────────────────────────────────────────────────────
     local handshakeRemotes = {}
     safe(function()
         for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
@@ -750,9 +704,6 @@ steps[#steps + 1] = { name = "Adonis ClientCheck Bypass", fn = function()
             if handshakeRemotes[self] then
                 counter.keys += 1
                 counter.remotes += 1
-                -- НЕ блокируем полностью — иначе сервер увидит "тишину"
-                -- и забанит за отсутствие handshake. Просто логируем
-                -- и пропускаем. Реальная защита — в других шилдах.
                 return nil
             end
         end
@@ -760,20 +711,12 @@ steps[#steps + 1] = { name = "Adonis ClientCheck Bypass", fn = function()
         NM_Register("InvokeServer", filter)
     end
 
-    -- ─────────────────────────────────────────────────────────
-    -- 6) SHIELD E: Защита от чтения метатаблицы Instance AC-ом
-    --    Дополнение к Anti-Detection Shield: специфично для Adonis,
-    --    который кеширует оригинальный __namecall в момент старта
-    --    и потом сравнивает.
-    -- ─────────────────────────────────────────────────────────
     if getrawmetatable and NamecallManager.original then
         safe(function()
-            -- Верифицируем что наш хук не сломал оригинал
             local mt = getrawmetatable(game)
             if type(mt) == "table" then
                 local current = rawget(mt, "__namecall")
                 if current ~= NamecallManager.wrapper then
-                    -- Хук слетел — переустанавливаем
                     NM_Ensure()
                 end
             end
@@ -785,6 +728,108 @@ steps[#steps + 1] = { name = "Adonis ClientCheck Bypass", fn = function()
         found_adonis and "detected" or "not found",
         counter.mt_reads, counter.env_wipes,
         counter.checks, counter.remotes, counter.keys)
+end }
+
+-- [[ NEW STEP ]] Adonis Anti-Kick Bypass
+--   Лог показал: "anti kick found! Method 0x4 (Error Code: 267)"
+--   Причина: мы блокировали Kick через return "block". Adonis это детектит
+--   и триггерит fallback-метод 0x4 → Moderator message: Leave.
+--   Решение: спуфим успех Kick (return nil) + блокируем Moderator-ремоуты
+--   + удаляем UI Adonis'а.
+steps[#steps + 1] = { name = "Adonis Anti-Kick Bypass", fn = function()
+    if not CONFIG.ADONIS_BYPASS then return "disabled (CONFIG.ADONIS_BYPASS = false)" end
+
+    local kicks_spoofed = 0
+    local mod_blocked   = 0
+    local ui_removed    = 0
+
+    -- ─────────────────────────────────────────────────────────
+    -- 1) СПУФ Kick: возвращаем nil (успех), а не "block" (провал)
+    --    Adonis думает, что игрока кикнуло, и не активирует 0x4.
+    -- ─────────────────────────────────────────────────────────
+    if NM_Ensure() then
+        local kick_filter = function(self, ...)
+            if type(self) == "Instance" and self:IsA("Player") then
+                kicks_spoofed += 1
+                return "spoof_kick"  -- NM_Ensure превратит это в return nil
+            end
+        end
+        NM_Register("Kick", kick_filter)
+        NM_Register("kick", kick_filter)
+    end
+
+    -- ─────────────────────────────────────────────────────────
+    -- 2) Блокировка Moderator-ремоутов
+    --    Adonis шлёт "Moderator.Moderator message: Leave" через remote.
+    --    Если заблокировать — сообщение не дойдёт до клиента.
+    -- ─────────────────────────────────────────────────────────
+    local mod_remotes = {}
+    safe(function()
+        for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                local n = obj.Name:lower()
+                if n:find("moderator") or n:find("mod message") or n:find("modkick")
+                   or n:find("anti kick") or n:find("antikick") or n:find("adonis")
+                   or n:find("kick") or n:find("ban") then
+                    mod_remotes[obj] = true
+                end
+            end
+        end
+    end)
+
+    if NM_Ensure() then
+        local mod_count = 0
+        for _ in pairs(mod_remotes) do mod_count += 1 end
+        if mod_count > 0 then
+            local filter = function(self, ...)
+                if mod_remotes[self] then
+                    mod_blocked += 1
+                    return "block"
+                end
+            end
+            NM_Register("FireServer",   filter)
+            NM_Register("InvokeServer", filter)
+        end
+    end
+
+    -- ─────────────────────────────────────────────────────────
+    -- 3) Удаление UI Adonis'а (Moderator message, Anti-Kick GUI и т.п.)
+    --    Adonis создаёт ScreenGui с модераторскими сообщениями.
+    --    Если удалять сразу при появлении — игрок ничего не увидит.
+    -- ─────────────────────────────────────────────────────────
+    local function cleanAdonisUI()
+        local pg = LP:FindFirstChildOfClass("PlayerGui")
+        if not pg then return end
+        for _, gui in ipairs(pg:GetChildren()) do
+            local name = gui.Name:lower()
+            if name:find("adonis") or name:find("moderator") or name:find("anti kick")
+               or name:find("antikick") or name:find("adonisgui") then
+                pcall(function() gui:Destroy() end)
+                ui_removed += 1
+            end
+        end
+    end
+
+    cleanAdonisUI()
+    -- Следим за новыми GUI на случай, если Adonis создаст их позже
+    local pg = LP:FindFirstChildOfClass("PlayerGui")
+    if pg then
+        safe(function()
+            pg.ChildAdded:Connect(function(child)
+                local name = child.Name:lower()
+                if name:find("adonis") or name:find("moderator") or name:find("anti kick")
+                   or name:find("antikick") or name:find("adonisgui") then
+                    task.wait(0.1)
+                    pcall(function() child:Destroy() end)
+                    ui_removed += 1
+                end
+            end)
+        end)
+    end
+
+    return string.format(
+        "Kick spoofed: %d | Mod remotes: %d | UI removed: %d | 0x4 disabled",
+        kicks_spoofed, mod_blocked, ui_removed)
 end }
 
 steps[#steps + 1] = { name = "Sandbox Bypass", fn = function()
@@ -945,7 +990,7 @@ local function cleanupLoader()
     if removed > 0 then OK("getgenv vars", removed .. " cleared") end
 
     if NamecallManager.hooked then
-        OK("Bypass hooks", "kept alive (anti-detect + adonis active)")
+        OK("Bypass hooks", "kept alive (anti-detect + adonis anti-kick active)")
     end
 
     L("  →  Loader cleanup complete")
