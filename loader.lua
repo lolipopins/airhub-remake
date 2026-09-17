@@ -170,12 +170,18 @@ local function NM_Register(method, handler)
 end
 
 --// ============================================================================
---// KICK REASON LOGGER
+--// KICK REASON LOGGER (с детекцией смены причины)
 --// ============================================================================
 local KickLogger = {
     events = {},
     max_events = 100,
     installed_sources = {},
+
+    -- Трекинг смены причины
+    last_reason      = nil,   -- последняя причина (строка)
+    last_vector      = nil,   -- последний вектор (Kick/Disconnect/...)
+    repeat_count     = 0,     -- сколько раз подряд одна и та же причина
+    change_count     = 0,     -- сколько раз причина менялась
 }
 
 local function fmtTime()
@@ -183,24 +189,80 @@ local function fmtTime()
         and os.date("%H:%M:%S") or "??:??:??"
 end
 
+--// Сравнение причин — с приведением к строке и trim
+local function normalizeReason(r)
+    local s = tostring(r or "unknown")
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    if s == "" then s = "unknown" end
+    return s
+end
+
+--// Сброс трекинга (можно вызвать вручную)
+local function resetKickTracking()
+    KickLogger.last_reason  = nil
+    KickLogger.last_vector  = nil
+    KickLogger.repeat_count = 0
+    KickLogger.change_count = 0
+end
+
+--// Основной логгер с детекцией смены
 local function logKick(reason, vector, target, caller)
-    reason = tostring(reason or "unknown")
+    reason = normalizeReason(reason)
     vector = tostring(vector or "unknown")
     target = tostring(target or "unknown")
     caller = tostring(caller or "n/a")
 
+    local prev        = KickLogger.last_reason
+    local is_first    = (prev == nil)
+    local is_repeat   = (prev ~= nil and prev == reason)
+    local is_change   = (prev ~= nil and prev ~= reason)
+
+    -- Обновляем состояние
+    if is_repeat then
+        KickLogger.repeat_count += 1
+    else
+        KickLogger.repeat_count = 1
+    end
+    if is_change then
+        KickLogger.change_count += 1
+    end
+    KickLogger.last_reason = reason
+    KickLogger.last_vector = vector
+
+    -- Кладём в историю
     table.insert(KickLogger.events, {
-        time = fmtTime(), reason = reason,
-        vector = vector, target = target, caller = caller,
+        time         = fmtTime(),
+        reason       = reason,
+        vector       = vector,
+        target       = target,
+        caller       = caller,
+        kind         = is_first and "first"
+                       or is_change and "changed"
+                       or "repeat",
+        prev_reason  = prev,
+        repeat_count = KickLogger.repeat_count,
+        change_count = KickLogger.change_count,
     })
     while #KickLogger.events > KickLogger.max_events do
         table.remove(KickLogger.events, 1)
     end
 
+    -- Печатаем баннер
     local P = CONFIG.KICK_LOG_PREFIX
     swarn(P .. " ═════════════════════════════════════════")
-    swarn(P .. "  ⚠ KICK DETECTED")
-    swarn(P .. "  Reason : " .. reason)
+
+    if is_first then
+        swarn(P .. "  ⚠  KICK DETECTED (first)")
+        swarn(P .. "  Reason : " .. reason)
+    elseif is_change then
+        swarn(P .. "  ⚠⚠ KICK REASON CHANGED  (#" .. KickLogger.change_count .. ")")
+        swarn(P .. "  Prev   : " .. tostring(prev))
+        swarn(P .. "  New    : " .. reason)
+    else
+        swarn(P .. "  ⚠  KICK REPEATED  (x" .. KickLogger.repeat_count .. ")")
+        swarn(P .. "  Reason : " .. reason)
+    end
+
     swarn(P .. "  Vector : " .. vector)
     swarn(P .. "  Target : " .. target)
     swarn(P .. "  Caller : " .. caller)
@@ -295,19 +357,40 @@ local function installUIWatcher()
         local pg = LP:FindFirstChildOfClass("PlayerGui")
         if not pg then return end
 
+        -- Отслеживаем текст в GUI модератора, чтобы поймать смену причины
+        local watched_labels = {}
+
+        local function watchLabel(label, guiRef)
+            if watched_labels[label] then return end
+            watched_labels[label] = true
+            label:GetPropertyChangedSignal("Text"):Connect(function()
+                local txt = label.Text
+                if txt and txt ~= "" and not txt:match("^%s*$") then
+                    -- Смена текста в модераторском GUI = смена причины
+                    logKick(txt, "GUI.TextChanged",
+                            guiRef and guiRef.Name or "ModeratorUI",
+                            label:GetFullName())
+                end
+            end)
+        end
+
         local function checkGui(gui)
             local name = tostring(gui.Name):lower()
             if name:find("moderator") or name:find("anti kick")
                or name:find("antikick") or name:find("kick") then
                 task.wait(0.05)
-                local reason = "Moderator UI"
+                local initial_reason = nil
                 for _, d in ipairs(gui:GetDescendants()) do
                     if d:IsA("TextLabel") and #d.Text > 0 and not d.Text:match("^%s*$") then
-                        reason = d.Text
-                        break
+                        if not initial_reason then
+                            initial_reason = d.Text
+                        end
+                        watchLabel(d, gui)
                     end
                 end
-                logKick(reason, "Moderator GUI", gui.Name, gui:GetFullName())
+                if initial_reason then
+                    logKick(initial_reason, "Moderator GUI", gui.Name, gui:GetFullName())
+                end
                 if CONFIG.BLOCK_KICK then
                     pcall(function() gui:Destroy() end)
                 end
@@ -339,7 +422,7 @@ local function installAllKickHooks()
 end
 
 --// ============================================================================
---// BYPASS STEPS
+--// BYPASS STEPS (без Adonis)
 --// ============================================================================
 local Steps = {}
 
@@ -723,7 +806,7 @@ Steps.environment = function()
 end
 
 --// ============================================================================
---// MENU
+--// MENU (без Adonis-опций)
 --// ============================================================================
 local BYPASS_OPTIONS = {
     { id = "metamethod",    label = "Metamethod Bypass",       default = true },
@@ -1024,6 +1107,7 @@ pcall(function()
         getKickHistory = function() return KickLogger.events end,
         installKickLogger = installAllKickHooks,
         logKick = logKick,
+        resetKickTracking = resetKickTracking,
         steps = Steps,
     }
 end)
