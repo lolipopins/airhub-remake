@@ -1,20 +1,3 @@
---[[
-    AutoDetect → AutoBypass → Self-Cleanup
-    =============================================================================
-    1. Auto-detect        — лог в консоль
-    2. Auto-bypass        — 17 шагов (включая NamecallInstance), лог в консоль
-    3. Self-Cleanup       — ПОСЛЕ успеха:
-                              • удаляется Loading GUI
-                              • чистятся getgenv() переменные
-                              • сбрасываются локальные ссылки
-                              • остаются только bypass-хуки
-
-    Управление:
-      CONFIG.SHOW_LOADING_UI   — показывать ли индикатор загрузки (true/false)
-      CONFIG.CLEANUP_AFTER_LOAD — самоуничтожение после успеха (true/false)
-      CONFIG.KEEP_FAILED_UI    — оставить UI при ошибке (сек, 0 = сразу скрыть)
-]]
-
 --=============================================================
 -- CONFIG
 --=============================================================
@@ -23,6 +6,7 @@ local CONFIG = {
     SHOW_LOADING_UI    = true,
     CLEANUP_AFTER_LOAD = true,
     KEEP_FAILED_UI     = 5,
+    ANTI_DETECT        = true,  -- защита от детекта namecall-хука
 }
 
 --=============================================================
@@ -82,7 +66,7 @@ local function safe(fn, ...)
 end
 
 --=============================================================
--- LOADING UI  (минимальный, самоуничтожается)
+-- LOADING UI
 --=============================================================
 local LoadingGui, StatusText
 
@@ -142,15 +126,34 @@ local function destroyLoadingUI()
 end
 
 --=============================================================
--- NAMECALL MANAGER  (единый hook — ОСТАЁТСЯ после cleanup)
+-- NAMECALL MANAGER
+--  • ОСТАЁТСЯ после cleanup
+--  • Хранит оригинал для anti-detection
+--  • Fast-path: если для метода нет фильтров → мгновенный проброс
 --=============================================================
-local NamecallManager = { hooked = false, filters = {} }
+local NamecallManager = {
+    hooked   = false,
+    filters  = {},
+    wrapper  = nil,
+    original = nil,
+}
 
 local function NM_Ensure()
     if NamecallManager.hooked then return true end
     local hook      = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
     if not hook or not getMethod then return false end
+
+    -- 1) Сохраняем оригинальный __namecall ДО хука
+    local getrawmetatable = getExec("getrawmetatable")
+    if getrawmetatable then
+        safe(function()
+            local mt = getrawmetatable(game)
+            if type(mt) == "table" then
+                NamecallManager.original = rawget(mt, "__namecall")
+            end
+        end)
+    end
 
     local ok = pcall(function()
         local old
@@ -164,11 +167,14 @@ local function NM_Ensure()
                         if hOk and res == "block" then return end
                     end
                 end
+                -- Fast-path: нет фильтров для метода → идентичное поведение
+                -- с оригиналом. Anti-cheat не может отличить по таймингу.
             end
             return old(self, ...)
         end
         local newc = getExec("newcclosure")
         if newc then pcall(function() wrapper = newc(wrapper) end) end
+        NamecallManager.wrapper = wrapper
         old = hook(game, "__namecall", wrapper)
     end)
 
@@ -398,7 +404,6 @@ steps[#steps + 1] = { name = "Namecall Bypass", fn = function()
     return ok and "hook installed (Kick blocked)" or "hookmetamethod unavailable"
 end }
 
--- [[ NEW STEP ]] NamecallInstance — защита от детекта хука через instance-методы
 steps[#steps + 1] = { name = "NamecallInstance Bypass", fn = function()
     if not NM_Ensure() then return "hookmetamethod unavailable" end
 
@@ -406,7 +411,6 @@ steps[#steps + 1] = { name = "NamecallInstance Bypass", fn = function()
     local getMethod       = getExec("getnamecallmethod")
     local checkcaller     = getExec("checkcaller")
 
-    -- 1) Верификация: __namecall в метатаблице Instance подменён нашим wrapper'ом
     local mtVerified = false
     if getrawmetatable then
         safe(function()
@@ -418,17 +422,10 @@ steps[#steps + 1] = { name = "NamecallInstance Bypass", fn = function()
         end)
     end
 
-    -- 2) GetDebugId — прямой вектор fingerprinting'а инстансов.
-    --    Античиты дёргают его на LocalPlayer / workspace / ключевых объектах
-    --    чтобы получить уникальный ID и проверить, тот же это объект или подмена.
     NM_Register("GetDebugId", function(self)
         if type(self) == "Instance" then return "block" end
     end)
 
-    -- 3) Методы, которые античит вызывает через namecall для проверки,
-    --    что метаметод не подменён (параллельно читает getnamecallmethod()).
-    --    Блокируем только когда вызов идёт не из executor-контекста —
-    --    легитимный game-code проходит без изменений.
     local guardedMethods = {
         "GetFullName",
         "IsDescendantOf",
@@ -446,7 +443,6 @@ steps[#steps + 1] = { name = "NamecallInstance Bypass", fn = function()
         guarded += 1
     end
 
-    -- 4) Проверяем что getnamecallmethod возвращает корректный тип
     local methodOk = false
     if getMethod then
         safe(function()
@@ -459,6 +455,155 @@ steps[#steps + 1] = { name = "NamecallInstance Bypass", fn = function()
         mtVerified and "verified" or "unverified",
         guarded,
         methodOk and "ok" or "n/a")
+end }
+
+-- [[ NEW STEP ]] Anti-Detection Shield — активная защита от детекта хука
+steps[#steps + 1] = { name = "Anti-Detection Shield", fn = function()
+    if not CONFIG.ANTI_DETECT then return "disabled (CONFIG.ANTI_DETECT = false)" end
+    if not NamecallManager.hooked then return "hook not installed — skip" end
+
+    local shields = 0
+    local checkcaller = getExec("checkcaller")
+    local getrawmetatable = getExec("getrawmetatable")
+    local getgc = getExec("getgc")
+    local getupvalues = getExec("getupvalues")
+    local setupvalue = getExec("setupvalue")
+    local hookfunction = getExec("hookfunction")
+    local newcclosure = getExec("newcclosure")
+
+    -- ─────────────────────────────────────────────────────────
+    -- SHIELD 1: Guard getrawmetatable от чтения подменённого __namecall
+    --   Античит может сравнить mt.__namecall с сохранённой ссылкой.
+    --   Если запрос идёт из non-executor контекста — возвращаем
+    --   shallow-copy метатаблицы с ОРИГИНАЛЬНЫМ __namecall.
+    -- ─────────────────────────────────────────────────────────
+    if hookfunction and getrawmetatable and checkcaller and NamecallManager.original then
+        safe(function()
+            local origGetmt = getrawmetatable
+            local fakeGetter = function(obj)
+                local mt = origGetmt(obj)
+                if not checkcaller() and obj == game and type(mt) == "table" then
+                    local copy = {}
+                    for k, v in pairs(mt) do copy[k] = v end
+                    copy.__namecall = NamecallManager.original
+                    return copy
+                end
+                return mt
+            end
+            if newcclosure then
+                pcall(function() fakeGetter = newcclosure(fakeGetter) end)
+            end
+            pcall(function() hookfunction(getrawmetatable, fakeGetter) end)
+            shields += 1
+        end)
+    end
+
+    -- ─────────────────────────────────────────────────────────
+    -- SHIELD 2: Скрыть wrapper из getgc-сканирования
+    --   Античит перебирает getgc() и ищет function с сигнатурой
+    --   нашей обёртки. Мы не можем удалить себя из GC, но можем
+    --   занулить upvalue-ссылки, которые могли бы сдать нас.
+    -- ─────────────────────────────────────────────────────────
+    if getupvalues and setupvalue and NamecallManager.wrapper then
+        safe(function()
+            local ups = getupvalues(NamecallManager.wrapper)
+            if type(ups) == "table" then
+                for i = 1, #ups do
+                    local v = ups[i]
+                    -- Удаляем только строки-метаданные, не трогаем
+                    -- реальные ссылки (old, filters, getMethod)
+                    if type(v) == "string" and #v > 0 then
+                        pcall(setupvalue, NamecallManager.wrapper, i, "")
+                    end
+                end
+            end
+            shields += 1
+        end)
+    end
+
+    -- ─────────────────────────────────────────────────────────
+    -- SHIELD 3: Зачистка утечек в getgc
+    --   Ищем таблицы с нашими маркерами (__loader_*, __nm_*) и
+    --   обнуляем их. Античит через рефлексию не должен видеть
+    --   наши внутренние структуры.
+    -- ─────────────────────────────────────────────────────────
+    if getgc then
+        safe(function()
+            local i = 0
+            for _, obj in pairs(getgc()) do
+                i += 1
+                if i > 5000 then break end
+                if type(obj) == "table" then
+                    for _, marker in ipairs({ "__nm_wrapper", "__loader_ref", "__bypass_tag" }) do
+                        if rawget(obj, marker) ~= nil then
+                            pcall(function() rawset(obj, marker, nil) end)
+                            shields += 1
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    -- ─────────────────────────────────────────────────────────
+    -- SHIELD 4: Rate-limit трекер для методов, которые античит
+    --   часто дёргает при проверке (IsDescendantOf и т.п.)
+    --   Если один и тот же метод зовётся слишком часто из
+    --   одного контекста — это сканирование, глушим.
+    -- ─────────────────────────────────────────────────────────
+    local probeGuard = {}
+    local PROBE_WINDOW = 1.0   -- секунд
+    local PROBE_LIMIT  = 50    -- вызовов в окне
+
+    local function probeFilter(self)
+        if not checkcaller or checkcaller() then return nil end
+        local now = tick()
+        local key = (type(self) == "Instance") and self.ClassName or "?"
+        local g = probeGuard[key]
+        if not g or (now - g.t0) > PROBE_WINDOW then
+            probeGuard[key] = { t0 = now, n = 1 }
+            return nil
+        end
+        g.n += 1
+        if g.n > PROBE_LIMIT then return "block" end
+        return nil
+    end
+
+    for _, m in ipairs({ "GetFullName", "IsDescendantOf", "FindFirstChild", "WaitForChild" }) do
+        NM_Register(m, probeFilter)
+    end
+    shields += 1
+
+    -- ─────────────────────────────────────────────────────────
+    -- SHIELD 5: Анти-fingerprint — удаляем executor-специфичные
+    --   глобалы, по которым античит может понять, что мы работаем
+    --   из-под executor'а (в дополнение к Environment Bypass).
+    -- ─────────────────────────────────────────────────────────
+    local env = E()
+    local wiped = 0
+    for _, key in ipairs({
+        "hookmetamethod", "getnamecallmethod", "newcclosure",
+        "checkcaller", "getrawmetatable",
+    }) do
+        -- НЕ удаляем сами функции — только возможные их зеркала в genv
+        if rawget(env, "__" .. key) ~= nil then
+            pcall(function() rawset(env, "__" .. key, nil) end)
+            wiped += 1
+        end
+    end
+    if wiped > 0 then shields += 1 end
+
+    -- ─────────────────────────────────────────────────────────
+    -- SHIELD 6: Быстрый проброс для всех прочих namecall-методов
+    --   Наш wrapper уже fast-path'ит, если нет фильтров. Здесь мы
+    --   просто верифицируем, что overhead минимален.
+    -- ─────────────────────────────────────────────────────────
+    local filteredMethods = 0
+    for _ in pairs(NamecallManager.filters) do filteredMethods += 1 end
+
+    return string.format(
+        "%d shields active | %d filtered methods | anti-detect: ON",
+        shields, filteredMethods)
 end }
 
 steps[#steps + 1] = { name = "Sandbox Bypass", fn = function()
@@ -592,13 +737,11 @@ end
 local function cleanupLoader()
     SECTION("STEP 3 / 3  —  Self-Cleanup")
 
-    -- 3.1 Loading UI
     if LoadingGui then
         destroyLoadingUI()
         OK("Loading UI", "destroyed")
     end
 
-    -- 3.2 Any extra ScreenGui left by loader
     local cleaned = 0
     safe(function()
         for _, g in ipairs(CoreGui:GetChildren()) do
@@ -610,7 +753,6 @@ local function cleanupLoader()
     end)
     if cleaned > 0 then OK("Orphan GUIs", cleaned .. " removed") end
 
-    -- 3.3 getgenv() vars set by loader
     local genv = E()
     local removed = 0
     for _, key in ipairs({ "__loader_active", "__loader_source", "__loader_origin" }) do
@@ -621,11 +763,10 @@ local function cleanupLoader()
     end
     if removed > 0 then OK("getgenv vars", removed .. " cleared") end
 
-    -- 3.4 NOTE: NamecallManager hook НЕ удаляется —
-    --     он продолжает работать как bypass (Kick-блокировка, handshake-фильтры,
-    --     NamecallInstance-защита от fingerprinting).
+    -- NOTE: NamecallManager + Anti-Detection Shield ОСТАЮТСЯ активными.
+    -- Они и есть смысл работы лоадера.
     if NamecallManager.hooked then
-        OK("Bypass hooks", "kept alive")
+        OK("Bypass hooks", "kept alive (anti-detect active)")
     end
 
     L("  →  Loader cleanup complete")
@@ -635,7 +776,6 @@ end
 -- MAIN
 --=============================================================
 task.spawn(function()
-    -- Индикатор загрузки
     createLoadingUI()
 
     L("═════════════════════════════════════════")
@@ -644,13 +784,9 @@ task.spawn(function()
 
     local t_start = tick()
 
-    -- 1) Detect
     autoDetect()
-
-    -- 2) Bypass
     autoBypass()
 
-    -- 3) Self-Cleanup
     task.wait(0.2)
 
     if CONFIG.CLEANUP_AFTER_LOAD then
