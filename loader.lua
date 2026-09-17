@@ -1,35 +1,52 @@
---// ============================================================================
---// AirHub Remake — Loader v4 (Reason Change Detection)
---// ============================================================================
 --// Features:
---//   • Kick Logger tracks REASON CHANGES:
---//         - first kick  → "KICK DETECTED"
---//         - repeat      → "KICK REPEATED (xN)"
---//         - new reason  → "KICK REASON CHANGED" + old + new
---//   • Adonis bypass fully removed
---//   • All bypasses embedded in loader (no remote bypass file)
---//   • Menu controls which steps run
---// ============================================================================
+--//   • Supports THREE AirHub versions:
+--//         - Full     (modules from /src/)
+--//         - Lite     (single-file, anticheat GUI bypass)
+--//         - Legacy   (single-file, no longer updated)
+--//         - anticheat bypasses
 
-local REPO = "https://raw.githubusercontent.com/lolipopins/airhub-remake/main/src/"
-
-local FILES = {
-    "01_core.lua",
-    "02_aimbot.lua",
-    "03_antiaim.lua",
-    "04_wallhack.lua",
-    "05_serverposition.lua",
-    "06a_movement_fly_bhop.lua",
-    "06b_movement_speed_strafer.lua",
-    "07a_ui_core.lua",
-    "07b_ui_tabs.lua",
+local AIRHUB_VERSIONS = {
+    full = {
+        id          = "full",
+        label       = "Full",
+        description = "Modular build (9 modules from /src/)",
+        type        = "modules",
+        repo        = "https://raw.githubusercontent.com/lolipopins/airhub-remake/main/src/",
+        files       = {
+            "01_core.lua",
+            "02_aimbot.lua",
+            "03_antiaim.lua",
+            "04_wallhack.lua",
+            "05_serverposition.lua",
+            "06a_movement_fly_bhop.lua",
+            "06b_movement_speed_strafer.lua",
+            "07a_ui_core.lua",
+            "07b_ui_tabs.lua",
+        },
+    },
+    lite = {
+        id          = "lite",
+        label       = "Lite",
+        description = "Single-file, GUI bypass, no config system",
+        type        = "single",
+        url         = "https://raw.githubusercontent.com/lolipopins/airhub-remake/refs/heads/main/airhub%20lite",
+    },
+    legacy = {
+        id          = "legacy",
+        label       = "Legacy",
+        description = "Single-file, archived (no updates)",
+        type        = "single",
+        url         = "https://raw.githubusercontent.com/lolipopins/airhub-remake/refs/heads/main/airhub%20legacy",
+    },
 }
+
+--// Ordered list for UI
+local AIRHUB_VERSION_ORDER = { "full", "lite", "legacy" }
 
 local CONFIG = {
     MENU_TITLE      = "AirHub Loader",
     KICK_LOG_PREFIX = "[AirHub][KICK]",
     BLOCK_KICK      = true,
-    READY_TIMEOUT   = 3,
 }
 
 --// ============================================================================
@@ -190,7 +207,6 @@ local KickLogger = {
     max_events = 100,
     installed_sources = {},
 
-    -- Reason change tracking
     last_reason      = nil,
     last_vector      = nil,
     repeat_count     = 0,
@@ -835,7 +851,7 @@ local BYPASS_OPTIONS = {
     { id = "kick_logger",   label = "Kick Reason Logger",      default = true },
 }
 
-local MenuGui, MenuState = nil, { selected = {}, done = false }
+local MenuGui, MenuState = nil, { selected = {}, done = false, version = "full" }
 
 local function buildMenu(onInject, onCancel)
     for _, o in ipairs(BYPASS_OPTIONS) do MenuState.selected[o.id] = o.default end
@@ -852,9 +868,10 @@ local function buildMenu(onInject, onCancel)
         if pg then pcall(function() gui.Parent = pg end) end
     end
 
+    --// Main frame
     local frame = Instance.new("Frame", gui)
-    frame.Size = UDim2.new(0, 460, 0, 580)
-    frame.Position = UDim2.new(0.5, -230, 0.5, -290)
+    frame.Size = UDim2.new(0, 460, 0, 680)
+    frame.Position = UDim2.new(0.5, -230, 0.5, -340)
     frame.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
     frame.BorderSizePixel = 0
     Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
@@ -863,6 +880,7 @@ local function buildMenu(onInject, onCancel)
     stroke.Thickness = 1
     stroke.Color = Color3.fromRGB(60, 60, 70)
 
+    --// Title
     local title = Instance.new("TextLabel", frame)
     title.Size = UDim2.new(1, -24, 0, 40)
     title.Position = UDim2.new(0, 12, 0, 8)
@@ -881,11 +899,80 @@ local function buildMenu(onInject, onCancel)
     sub.TextSize = 12
     sub.TextColor3 = Color3.fromRGB(140, 140, 155)
     sub.TextXAlignment = Enum.TextXAlignment.Left
-    sub.Text = "Select bypasses and click \"Inject AirHub\""
+    sub.Text = "Select bypasses and version, then click \"Inject AirHub\""
 
+    --// --- Version picker ---
+    local versionLabel = Instance.new("TextLabel", frame)
+    versionLabel.Size = UDim2.new(1, -24, 0, 18)
+    versionLabel.Position = UDim2.new(0, 12, 0, 72)
+    versionLabel.BackgroundTransparency = 1
+    versionLabel.Font = Enum.Font.GothamBold
+    versionLabel.TextSize = 12
+    versionLabel.TextColor3 = Color3.fromRGB(180, 180, 195)
+    versionLabel.TextXAlignment = Enum.TextXAlignment.Left
+    versionLabel.Text = "AirHub version:"
+
+    local versionRow = Instance.new("Frame", frame)
+    versionRow.Size = UDim2.new(1, -24, 0, 34)
+    versionRow.Position = UDim2.new(0, 12, 0, 92)
+    versionRow.BackgroundTransparency = 1
+
+    local versionLayout = Instance.new("UIListLayout", versionRow)
+    versionLayout.FillDirection = Enum.FillDirection.Horizontal
+    versionLayout.Padding = UDim.new(0, 6)
+    versionLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local versionButtons = {}
+    for _, vid in ipairs(AIRHUB_VERSION_ORDER) do
+        local v = AIRHUB_VERSIONS[vid]
+        local btn = Instance.new("TextButton", versionRow)
+        btn.Size = UDim2.new(0, 138, 1, 0)
+        btn.BackgroundColor3 = (MenuState.version == vid)
+            and Color3.fromRGB(90, 140, 255)
+            or Color3.fromRGB(40, 40, 48)
+        btn.BorderSizePixel = 0
+        btn.Font = Enum.Font.GothamMedium
+        btn.TextSize = 13
+        btn.TextColor3 = Color3.fromRGB(230, 230, 240)
+        btn.Text = v.label
+        btn.LayoutOrder = table.find(AIRHUB_VERSION_ORDER, vid) or 0
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+        btn.MouseButton1Click:Connect(function()
+            MenuState.version = vid
+            for _, other in ipairs(versionRow:GetChildren()) do
+                if other:IsA("TextButton") then
+                    other.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+                end
+            end
+            btn.BackgroundColor3 = Color3.fromRGB(90, 140, 255)
+        end)
+
+        versionButtons[vid] = btn
+    end
+
+    --// Version description
+    local versionDesc = Instance.new("TextLabel", frame)
+    versionDesc.Size = UDim2.new(1, -24, 0, 16)
+    versionDesc.Position = UDim2.new(0, 12, 0, 130)
+    versionDesc.BackgroundTransparency = 1
+    versionDesc.Font = Enum.Font.Gotham
+    versionDesc.TextSize = 11
+    versionDesc.TextColor3 = Color3.fromRGB(130, 130, 145)
+    versionDesc.TextXAlignment = Enum.TextXAlignment.Left
+    versionDesc.Text = AIRHUB_VERSIONS[MenuState.version].description
+
+    -- Update description on version change
+    for vid, btn in pairs(versionButtons) do
+        btn.MouseButton1Click:Connect(function()
+            versionDesc.Text = AIRHUB_VERSIONS[vid].description
+        end)
+    end
+
+    --// Bypass scroll
     local scroll = Instance.new("ScrollingFrame", frame)
-    scroll.Size = UDim2.new(1, -24, 1, -190)
-    scroll.Position = UDim2.new(0, 12, 0, 76)
+    scroll.Size = UDim2.new(1, -24, 1, -300)
+    scroll.Position = UDim2.new(0, 12, 0, 156)
     scroll.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
     scroll.BorderSizePixel = 0
     scroll.ScrollBarThickness = 6
@@ -946,6 +1033,7 @@ local function buildMenu(onInject, onCancel)
         end)
     end
 
+    --// Select / Deselect all
     local btnAll = Instance.new("TextButton", frame)
     btnAll.Size = UDim2.new(0, 90, 0, 26)
     btnAll.Position = UDim2.new(0, 12, 1, -70)
@@ -978,6 +1066,7 @@ local function buildMenu(onInject, onCancel)
     btnAll.MouseButton1Click:Connect(function() setAll(true) end)
     btnNone.MouseButton1Click:Connect(function() setAll(false) end)
 
+    --// Inject button
     local btnInject = Instance.new("TextButton", frame)
     btnInject.Size = UDim2.new(0, 180, 0, 34)
     btnInject.Position = UDim2.new(1, -192, 1, -74)
@@ -989,6 +1078,7 @@ local function buildMenu(onInject, onCancel)
     btnInject.Text = "Inject AirHub"
     Instance.new("UICorner", btnInject).CornerRadius = UDim.new(0, 8)
 
+    --// Cancel button
     local btnCancel = Instance.new("TextButton", frame)
     btnCancel.Size = UDim2.new(0, 40, 0, 34)
     btnCancel.Position = UDim2.new(1, -42, 1, -74)
@@ -1005,6 +1095,7 @@ local function buildMenu(onInject, onCancel)
         MenuState.done = true
         local cfg = {}
         for id, v in pairs(MenuState.selected) do cfg[id] = v end
+        cfg._version = MenuState.version
         if onInject then onInject(cfg) end
     end)
 
@@ -1058,30 +1149,61 @@ local function runSelectedBypasses(cfg)
 end
 
 --// ============================================================================
---// LOAD AIRHUB
+--// AIRHUB LOADERS
 --// ============================================================================
-local function loadModule(file)
-    local src = httpGet(REPO .. file)
+
+--// Load a single .lua file by URL, compile & execute
+local function loadSingleFile(url, name)
+    local src = httpGet(url)
     if not src then return false, "download failed" end
-    local chunk, err = compile(src, file)
+    local chunk, err = compile(src, name or "airhub_single")
     if not chunk then return false, "compile: " .. tostring(err) end
     local ok, rerr = pcall(chunk)
     if not ok then return false, "runtime: " .. tostring(rerr) end
     return true
 end
 
-local function loadAllModules()
+--// Load modular AirHub (9 files from /src/)
+local function loadModularVersion(version)
     local loaded, failed = 0, 0
-    for _, file in ipairs(FILES) do
-        local ok, err = loadModule(file)
-        if ok then loaded += 1
-        else swarn("[AirHub] " .. file .. ": " .. tostring(err)); failed += 1 end
+    for _, file in ipairs(version.files) do
+        local ok, err = loadSingleFile(version.repo .. file, file)
+        if ok then
+            loaded += 1
+        else
+            swarn("[AirHub] " .. file .. ": " .. tostring(err))
+            failed += 1
+        end
         tick()
     end
     if failed > 0 then
-        swarn("[AirHub] modules: " .. loaded .. "/" .. #FILES .. " (failed: " .. failed .. ")")
+        swarn(string.format("[AirHub] modules: %d/%d (failed: %d)",
+            loaded, #version.files, failed))
     else
-        say("[AirHub] modules loaded: " .. loaded .. "/" .. #FILES)
+        say(string.format("[AirHub] modules loaded: %d/%d", loaded, #version.files))
+    end
+    return loaded, failed
+end
+
+--// Universal AirHub loader — dispatches by version type
+local function loadAirHub(versionId)
+    local v = AIRHUB_VERSIONS[versionId]
+    if not v then
+        swarn("[AirHub] unknown version: " .. tostring(versionId))
+        return
+    end
+
+    say(string.format("[AirHub] loading version: %s (%s)", v.label, v.description))
+
+    if v.type == "modules" then
+        loadModularVersion(v)
+    elseif v.type == "single" then
+        local ok, err = loadSingleFile(v.url, "airhub_" .. v.id)
+        if ok then
+            say(string.format("[AirHub] %s loaded successfully", v.label))
+        else
+            swarn(string.format("[AirHub] %s failed: %s", v.label, tostring(err)))
+        end
     end
 end
 
@@ -1091,16 +1213,20 @@ end
 local function startFlow()
     buildMenu(function(cfg)
         destroyMenu()
-        say("[AirHub] user config applied")
+        local versionId = cfg._version or "full"
+        say(string.format("[AirHub] user config applied | version = %s", versionId))
 
+        -- 1) Bypasses
         runSelectedBypasses(cfg)
 
+        -- 2) Kick logger
         if cfg.kick_logger then
             installAllKickHooks()
         end
 
+        -- 3) Load selected AirHub version
         tick()
-        loadAllModules()
+        loadAirHub(versionId)
     end, function()
         destroyMenu()
         say("[AirHub] injection cancelled")
@@ -1114,6 +1240,7 @@ pcall(function()
         logKick = logKick,
         resetKickTracking = resetKickTracking,
         steps = Steps,
+        versions = AIRHUB_VERSIONS,
     }
 end)
 
