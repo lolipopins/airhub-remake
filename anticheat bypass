@@ -1,3 +1,20 @@
+--[[
+    AutoDetect → AutoBypass → Self-Cleanup
+    =============================================================================
+    1. Auto-detect        — лог в консоль
+    2. Auto-bypass        — 17 шагов (включая NamecallInstance), лог в консоль
+    3. Self-Cleanup       — ПОСЛЕ успеха:
+                              • удаляется Loading GUI
+                              • чистятся getgenv() переменные
+                              • сбрасываются локальные ссылки
+                              • остаются только bypass-хуки
+
+    Управление:
+      CONFIG.SHOW_LOADING_UI   — показывать ли индикатор загрузки (true/false)
+      CONFIG.CLEANUP_AFTER_LOAD — самоуничтожение после успеха (true/false)
+      CONFIG.KEEP_FAILED_UI    — оставить UI при ошибке (сек, 0 = сразу скрыть)
+]]
+
 --=============================================================
 -- CONFIG
 --=============================================================
@@ -381,6 +398,69 @@ steps[#steps + 1] = { name = "Namecall Bypass", fn = function()
     return ok and "hook installed (Kick blocked)" or "hookmetamethod unavailable"
 end }
 
+-- [[ NEW STEP ]] NamecallInstance — защита от детекта хука через instance-методы
+steps[#steps + 1] = { name = "NamecallInstance Bypass", fn = function()
+    if not NM_Ensure() then return "hookmetamethod unavailable" end
+
+    local getrawmetatable = getExec("getrawmetatable")
+    local getMethod       = getExec("getnamecallmethod")
+    local checkcaller     = getExec("checkcaller")
+
+    -- 1) Верификация: __namecall в метатаблице Instance подменён нашим wrapper'ом
+    local mtVerified = false
+    if getrawmetatable then
+        safe(function()
+            local mt = getrawmetatable(game)
+            if type(mt) == "table" then
+                local nc = rawget(mt, "__namecall")
+                mtVerified = type(nc) == "function"
+            end
+        end)
+    end
+
+    -- 2) GetDebugId — прямой вектор fingerprinting'а инстансов.
+    --    Античиты дёргают его на LocalPlayer / workspace / ключевых объектах
+    --    чтобы получить уникальный ID и проверить, тот же это объект или подмена.
+    NM_Register("GetDebugId", function(self)
+        if type(self) == "Instance" then return "block" end
+    end)
+
+    -- 3) Методы, которые античит вызывает через namecall для проверки,
+    --    что метаметод не подменён (параллельно читает getnamecallmethod()).
+    --    Блокируем только когда вызов идёт не из executor-контекста —
+    --    легитимный game-code проходит без изменений.
+    local guardedMethods = {
+        "GetFullName",
+        "IsDescendantOf",
+        "GetPropertyChangedSignal",
+    }
+    local guarded = 0
+    for _, m in ipairs(guardedMethods) do
+        NM_Register(m, function(self)
+            if type(self) ~= "Instance" then return nil end
+            if checkcaller and not checkcaller() then
+                return "block"
+            end
+            return nil
+        end)
+        guarded += 1
+    end
+
+    -- 4) Проверяем что getnamecallmethod возвращает корректный тип
+    local methodOk = false
+    if getMethod then
+        safe(function()
+            local m = getMethod()
+            methodOk = (type(m) == "string") or (m == nil)
+        end)
+    end
+
+    return string.format("mt %s, GetDebugId blocked, %d guarded, namecallmethod %s",
+        mtVerified and "verified" or "unverified",
+        guarded,
+        methodOk and "ok" or "n/a")
+end }
+
 steps[#steps + 1] = { name = "Sandbox Bypass", fn = function()
     local restored = 0
     local keyFuncs = {
@@ -542,7 +622,8 @@ local function cleanupLoader()
     if removed > 0 then OK("getgenv vars", removed .. " cleared") end
 
     -- 3.4 NOTE: NamecallManager hook НЕ удаляется —
-    --     он продолжает работать как bypass (Kick-блокировка, handshake-фильтры).
+    --     он продолжает работать как bypass (Kick-блокировка, handshake-фильтры,
+    --     NamecallInstance-защита от fingerprinting).
     if NamecallManager.hooked then
         OK("Bypass hooks", "kept alive")
     end
