@@ -1,3 +1,16 @@
+--// ============================================================================
+--// AirHub Remake — Loader v4 (Reason Change Detection)
+--// ============================================================================
+--// Features:
+--//   • Kick Logger tracks REASON CHANGES:
+--//         - first kick  → "KICK DETECTED"
+--//         - repeat      → "KICK REPEATED (xN)"
+--//         - new reason  → "KICK REASON CHANGED" + old + new
+--//   • Adonis bypass fully removed
+--//   • All bypasses embedded in loader (no remote bypass file)
+--//   • Menu controls which steps run
+--// ============================================================================
+
 local REPO = "https://raw.githubusercontent.com/lolipopins/airhub-remake/main/src/"
 
 local FILES = {
@@ -170,18 +183,18 @@ local function NM_Register(method, handler)
 end
 
 --// ============================================================================
---// KICK REASON LOGGER (с детекцией смены причины)
+--// KICK REASON LOGGER (with change detection)
 --// ============================================================================
 local KickLogger = {
     events = {},
     max_events = 100,
     installed_sources = {},
 
-    -- Трекинг смены причины
-    last_reason      = nil,   -- последняя причина (строка)
-    last_vector      = nil,   -- последний вектор (Kick/Disconnect/...)
-    repeat_count     = 0,     -- сколько раз подряд одна и та же причина
-    change_count     = 0,     -- сколько раз причина менялась
+    -- Reason change tracking
+    last_reason      = nil,
+    last_vector      = nil,
+    repeat_count     = 0,
+    change_count     = 0,
 }
 
 local function fmtTime()
@@ -189,7 +202,6 @@ local function fmtTime()
         and os.date("%H:%M:%S") or "??:??:??"
 end
 
---// Сравнение причин — с приведением к строке и trim
 local function normalizeReason(r)
     local s = tostring(r or "unknown")
     s = s:gsub("^%s+", ""):gsub("%s+$", "")
@@ -197,7 +209,6 @@ local function normalizeReason(r)
     return s
 end
 
---// Сброс трекинга (можно вызвать вручную)
 local function resetKickTracking()
     KickLogger.last_reason  = nil
     KickLogger.last_vector  = nil
@@ -205,19 +216,17 @@ local function resetKickTracking()
     KickLogger.change_count = 0
 end
 
---// Основной логгер с детекцией смены
 local function logKick(reason, vector, target, caller)
     reason = normalizeReason(reason)
     vector = tostring(vector or "unknown")
     target = tostring(target or "unknown")
     caller = tostring(caller or "n/a")
 
-    local prev        = KickLogger.last_reason
-    local is_first    = (prev == nil)
-    local is_repeat   = (prev ~= nil and prev == reason)
-    local is_change   = (prev ~= nil and prev ~= reason)
+    local prev      = KickLogger.last_reason
+    local is_first  = (prev == nil)
+    local is_repeat = (prev ~= nil and prev == reason)
+    local is_change = (prev ~= nil and prev ~= reason)
 
-    -- Обновляем состояние
     if is_repeat then
         KickLogger.repeat_count += 1
     else
@@ -229,7 +238,6 @@ local function logKick(reason, vector, target, caller)
     KickLogger.last_reason = reason
     KickLogger.last_vector = vector
 
-    -- Кладём в историю
     table.insert(KickLogger.events, {
         time         = fmtTime(),
         reason       = reason,
@@ -247,19 +255,18 @@ local function logKick(reason, vector, target, caller)
         table.remove(KickLogger.events, 1)
     end
 
-    -- Печатаем баннер
     local P = CONFIG.KICK_LOG_PREFIX
-    swarn(P .. " ═════════════════════════════════════════")
+    swarn(P .. " =========================================")
 
     if is_first then
-        swarn(P .. "  ⚠  KICK DETECTED (first)")
+        swarn(P .. "  [!]  KICK DETECTED (first)")
         swarn(P .. "  Reason : " .. reason)
     elseif is_change then
-        swarn(P .. "  ⚠⚠ KICK REASON CHANGED  (#" .. KickLogger.change_count .. ")")
+        swarn(P .. "  [!!] KICK REASON CHANGED  (#" .. KickLogger.change_count .. ")")
         swarn(P .. "  Prev   : " .. tostring(prev))
         swarn(P .. "  New    : " .. reason)
     else
-        swarn(P .. "  ⚠  KICK REPEATED  (x" .. KickLogger.repeat_count .. ")")
+        swarn(P .. "  [!]  KICK REPEATED  (x" .. KickLogger.repeat_count .. ")")
         swarn(P .. "  Reason : " .. reason)
     end
 
@@ -267,7 +274,7 @@ local function logKick(reason, vector, target, caller)
     swarn(P .. "  Target : " .. target)
     swarn(P .. "  Caller : " .. caller)
     swarn(P .. "  Time   : " .. fmtTime())
-    swarn(P .. " ═════════════════════════════════════════")
+    swarn(P .. " =========================================")
 end
 
 local function callerDebug()
@@ -357,7 +364,6 @@ local function installUIWatcher()
         local pg = LP:FindFirstChildOfClass("PlayerGui")
         if not pg then return end
 
-        -- Отслеживаем текст в GUI модератора, чтобы поймать смену причины
         local watched_labels = {}
 
         local function watchLabel(label, guiRef)
@@ -366,7 +372,6 @@ local function installUIWatcher()
             label:GetPropertyChangedSignal("Text"):Connect(function()
                 local txt = label.Text
                 if txt and txt ~= "" and not txt:match("^%s*$") then
-                    -- Смена текста в модераторском GUI = смена причины
                     logKick(txt, "GUI.TextChanged",
                             guiRef and guiRef.Name or "ModeratorUI",
                             label:GetFullName())
@@ -422,7 +427,7 @@ local function installAllKickHooks()
 end
 
 --// ============================================================================
---// BYPASS STEPS (без Adonis)
+--// BYPASS STEPS
 --// ============================================================================
 local Steps = {}
 
@@ -625,7 +630,7 @@ Steps.namecall_inst = function()
 end
 
 Steps.anti_detect = function()
-    if not NM.hooked then return "hook not installed — skip" end
+    if not NM.hooked then return "hook not installed - skip" end
     local shields = 0
     local checkC = getExec("checkcaller")
     local getmt = getExec("getrawmetatable")
@@ -806,7 +811,7 @@ Steps.environment = function()
 end
 
 --// ============================================================================
---// MENU (без Adonis-опций)
+--// MENU
 --// ============================================================================
 local BYPASS_OPTIONS = {
     { id = "metamethod",    label = "Metamethod Bypass",       default = true },
@@ -876,7 +881,7 @@ local function buildMenu(onInject, onCancel)
     sub.TextSize = 12
     sub.TextColor3 = Color3.fromRGB(140, 140, 155)
     sub.TextXAlignment = Enum.TextXAlignment.Left
-    sub.Text = "Выбери обходы и нажми «Inject AirHub»"
+    sub.Text = "Select bypasses and click \"Inject AirHub\""
 
     local scroll = Instance.new("ScrollingFrame", frame)
     scroll.Size = UDim2.new(1, -24, 1, -190)
@@ -917,7 +922,7 @@ local function buildMenu(onInject, onCancel)
         local mark = Instance.new("TextLabel", box)
         mark.Size = UDim2.new(1, 0, 1, 0)
         mark.BackgroundTransparency = 1
-        mark.Text = opt.default and "✓" or ""
+        mark.Text = opt.default and "X" or ""
         mark.TextColor3 = Color3.fromRGB(255, 255, 255)
         mark.Font = Enum.Font.GothamBold
         mark.TextSize = 14
@@ -937,7 +942,7 @@ local function buildMenu(onInject, onCancel)
             local s = not MenuState.selected[opt.id]
             MenuState.selected[opt.id] = s
             box.BackgroundColor3 = s and Color3.fromRGB(90, 140, 255) or Color3.fromRGB(40, 40, 48)
-            mark.Text = s and "✓" or ""
+            mark.Text = s and "X" or ""
         end)
     end
 
@@ -949,7 +954,7 @@ local function buildMenu(onInject, onCancel)
     btnAll.Font = Enum.Font.GothamMedium
     btnAll.TextSize = 12
     btnAll.TextColor3 = Color3.fromRGB(200, 200, 210)
-    btnAll.Text = "Выбрать всё"
+    btnAll.Text = "Select All"
     Instance.new("UICorner", btnAll).CornerRadius = UDim.new(0, 6)
 
     local btnNone = Instance.new("TextButton", frame)
@@ -960,14 +965,14 @@ local function buildMenu(onInject, onCancel)
     btnNone.Font = Enum.Font.GothamMedium
     btnNone.TextSize = 12
     btnNone.TextColor3 = Color3.fromRGB(200, 200, 210)
-    btnNone.Text = "Снять всё"
+    btnNone.Text = "Deselect All"
     Instance.new("UICorner", btnNone).CornerRadius = UDim.new(0, 6)
 
     local function setAll(v)
         for id, cb in pairs(boxes) do
             MenuState.selected[id] = v
             cb.box.BackgroundColor3 = v and Color3.fromRGB(90, 140, 255) or Color3.fromRGB(40, 40, 48)
-            cb.mark.Text = v and "✓" or ""
+            cb.mark.Text = v and "X" or ""
         end
     end
     btnAll.MouseButton1Click:Connect(function() setAll(true) end)
@@ -992,7 +997,7 @@ local function buildMenu(onInject, onCancel)
     btnCancel.Font = Enum.Font.GothamBold
     btnCancel.TextSize = 14
     btnCancel.TextColor3 = Color3.fromRGB(220, 140, 140)
-    btnCancel.Text = "✕"
+    btnCancel.Text = "X"
     Instance.new("UICorner", btnCancel).CornerRadius = UDim.new(0, 8)
 
     btnInject.MouseButton1Click:Connect(function()
@@ -1034,16 +1039,16 @@ local function runSelectedBypasses(cfg)
                     local ok, res = safe(fn)
                     if ok then
                         ok_count += 1
-                        say(string.format("[AirHub]  ✓  [%02d/%02d] %s  (%s)",
+                        say(string.format("[AirHub]  [OK]  [%02d/%02d] %s  (%s)",
                             i, total, opt.label, tostring(res)))
                     else
-                        swarn(string.format("[AirHub]  ✗  [%02d/%02d] %s  →  %s",
+                        swarn(string.format("[AirHub]  [FAIL] [%02d/%02d] %s  ->  %s",
                             i, total, opt.label, tostring(res)))
                     end
                 end
             else
                 skip_count += 1
-                say(string.format("[AirHub]  ○  [%02d/%02d] %s  (skipped)", i, total, opt.label))
+                say(string.format("[AirHub]  [--]  [%02d/%02d] %s  (skipped)", i, total, opt.label))
             end
             tick()
         end
