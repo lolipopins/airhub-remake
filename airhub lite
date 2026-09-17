@@ -1,0 +1,3216 @@
+--====================================================================================
+--  airhub lite anticheat gui bypass no config system
+--====================================================================================
+
+--// Error handling
+local ErrorText = Drawing.new("Text")
+ErrorText.Visible = false
+ErrorText.Size = 16
+ErrorText.Color = Color3.fromRGB(255, 0, 0)
+ErrorText.Position = Vector2.new(20, 20)
+local function ShowError(msg) ErrorText.Text = tostring(msg) ErrorText.Visible = true task.delay(3, function() ErrorText.Visible = false end) end
+local function HandleError(err) ShowError("⚠️ " .. tostring(err)) warn("[AirHub] " .. tostring(err)) end
+
+local function SafeKeyCode(name)
+    if type(name) ~= "string" then return nil end
+    local ok, kc = pcall(function() return Enum.KeyCode[name] end)
+    if ok and kc then return kc end
+    return nil
+end
+local function SafeUserInputType(name)
+    if type(name) ~= "string" then return nil end
+    local ok, uit = pcall(function() return Enum.UserInputType[name] end)
+    if ok and uit then return uit end
+    return nil
+end
+local function SanitizeColor(c)
+    if typeof(c) == "Color3" then return c end
+    return Color3.fromRGB(255, 255, 255)
+end
+
+local ActiveLogs = {}
+local function AddLog(msg, color)
+    local settings = getgenv().AirHub.Logging
+    local text = Drawing.new("Text")
+    text.Text = msg
+    text.Size = settings.FontSize or 18
+    text.Color = color or Color3.fromRGB(255, 255, 255)
+    text.Center = true
+    text.Outline = true
+    text.Visible = true
+    text.Transparency = 0
+    local viewport = workspace.CurrentCamera.ViewportSize
+    local startX, startY = viewport.X / 2, viewport.Y / 2 + 60
+    for _, log in ipairs(ActiveLogs) do
+        log.text.Position = Vector2.new(log.text.Position.X, log.text.Position.Y - 24)
+    end
+    text.Position = Vector2.new(startX, startY)
+    table.insert(ActiveLogs, {text = text, created = tick(), duration = settings.Duration or 1})
+end
+
+if getgenv().AirHub then return end
+getgenv().AirHub = {}
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Camera = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local Hitsound, Killsound
+local function LoadSound(id, volume)
+    local sound = Instance.new("Sound")
+    sound.SoundId = "rbxassetid://" .. tostring(id)
+    sound.Volume = volume
+    sound.Parent = Camera
+    return sound
+end
+local function PlayHitsound()
+    local s = getgenv().AirHub.Sound
+    if not s.HitsoundEnabled then return end
+    if not Hitsound or Hitsound.SoundId ~= "rbxassetid://"..s.HitsoundID then
+        if Hitsound then Hitsound:Destroy() end
+        Hitsound = LoadSound(s.HitsoundID, s.HitsoundVolume)
+    else Hitsound.Volume = s.HitsoundVolume end
+    Hitsound:Play()
+end
+local function PlayKillsound()
+    local s = getgenv().AirHub.Sound
+    if not s.KillsoundEnabled then return end
+    if not Killsound or Killsound.SoundId ~= "rbxassetid://"..s.KillsoundID then
+        if Killsound then Killsound:Destroy() end
+        Killsound = LoadSound(s.KillsoundID, s.KillsoundVolume)
+    else Killsound.Volume = s.KillsoundVolume end
+    Killsound:Play()
+end
+
+RunService.Heartbeat:Connect(function()
+    local now = tick()
+    for i = #ActiveLogs, 1, -1 do
+        local log = ActiveLogs[i]
+        if now - log.created >= log.duration then
+            log.text:Remove()
+            table.remove(ActiveLogs, i)
+        end
+    end
+end)
+
+local Running, Typing, LastShotTime = false, false, 0
+local OriginalSensitivity, MenuVisible = nil, true
+
+getgenv().AirHub.Logging = { Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18 }
+getgenv().AirHub.Sound = {
+    HitsoundEnabled = false, HitsoundID = 83717596220569, HitsoundVolume = 1,
+    KillsoundEnabled = false, KillsoundID = 83717596220569, KillsoundVolume = 1
+}
+
+--====================================================================================
+--  Aimbot
+--====================================================================================
+getgenv().AirHub.Aimbot = {
+    Settings = {
+        Enabled = false,
+        TeamCheck = { Enabled = true, Mode = "Enemies", TreatNeutralAsEnemy = true },
+        AliveCheck = true, WallCheck = false, FallbackToVisible = false,
+        WallCheckMode = "Perfect",
+        WallCheckDelay = 0.15,
+        AimSmoothingSpeed = 6.0, TriggerKey = "MouseButton2", Toggle = false,
+        LockPart = "Head", AimMethod = "Smooth",
+        SilentAim = true, SilentAimMode = "Camera", IgnoreFOV = false,
+        CheckFromPlayerOnTP = true,
+        PredictionEnabled = false,
+        PredictionX = 0,
+        PredictionY = 0,
+        PredictionTime = 0.15,
+        AutoShoot = { Enabled = false, ShootKey = "MouseButton1", FireRate = 0.05,
+            OnlyWhenAiming = true, AutoStop = { Enabled = false, Time = 0.1 } }
+    },
+    FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
+    FOVCircle = Drawing.new("Circle"),
+    Locked = nil, LockPartInstance = nil, Internal = {}
+}
+local Aimbot = getgenv().AirHub.Aimbot
+
+local VISIBLE_PARTS = {"Head","HumanoidRootPart","UpperTorso","LowerTorso","Torso","Left Arm","Right Arm"}
+
+local function GetActualPartName(lockPart)
+    if lockPart == "Torso" then return {"Torso", "UpperTorso", "LowerTorso"} else return {lockPart} end
+end
+
+local function PredictPartPosition(part)
+    if not part then return Vector3.new(0,0,0) end
+    if not Aimbot.Settings.PredictionEnabled then return part.Position end
+    local vel = part.AssemblyLinearVelocity or part.Velocity
+    if not vel then return part.Position end
+    local baseTime = Aimbot.Settings.PredictionTime or 0.15
+    local px = (Aimbot.Settings.PredictionX or 0) / 100
+    local py = (Aimbot.Settings.PredictionY or 0) / 100
+    return part.Position + Vector3.new(vel.X * px * baseTime, vel.Y * py * baseTime, vel.Z * px * baseTime)
+end
+
+local function BuildRayParams(targetCharacter)
+    local localCharacter = LocalPlayer.Character
+    local ignoreList = {targetCharacter}
+    if localCharacter then table.insert(ignoreList, localCharacter) end
+    local params = RaycastParams.new()
+    params.FilterDescendantsInstances = ignoreList
+    params.FilterType = Enum.RaycastFilterType.Blacklist
+    params.IgnoreWater = true
+    return params
+end
+
+local function GetVisiblePoint_Fast(origin, part)
+    local predicted = PredictPartPosition(part)
+    local params = BuildRayParams(part.Parent)
+    if workspace:Raycast(origin, predicted - origin, params) == nil then return predicted end
+    if workspace:Raycast(origin, part.Position - origin, params) == nil then return part.Position end
+    return nil
+end
+
+local function GetVisiblePoint_Perfect(origin, part)
+    local predicted = PredictPartPosition(part)
+    local params = BuildRayParams(part.Parent)
+    if workspace:Raycast(origin, predicted - origin, params) == nil then return predicted end
+    if workspace:Raycast(origin, part.Position - origin, params) == nil then return part.Position end
+    local half = part.Size * 0.5
+    local cf = part.CFrame
+    local offsetList = {
+        Vector3.new( half.X * 0.8,  0,            0),
+        Vector3.new(-half.X * 0.8,  0,            0),
+        Vector3.new( 0,             half.Y * 0.8, 0),
+        Vector3.new( 0,            -half.Y * 0.8, 0),
+        Vector3.new( 0,             0,            half.Z * 0.8),
+        Vector3.new( 0,             0,           -half.Z * 0.8),
+        Vector3.new( half.X * 0.6,  half.Y * 0.6, 0),
+        Vector3.new(-half.X * 0.6,  half.Y * 0.6, 0),
+        Vector3.new( half.X * 0.6, -half.Y * 0.6, 0),
+        Vector3.new(-half.X * 0.6, -half.Y * 0.6, 0),
+        Vector3.new( half.X * 0.6,  0,            half.Z * 0.6),
+        Vector3.new(-half.X * 0.6,  0,           -half.Z * 0.6),
+    }
+    for _, off in ipairs(offsetList) do
+        local wp = cf * off
+        if workspace:Raycast(origin, wp - origin, params) == nil then return wp end
+    end
+    return nil
+end
+
+local function GetVisiblePointOnPart(origin, part)
+    if not part or not part:IsA("BasePart") then return nil end
+    if not Aimbot.Settings.WallCheck then return PredictPartPosition(part) end
+    if Aimbot.Settings.WallCheckMode == "Fast" then return GetVisiblePoint_Fast(origin, part)
+    else return GetVisiblePoint_Perfect(origin, part) end
+end
+
+local function GetVisiblePointWithDelay(origin, part)
+    if not part then return nil end
+    if not Aimbot.Settings.WallCheck then return PredictPartPosition(part) end
+    if Aimbot.Settings.WallCheckMode ~= "Perfect" then return GetVisiblePointOnPart(origin, part) end
+    local maxWait = tonumber(Aimbot.Settings.WallCheckDelay) or 0.15
+    local deadline = tick() + math.max(0, maxWait)
+    local vp = GetVisiblePointOnPart(origin, part)
+    while not vp and tick() < deadline do
+        task.wait(0.005)
+        vp = GetVisiblePointOnPart(origin, part)
+    end
+    return vp
+end
+
+local function FindVisiblePart(player, origin, preferredParts)
+    local char = player.Character
+    if not char then return nil end
+    if preferredParts then
+        for _, name in ipairs(preferredParts) do
+            local part = char:FindFirstChild(name)
+            if part and part:IsA("BasePart") and GetVisiblePointOnPart(origin, part) then return part end
+        end
+    end
+    for _, name in ipairs(VISIBLE_PARTS) do
+        local part = char:FindFirstChild(name)
+        if part and part:IsA("BasePart") and GetVisiblePointOnPart(origin, part) then return part end
+    end
+    return nil
+end
+
+local function IsTargetValid(targetPlayer)
+    if targetPlayer == LocalPlayer then return false end
+    local char = targetPlayer.Character
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if Aimbot.Settings.AliveCheck and (not hum or hum.Health <= 0) then return false end
+    local tc = Aimbot.Settings.TeamCheck
+    if not tc.Enabled then return true end
+    local lt, tt = LocalPlayer.Team, targetPlayer.Team
+    local mode = tc.Mode
+    if mode == "All" then return true end
+    if mode == "Enemies" then
+        if lt and tt and lt == tt then return false end
+        if (not lt or not tt) and not tc.TreatNeutralAsEnemy then return false end
+        return true
+    elseif mode == "Allies" then return (lt and tt and lt == tt)
+    elseif mode == "IgnoreNeutrals" then
+        if not lt or not tt then return false end
+        return lt ~= tt
+    end
+    return true
+end
+
+local function CancelLock()
+    Aimbot.Locked = nil
+    Aimbot.LockPartInstance = nil
+    Aimbot.FOVCircle.Color = Color3.fromRGB(255,255,255)
+    if OriginalSensitivity then UserInputService.MouseDeltaSensitivity = OriginalSensitivity end
+end
+
+local function GetClosestPlayer()
+    if Aimbot.Locked then
+        local target = Aimbot.Locked
+        if target and target.Character then
+            if not IsTargetValid(target) then CancelLock() return end
+            local origin = Camera.CFrame.Position
+            local lockPart = Aimbot.Settings.LockPart
+            local preferred = GetActualPartName(lockPart)
+            local part
+            if Aimbot.Settings.FallbackToVisible then
+                part = FindVisiblePart(target, origin, preferred)
+            else
+                for _, name in ipairs(preferred) do
+                    local p = target.Character:FindFirstChild(name)
+                    if p and p:IsA("BasePart") and GetVisiblePointOnPart(origin, p) then part = p break end
+                end
+                if not part then Aimbot.LockPartInstance = nil return end
+            end
+            if part then Aimbot.LockPartInstance = part else Aimbot.LockPartInstance = nil end
+            return
+        else CancelLock() return end
+    end
+    local ignoreFOV = Aimbot.Settings.IgnoreFOV
+    local fovEnabled = Aimbot.FOVSettings.Enabled and not ignoreFOV
+    local required = fovEnabled and Aimbot.FOVSettings.Amount or 999999
+    local bestTarget, bestPart, bestDist = nil, nil, math.huge
+    local mousePos = UserInputService:GetMouseLocation()
+    local origin = Camera.CFrame.Position
+    for _, v in pairs(Players:GetPlayers()) do
+        if not IsTargetValid(v) then continue end
+        local charTarget = v.Character
+        if not charTarget then continue end
+        local lockPart = Aimbot.Settings.LockPart
+        local preferred = GetActualPartName(lockPart)
+        local targetPart = nil
+        if lockPart == "Nearest" then
+            targetPart = FindVisiblePart(v, origin, VISIBLE_PARTS)
+        else
+            if Aimbot.Settings.FallbackToVisible then
+                targetPart = FindVisiblePart(v, origin, preferred)
+            else
+                for _, name in ipairs(preferred) do
+                    local p = charTarget:FindFirstChild(name)
+                    if p and p:IsA("BasePart") and GetVisiblePointOnPart(origin, p) then targetPart = p break end
+                end
+            end
+        end
+        if targetPart then
+            local point = PredictPartPosition(targetPart)
+            local vec, on = Camera:WorldToViewportPoint(point)
+            local dist = ignoreFOV and (point - origin).Magnitude or (on and (mousePos - Vector2.new(vec.X, vec.Y)).Magnitude or math.huge)
+            if dist < bestDist and (ignoreFOV or dist < required) then
+                bestDist, bestTarget, bestPart = dist, v, targetPart
+            end
+        end
+    end
+    if bestTarget and bestPart then
+        Aimbot.Locked = bestTarget
+        Aimbot.LockPartInstance = bestPart
+    else CancelLock() end
+end
+
+local function LogShot(targetPlayer, startHealth, hitPartName, wasVisible)
+    if not targetPlayer then return end
+    local char = targetPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    local endHealth = hum.Health
+    local hit = endHealth < startHealth
+    if hit then
+        if hum.Health <= 0 then PlayKillsound() else PlayHitsound() end
+    end
+    if not getgenv().AirHub.Logging.Enabled then return end
+    if hit and not getgenv().AirHub.Logging.ShowHit then return end
+    if not hit and not getgenv().AirHub.Logging.ShowMiss then return end
+    local msg, color
+    if hit then
+        if hum.Health <= 0 then
+            msg = "💀 Killed " .. targetPlayer.Name .. " (" .. hitPartName .. ")"
+            color = Color3.fromRGB(255, 255, 0)
+        else
+            msg = "✅ Hit " .. targetPlayer.Name .. " (" .. hitPartName .. " - " .. math.floor(startHealth - endHealth) .. " dmg)"
+            color = Color3.fromRGB(0, 255, 0)
+        end
+    else
+        if not wasVisible then msg = "❌ Missed (wall) " .. targetPlayer.Name
+        else msg = "❌ Missed " .. targetPlayer.Name end
+        color = Color3.fromRGB(255, 80, 80)
+    end
+    AddLog(msg, color)
+end
+
+local lastDelta = tick()
+
+local function PerformSilentShot(targetPart, btn, wasVisible)
+    if not Aimbot.Settings.SilentAim then return end
+    if not targetPart then return end
+    local targetChar = targetPart.Parent
+    local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
+    if not targetPlayer then return end
+    local hum = targetChar:FindFirstChildOfClass("Humanoid")
+    if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
+    local startHealth = hum and hum.Health or 0
+    local originCheck = Camera.CFrame.Position
+    local checkPoint
+    if Aimbot.Settings.WallCheck and Aimbot.Settings.WallCheckMode == "Perfect" then
+        checkPoint = GetVisiblePointWithDelay(originCheck, targetPart)
+    else
+        checkPoint = GetVisiblePointOnPart(originCheck, targetPart)
+    end
+    if Aimbot.Settings.WallCheck and not checkPoint then return end
+    if Aimbot.Settings.SilentAimMode == "GunHandler"
+    or Aimbot.Settings.SilentAimMode == "RayHook"
+    or Aimbot.Settings.SilentAimMode == "MouseHit" then
+        local mousePos = UserInputService:GetMouseLocation()
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
+        task.wait(0.001)
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+        task.delay(0.15, function() LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible) end)
+        return
+    end
+    local origin = Camera.CFrame.Position
+    local visiblePoint = checkPoint or GetVisiblePointOnPart(origin, targetPart)
+    if not visiblePoint then return end
+    local oldCF = Camera.CFrame
+    Camera.CFrame = CFrame.new(oldCF.Position, visiblePoint)
+    local mousePos = UserInputService:GetMouseLocation()
+    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
+    task.wait(0.001)
+    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+    Camera.CFrame = oldCF
+    task.delay(0.15, function() LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible) end)
+end
+
+local GunHandlerHooked = false
+local function SetupGunHandlerHook()
+    if GunHandlerHooked then return end
+    GunHandlerHooked = true
+    local modules = ReplicatedStorage:FindFirstChild("Modules")
+    if not modules then return end
+    local guns = modules:FindFirstChild("Guns")
+    if not guns then return end
+    local gunHandlerModule = guns:FindFirstChild("GunHandler")
+    if not gunHandlerModule then return end
+    local success, GunHandler = pcall(require, gunHandlerModule)
+    if not success or not GunHandler then return end
+    if not GunHandler.Shoot then return end
+    local oldShoot = GunHandler.Shoot
+    GunHandler.Shoot = function(p1, p2, p3, p4, p5, p6, p7, p8)
+        if Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim and Aimbot.Settings.SilentAimMode == "GunHandler" and Running and Aimbot.Locked and Aimbot.LockPartInstance then
+            if p1 == LocalPlayer then
+                local origin = Camera.CFrame.Position
+                local vp = GetVisiblePointOnPart(origin, Aimbot.LockPartInstance)
+                if vp then p4 = vp
+                elseif Aimbot.Settings.WallCheck then
+                else p4 = PredictPartPosition(Aimbot.LockPartInstance) end
+            end
+        end
+        return oldShoot(p1, p2, p3, p4, p5, p6, p7, p8)
+    end
+end
+task.spawn(SetupGunHandlerHook)
+
+local RayHookActive = false
+local oldRayIndex = nil
+local function GetClosestTargetRay()
+    local target, dist = nil, math.huge
+    local mousePos = Camera.ViewportSize / 2
+    for _, player in next, Players:GetPlayers() do
+        if player ~= LocalPlayer and player.Character and player:GetAttribute('Team') ~= LocalPlayer:GetAttribute('Team') then
+            local head = player.Character:FindFirstChild('Head')
+            local hum = player.Character:FindFirstChildOfClass('Humanoid')
+            if head and hum and hum.Health > 0 then
+                local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+                if onScreen then
+                    local headPos = Vector2.new(screenPos.X, screenPos.Y)
+                    local mag = (mousePos - headPos).magnitude
+                    if mag < dist then dist = mag target = head end
+                end
+            end
+        end
+    end
+    return target
+end
+
+local function SetupRayHook()
+    if RayHookActive then return end
+    local success, mt = pcall(getrawmetatable, Ray.new())
+    if not success or not mt then return end
+    local old = mt.__index
+    mt.__index = function(t, k)
+        if k == 'Direction' and Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim and Aimbot.Settings.SilentAimMode == "RayHook" and Running then
+            local target = GetClosestTargetRay()
+            if target then
+                local origin = old(t, 'Origin')
+                local vp = GetVisiblePointOnPart(origin, target)
+                if vp then return (vp - origin).Unit
+                elseif not Aimbot.Settings.WallCheck then return (PredictPartPosition(target) - origin).Unit end
+            end
+        end
+        return old(t, k)
+    end
+    oldRayIndex = old
+    RayHookActive = true
+end
+
+local function RemoveRayHook()
+    if not RayHookActive then return end
+    local success, mt = pcall(getrawmetatable, Ray.new())
+    if success and mt then mt.__index = oldRayIndex end
+    RayHookActive = false
+end
+
+local MouseHitHooked = false
+local originalGetMouse = nil
+local function SetupMouseHitHook()
+    if MouseHitHooked then return end
+    originalGetMouse = LocalPlayer.GetMouse
+    LocalPlayer.GetMouse = function()
+        local realMouse = originalGetMouse(LocalPlayer)
+        return setmetatable({}, {
+            __index = function(t, k)
+                if k == "Hit" then
+                    if Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim and Aimbot.Settings.SilentAimMode == "MouseHit" and Running and Aimbot.LockPartInstance then
+                        local origin = Camera.CFrame.Position
+                        local vp = GetVisiblePointOnPart(origin, Aimbot.LockPartInstance)
+                        if vp then return vp end
+                        if not Aimbot.Settings.WallCheck then return PredictPartPosition(Aimbot.LockPartInstance) end
+                        return nil
+                    end
+                end
+                return realMouse[k]
+            end,
+            __newindex = function(t, k, v) realMouse[k] = v end
+        })
+    end
+    MouseHitHooked = true
+end
+
+local function RemoveMouseHitHook()
+    if not MouseHitHooked then return end
+    if originalGetMouse then LocalPlayer.GetMouse = originalGetMouse end
+    MouseHitHooked = false
+end
+
+local function LoadAimbot()
+    OriginalSensitivity = UserInputService.MouseDeltaSensitivity
+    RunService.RenderStepped:Connect(function()
+        local now = tick()
+        local dt = math.min(0.033, now - lastDelta)
+        lastDelta = now
+        if Aimbot.FOVSettings.Enabled and Aimbot.Settings.Enabled and not Aimbot.Settings.IgnoreFOV then
+            Aimbot.FOVCircle.Radius = Aimbot.FOVSettings.Amount
+            Aimbot.FOVCircle.Thickness = 1
+            Aimbot.FOVCircle.Filled = false
+            Aimbot.FOVCircle.Transparency = 0.5
+            Aimbot.FOVCircle.Visible = Aimbot.FOVSettings.Visible
+            Aimbot.FOVCircle.Position = UserInputService:GetMouseLocation()
+        else Aimbot.FOVCircle.Visible = false end
+        if Aimbot.Settings.Enabled and Running then
+            GetClosestPlayer()
+            if Aimbot.Locked then
+                local targetPart = Aimbot.LockPartInstance
+                if targetPart then
+                    local origin = Camera.CFrame.Position
+                    local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
+                    if visiblePoint then
+                        Aimbot.FOVCircle.Color = Color3.fromRGB(255,200,70)
+                        if not Aimbot.Settings.SilentAim then
+                            local targetPos = visiblePoint
+                            if Aimbot.Settings.AimMethod == "Instant" then
+                                Camera.CFrame = CFrame.new(Camera.CFrame.Position, targetPos)
+                            else
+                                local targetCF = CFrame.new(Camera.CFrame.Position, targetPos)
+                                local smoothFactor = 1 - math.exp(-Aimbot.Settings.AimSmoothingSpeed * dt)
+                                Camera.CFrame = Camera.CFrame:Lerp(targetCF, smoothFactor)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if Aimbot.Settings.SilentAimMode == "RayHook" and Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim then SetupRayHook() else RemoveRayHook() end
+        if Aimbot.Settings.SilentAimMode == "MouseHit" and Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim then SetupMouseHitHook() else RemoveMouseHitHook() end
+    end)
+
+    UserInputService.InputBegan:Connect(function(inp)
+        if Typing then return end
+        local triggerKey = Aimbot.Settings.TriggerKey
+        local keyPressed = false
+        if inp.UserInputType == Enum.UserInputType.Keyboard then
+            local kc = SafeKeyCode(triggerKey)
+            if kc and inp.KeyCode == kc then keyPressed = true end
+        else
+            local uit = SafeUserInputType(triggerKey)
+            if uit and inp.UserInputType == uit then keyPressed = true end
+        end
+        if keyPressed then
+            if Aimbot.Settings.Toggle then
+                Running = not Running
+                if not Running then CancelLock() end
+            else Running = true end
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(inp)
+        if Typing or Aimbot.Settings.Toggle then return end
+        local triggerKey = Aimbot.Settings.TriggerKey
+        local keyReleased = false
+        if inp.UserInputType == Enum.UserInputType.Keyboard then
+            local kc = SafeKeyCode(triggerKey)
+            if kc and inp.KeyCode == kc then keyReleased = true end
+        else
+            local uit = SafeUserInputType(triggerKey)
+            if uit and inp.UserInputType == uit then keyReleased = true end
+        end
+        if keyReleased then Running = false CancelLock() end
+    end)
+
+    UserInputService.InputBegan:Connect(function(inp)
+        if Typing then return end
+        if not Aimbot.Settings.Enabled then return end
+        if not Running or not Aimbot.Locked then return end
+        local btn = nil
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then btn = 0
+        elseif inp.UserInputType == Enum.UserInputType.MouseButton2 then btn = 1 end
+        if btn == nil then return end
+        if btn == 1 and Aimbot.Settings.TriggerKey == "MouseButton2" then return end
+        if Aimbot.Settings.AutoShoot.Enabled then return end
+        local targetPart = Aimbot.LockPartInstance
+        if targetPart then
+            if Aimbot.Settings.SilentAim then
+                local origin = Camera.CFrame.Position
+                local wasVisible = GetVisiblePointOnPart(origin, targetPart) ~= nil
+                PerformSilentShot(targetPart, btn, wasVisible)
+            else
+                if Aimbot.Settings.WallCheck then
+                    local origin = Camera.CFrame.Position
+                    local vp = (Aimbot.Settings.WallCheckMode == "Perfect")
+                        and GetVisiblePointWithDelay(origin, targetPart)
+                        or GetVisiblePointOnPart(origin, targetPart)
+                    if not vp then return end
+                end
+                local mousePos = UserInputService:GetMouseLocation()
+                VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
+                task.wait(0.001)
+                VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+            end
+        end
+    end)
+
+    local function ProcessAutoShoot()
+        while task.wait(0.01) do
+            xpcall(function()
+                if not Aimbot.Settings.AutoShoot.Enabled then return end
+                if Aimbot.Settings.AutoShoot.OnlyWhenAiming and not Running then return end
+                if not Aimbot.Locked or not Aimbot.LockPartInstance then return end
+                local nowt = tick()
+                if nowt - LastShotTime < Aimbot.Settings.AutoShoot.FireRate then return end
+                local targetPart = Aimbot.LockPartInstance
+                if not targetPart then return end
+                local targetChar = targetPart.Parent
+                local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
+                if not targetPlayer then return end
+                local hum = targetChar:FindFirstChildOfClass("Humanoid")
+                if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then CancelLock() return end
+                local startHealth = hum and hum.Health or 0
+                local origin = Camera.CFrame.Position
+                local visiblePoint
+                if Aimbot.Settings.WallCheck and Aimbot.Settings.WallCheckMode == "Perfect" then
+                    visiblePoint = GetVisiblePointWithDelay(origin, targetPart)
+                else
+                    visiblePoint = GetVisiblePointOnPart(origin, targetPart)
+                end
+                local wasVisible = visiblePoint ~= nil
+                if not visiblePoint and Aimbot.Settings.WallCheck then return end
+                if Aimbot.Settings.AutoShoot.AutoStop.Enabled then
+                    local char = LocalPlayer.Character
+                    if char then
+                        local humObj = char:FindFirstChildOfClass("Humanoid")
+                        if humObj then
+                            local savedSpeed = humObj.WalkSpeed
+                            humObj.WalkSpeed = 0
+                            task.wait(Aimbot.Settings.AutoShoot.AutoStop.Time)
+                            humObj.WalkSpeed = savedSpeed
+                        end
+                    end
+                end
+                local shootBtn = Aimbot.Settings.AutoShoot.ShootKey == "MouseButton1" and 0 or 1
+                if Aimbot.Settings.SilentAim then
+                    PerformSilentShot(targetPart, shootBtn, wasVisible)
+                else
+                    local mousePos = UserInputService:GetMouseLocation()
+                    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, shootBtn, true, game, 1)
+                    task.wait(0.001)
+                    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, shootBtn, false, game, 1)
+                end
+                LastShotTime = nowt
+            end, HandleError)
+        end
+    end
+    coroutine.wrap(ProcessAutoShoot)()
+end
+
+UserInputService.TextBoxFocused:Connect(function() Typing = true end)
+UserInputService.TextBoxFocusReleased:Connect(function() Typing = false end)
+LoadAimbot()--====================================================================================
+--  AntiAim + Desync
+--====================================================================================
+getgenv().AirHub.AntiAim = {
+    Settings = {
+        Enabled = false, Mode = "Static", Method = "CFrame",
+        Body = { Reference = "Camera", Yaw = 0, SpinSpeed = 0, JitterAmount = 5,
+            JitterSpeed = 10, SwayAmount = 30, SwaySpeed = 2,
+            IgnoreMoving = false, MoveSpeedThreshold = 0.5 }
+    },
+    Desync = { 
+        Settings = { 
+            Enabled = false, 
+            Mode = "Random",
+            RadiusX = 5, RadiusY = 5, RadiusZ = 5,
+            UpdateInterval = 0.05, 
+            Smoothness = 0.2, 
+            OnlyInAir = false,
+            NotInAir = false,
+            FreezeOldPos = true,
+            RandomDelayEnabled = false,
+            AutoUpdateMin = 0.2,
+            AutoUpdateMax = 1.0
+        },
+        Internal = { 
+            Connection = nil, 
+            RenderBindName = "AirHubDesync", 
+            Acc = 0, 
+            CurrentOffset = Vector3.new(0,0,0), 
+            TargetOffset = Vector3.new(0,0,0),
+            SavedCFrame = nil,
+            OldPosTimer = 0,
+            NextUpdate = 0,
+            PendingRefresh = false
+        } 
+    },
+    Internal = { BodyLastUpdate = 0, BodyJitterTime = 0, BodyJitterOffset = 0,
+        BodyGyro = nil, AlignOrientation = nil, Attachment = nil,
+        AngularVelocity = nil, CurrentMotor = nil, OriginalC0 = nil }
+}
+local AntiAim = getgenv().AirHub.AntiAim
+
+local function GetBaseYaw(reference, char)
+    if reference == "Camera" then
+        local look = Camera.CFrame.LookVector
+        local flat = Vector3.new(look.X, 0, look.Z)
+        if flat.Magnitude > 0.001 then return math.atan2(flat.X, flat.Z) else return 0 end
+    elseif reference == "Movement" then
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local vel = hrp.Velocity
+            local horizontal = Vector3.new(vel.X, 0, vel.Z)
+            if horizontal.Magnitude > 0.5 then return math.atan2(horizontal.X, horizontal.Z) end
+        end
+        local look = Camera.CFrame.LookVector
+        local flat = Vector3.new(look.X, 0, look.Z)
+        if flat.Magnitude > 0.001 then return math.atan2(flat.X, flat.Z) else return 0 end
+    elseif reference == "Player" then
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local look = hrp.CFrame.LookVector
+            local flat = Vector3.new(look.X, 0, look.Z)
+            if flat.Magnitude > 0.001 then return math.atan2(flat.X, flat.Z) else return 0 end
+        end
+        return 0
+    end
+    return 0
+end
+
+local function RandomOffset(radius)
+    if radius == 0 then return 0 end
+    if radius > 0 then return math.random(1, radius) else return -math.random(1, -radius) end
+end
+
+local function PickNextDelay(settings)
+    local minV = tonumber(settings.AutoUpdateMin) or 0.2
+    local maxV = tonumber(settings.AutoUpdateMax) or 1.0
+    if minV < 0 then minV = 0 end
+    if maxV < minV then maxV = minV end
+    if maxV - minV < 0.001 then return minV end
+    return minV + math.random() * (maxV - minV)
+end
+
+local function StartDesync()
+    local desync = AntiAim.Desync
+    if desync.Internal.Connection then return end
+    if desync.Settings.Mode == "OldPosition" then
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then desync.Internal.SavedCFrame = hrp.CFrame end
+        desync.Internal.OldPosTimer = 0
+        desync.Internal.NextUpdate = PickNextDelay(desync.Settings)
+        desync.Internal.PendingRefresh = false
+    end
+    desync.Internal.Connection = RunService.Heartbeat:Connect(function(dt)
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local inAir = hum and hum.FloorMaterial == Enum.Material.Air
+        if desync.Settings.OnlyInAir and not inAir then return end
+        if desync.Settings.NotInAir and inAir and desync.Settings.Mode ~= "OldPosition" then return end
+        local oldcf = hrp.CFrame
+        local oldvel = hrp.Velocity
+        local oldrotvel = hrp.RotVelocity
+        local targetCF
+        if desync.Settings.Mode == "OldPosition" then
+            if not desync.Internal.SavedCFrame then desync.Internal.SavedCFrame = oldcf end
+            local canRefresh = true
+            if desync.Settings.NotInAir and inAir then canRefresh = false end
+            if canRefresh and desync.Internal.PendingRefresh then
+                desync.Internal.PendingRefresh = false
+                desync.Internal.SavedCFrame = oldcf
+                desync.Internal.OldPosTimer = 0
+                desync.Internal.NextUpdate = PickNextDelay(desync.Settings)
+            end
+            if canRefresh and desync.Settings.RandomDelayEnabled and not desync.Settings.FreezeOldPos then
+                desync.Internal.OldPosTimer = (desync.Internal.OldPosTimer or 0) + dt
+                if desync.Internal.OldPosTimer >= (desync.Internal.NextUpdate or 0) then
+                    desync.Internal.SavedCFrame = oldcf
+                    desync.Internal.OldPosTimer = 0
+                    desync.Internal.NextUpdate = PickNextDelay(desync.Settings)
+                end
+            elseif not canRefresh then
+                if desync.Settings.RandomDelayEnabled and not desync.Settings.FreezeOldPos then
+                    desync.Internal.OldPosTimer = (desync.Internal.OldPosTimer or 0) + dt
+                    if desync.Internal.OldPosTimer >= (desync.Internal.NextUpdate or 0) then
+                        desync.Internal.PendingRefresh = true
+                    end
+                elseif not desync.Settings.FreezeOldPos and not desync.Settings.RandomDelayEnabled then
+                    desync.Internal.PendingRefresh = true
+                end
+            end
+            if canRefresh and not desync.Settings.FreezeOldPos and not desync.Settings.RandomDelayEnabled then
+                desync.Internal.SavedCFrame = oldcf
+            end
+            targetCF = desync.Internal.SavedCFrame
+        else
+            desync.Internal.Acc = desync.Internal.Acc + dt
+            if desync.Internal.Acc >= desync.Settings.UpdateInterval then
+                desync.Internal.Acc = 0
+                desync.Internal.TargetOffset = Vector3.new(
+                    RandomOffset(desync.Settings.RadiusX),
+                    RandomOffset(desync.Settings.RadiusY),
+                    RandomOffset(desync.Settings.RadiusZ)
+                )
+            end
+            local lerpFactor = math.clamp(dt / desync.Settings.Smoothness, 0, 1)
+            desync.Internal.CurrentOffset = desync.Internal.CurrentOffset:Lerp(desync.Internal.TargetOffset, lerpFactor)
+            targetCF = oldcf * CFrame.new(desync.Internal.CurrentOffset)
+        end
+        hrp.CFrame = targetCF
+        RunService:BindToRenderStep(desync.Internal.RenderBindName, 101, function()
+            hrp.CFrame = oldcf
+            hrp.Velocity = oldvel
+            hrp.RotVelocity = oldrotvel
+            RunService:UnbindFromRenderStep(desync.Internal.RenderBindName)
+        end)
+    end)
+end
+
+local function StopDesync()
+    local desync = AntiAim.Desync
+    if desync.Internal.Connection then desync.Internal.Connection:Disconnect() desync.Internal.Connection = nil end
+    RunService:UnbindFromRenderStep(desync.Internal.RenderBindName)
+    desync.Internal.SavedCFrame = nil
+    desync.Internal.OldPosTimer = 0
+    desync.Internal.NextUpdate = 0
+    desync.Internal.PendingRefresh = false
+end
+
+local function CleanupAntiAim()
+    if AntiAim.Internal.BodyGyro then AntiAim.Internal.BodyGyro:Destroy() AntiAim.Internal.BodyGyro = nil end
+    if AntiAim.Internal.AlignOrientation then AntiAim.Internal.AlignOrientation:Destroy() AntiAim.Internal.AlignOrientation = nil end
+    if AntiAim.Internal.Attachment then AntiAim.Internal.Attachment:Destroy() AntiAim.Internal.Attachment = nil end
+    if AntiAim.Internal.AngularVelocity then AntiAim.Internal.AngularVelocity:Destroy() AntiAim.Internal.AngularVelocity = nil end
+    if AntiAim.Internal.CurrentMotor and AntiAim.Internal.OriginalC0 then
+        AntiAim.Internal.CurrentMotor.C0 = AntiAim.Internal.OriginalC0
+        AntiAim.Internal.CurrentMotor = nil
+        AntiAim.Internal.OriginalC0 = nil
+    end
+end
+
+local function ApplyAntiAim()
+    if not AntiAim.Settings.Enabled then CleanupAntiAim() return end
+    local char = LocalPlayer.Character
+    if not char then CleanupAntiAim() return end
+    local now = tick()
+    AntiAim.Internal.BodyLastUpdate = now
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local bodySet = AntiAim.Settings.Body
+    local mode = AntiAim.Settings.Mode
+    local method = AntiAim.Settings.Method
+    local shouldApply = true
+    if bodySet.IgnoreMoving then
+        if root.Velocity.Magnitude > bodySet.MoveSpeedThreshold then shouldApply = false end
+    end
+    if shouldApply then
+        local baseYaw = GetBaseYaw(bodySet.Reference, char)
+        local yaw = 0
+        if mode == "Static" then yaw = baseYaw + math.rad(bodySet.Yaw)
+        elseif mode == "Spin" then yaw = baseYaw + math.rad((now * bodySet.SpinSpeed) % 360 + bodySet.Yaw)
+        elseif mode == "Jitter" then
+            if now - AntiAim.Internal.BodyJitterTime > 1 / bodySet.JitterSpeed then
+                AntiAim.Internal.BodyJitterTime = now
+                AntiAim.Internal.BodyJitterOffset = (math.random()-0.5)*2*bodySet.JitterAmount
+            end
+            yaw = baseYaw + math.rad(bodySet.Yaw + AntiAim.Internal.BodyJitterOffset)
+        elseif mode == "Sway" then
+            yaw = baseYaw + math.rad(bodySet.Yaw + math.sin(now * bodySet.SwaySpeed) * bodySet.SwayAmount)
+        end
+        if method == "CFrame" then
+            CleanupAntiAim()
+            root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+        elseif method == "BodyGyro" then
+            if AntiAim.Internal.AlignOrientation or AntiAim.Internal.AngularVelocity or AntiAim.Internal.CurrentMotor then CleanupAntiAim() end
+            if not AntiAim.Internal.BodyGyro then
+                local bg = Instance.new("BodyGyro")
+                bg.MaxTorque = Vector3.new(0, 4000, 0)
+                bg.P = 10000
+                bg.D = 100
+                bg.Parent = root
+                AntiAim.Internal.BodyGyro = bg
+            end
+            AntiAim.Internal.BodyGyro.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+        elseif method == "Motor6D" then
+            if AntiAim.Internal.BodyGyro or AntiAim.Internal.AlignOrientation or AntiAim.Internal.AngularVelocity then CleanupAntiAim() end
+            local motor
+            for _, child in ipairs(char:GetDescendants()) do
+                if child:IsA("Motor6D") and (child.Name == "Neck" or child.Name == "Waist" or child.Name:lower():find("neck") or child.Name:lower():find("waist")) then
+                    motor = child
+                    break
+                end
+            end
+            if motor then
+                if not AntiAim.Internal.CurrentMotor or AntiAim.Internal.CurrentMotor ~= motor then
+                    if AntiAim.Internal.CurrentMotor then AntiAim.Internal.CurrentMotor.C0 = AntiAim.Internal.OriginalC0 end
+                    AntiAim.Internal.CurrentMotor = motor
+                    AntiAim.Internal.OriginalC0 = motor.C0
+                end
+                motor.C0 = AntiAim.Internal.OriginalC0 * CFrame.Angles(0, yaw, 0)
+            else CleanupAntiAim() end
+        elseif method == "AlignOrientation" then
+            if AntiAim.Internal.BodyGyro or AntiAim.Internal.AngularVelocity or AntiAim.Internal.CurrentMotor then CleanupAntiAim() end
+            if not AntiAim.Internal.Attachment then
+                local attachment = Instance.new("Attachment")
+                attachment.Parent = root
+                AntiAim.Internal.Attachment = attachment
+            end
+            if not AntiAim.Internal.AlignOrientation then
+                local align = Instance.new("AlignOrientation")
+                align.MaxTorque = 4000
+                align.MaxAngularVelocity = math.huge
+                align.Responsiveness = 50
+                align.Parent = root
+                align.Attachment0 = AntiAim.Internal.Attachment
+                align.RigidityEnabled = false
+                AntiAim.Internal.AlignOrientation = align
+            end
+            AntiAim.Internal.AlignOrientation.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+            AntiAim.Internal.AlignOrientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
+            AntiAim.Internal.AlignOrientation.RigidityEnabled = false
+        elseif method == "AngularVelocity" then
+            if AntiAim.Internal.BodyGyro or AntiAim.Internal.AlignOrientation or AntiAim.Internal.CurrentMotor then CleanupAntiAim() end
+            if not AntiAim.Internal.AngularVelocity then
+                local av = Instance.new("AngularVelocity")
+                av.MaxTorque = Vector3.new(0, 4000, 0)
+                av.AngularVelocity = Vector3.new(0, 0, 0)
+                av.Parent = root
+                AntiAim.Internal.AngularVelocity = av
+            end
+            local spinSpeed = (mode == "Spin") and math.rad(bodySet.SpinSpeed) or 0
+            AntiAim.Internal.AngularVelocity.AngularVelocity = Vector3.new(0, spinSpeed, 0)
+        end
+    else CleanupAntiAim() end
+end
+RunService.RenderStepped:Connect(function() xpcall(ApplyAntiAim, HandleError) end)
+AntiAim.Functions = {
+    ResetSettings = function()
+        AntiAim.Settings = { Enabled = false, Mode = "Static", Method = "CFrame",
+            Body = { Reference = "Camera", Yaw = 0, SpinSpeed = 0, JitterAmount = 5,
+                JitterSpeed = 10, SwayAmount = 30, SwaySpeed = 2, IgnoreMoving = false, MoveSpeedThreshold = 0.5 } }
+        AntiAim.Desync.Settings = { Enabled = false, Mode = "Random", RadiusX = 5, RadiusY = 5, RadiusZ = 5,
+            UpdateInterval = 0.05, Smoothness = 0.2, OnlyInAir = false, NotInAir = false,
+            FreezeOldPos = true, RandomDelayEnabled = false, AutoUpdateMin = 0.2, AutoUpdateMax = 1.0 }
+        AntiAim.Internal = { BodyLastUpdate = 0, BodyJitterTime = 0, BodyJitterOffset = 0,
+            BodyGyro = nil, AlignOrientation = nil, Attachment = nil,
+            AngularVelocity = nil, CurrentMotor = nil, OriginalC0 = nil }
+        AntiAim.Desync.Internal.SavedCFrame = nil
+        AntiAim.Desync.Internal.OldPosTimer = 0
+        AntiAim.Desync.Internal.NextUpdate = 0
+        AntiAim.Desync.Internal.PendingRefresh = false
+        CleanupAntiAim()
+        StopDesync()
+    end,
+    SaveOldPosition = function()
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            AntiAim.Desync.Internal.SavedCFrame = hrp.CFrame
+            AntiAim.Desync.Internal.OldPosTimer = 0
+            AntiAim.Desync.Internal.NextUpdate = PickNextDelay(AntiAim.Desync.Settings)
+            AntiAim.Desync.Internal.PendingRefresh = false
+            return true
+        end
+        return false
+    end
+}
+
+--====================================================================================
+--  WallHack + Glow
+--====================================================================================
+getgenv().AirHub.WallHack = {
+    Settings = {Enabled = false, TeamCheck = false, AliveCheck = true},
+    Visuals = {
+        BoxSettings = {Enabled = true, Type = 1, Color = Color3.fromRGB(255,255,255), TargetColor = Color3.fromRGB(255,0,0), Transparency = 0.7, Thickness = 1, Filled = false, Increase = 1},
+        GlowSettings = { Enabled = true, Color = Color3.fromRGB(0, 255, 255), Transparency = 0.5, Mode = "Outline" }
+    },
+    WrappedPlayers = {}
+}
+local WallHack = getgenv().AirHub.WallHack
+
+local WHConnections = {}
+local function GetPlayerTable(plr)
+    for _, v in pairs(WallHack.WrappedPlayers) do if v.Name == plr.Name then return v end end
+end
+
+local function ApplyGlowForPlayer(plr)
+    local data = GetPlayerTable(plr)
+    if not data then return end
+    if WallHack.Settings.Enabled and WallHack.Visuals.GlowSettings.Enabled then
+        local char = plr.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if char and hum and hum.Health > 0 then
+            if not data.Glow then
+                local highlight = Instance.new("Highlight")
+                highlight.Name = "AirHub_Glow"
+                highlight.Adornee = char
+                highlight.Parent = char
+                highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                data.Glow = highlight
+            end
+            data.Glow.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            local gs = WallHack.Visuals.GlowSettings
+            local safeColor = SanitizeColor(gs.Color)
+            local safeTrans = tonumber(gs.Transparency)
+            if not safeTrans then safeTrans = 0.5 end
+            safeTrans = math.clamp(safeTrans, 0, 1)
+            gs.Color = safeColor
+            gs.Transparency = safeTrans
+            local mode = gs.Mode or "Outline"
+            if mode == "Outline" then
+                data.Glow.FillTransparency = 1
+                data.Glow.OutlineTransparency = safeTrans
+                data.Glow.FillColor = safeColor
+                data.Glow.OutlineColor = safeColor
+            elseif mode == "Fill" then
+                data.Glow.FillTransparency = safeTrans
+                data.Glow.OutlineTransparency = 1
+                data.Glow.FillColor = safeColor
+                data.Glow.OutlineColor = safeColor
+            elseif mode == "Both" then
+                data.Glow.FillTransparency = safeTrans * 0.5
+                data.Glow.OutlineTransparency = safeTrans * 0.5
+                data.Glow.FillColor = safeColor
+                data.Glow.OutlineColor = safeColor
+            elseif mode == "Pulse" then
+                local pulse = (math.sin(tick() * 2) + 1) / 2
+                local r = safeColor.R * (0.5 + pulse * 0.5)
+                local g = safeColor.G * (0.5 + pulse * 0.5)
+                local b = safeColor.B * (0.5 + pulse * 0.5)
+                local pulsed = Color3.new(math.clamp(r, 0, 1), math.clamp(g, 0, 1), math.clamp(b, 0, 1))
+                data.Glow.FillColor = pulsed
+                data.Glow.OutlineColor = pulsed
+                data.Glow.FillTransparency = safeTrans * (0.5 + pulse * 0.5)
+                data.Glow.OutlineTransparency = safeTrans * (0.5 + pulse * 0.5)
+            else
+                data.Glow.FillTransparency = 1
+                data.Glow.OutlineTransparency = safeTrans
+                data.Glow.FillColor = safeColor
+                data.Glow.OutlineColor = safeColor
+            end
+        elseif data.Glow then
+            data.Glow:Destroy()
+            data.Glow = nil
+        end
+    elseif data.Glow then
+        data.Glow:Destroy()
+        data.Glow = nil
+    end
+end
+
+local function ApplyGlowToAll()
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then ApplyGlowForPlayer(plr) end
+    end
+end
+
+local function AddBox(plr)
+    local t = GetPlayerTable(plr)
+    t.Box = {
+        Square = Drawing.new("Square"),
+        TopLeftLine = Drawing.new("Line"), TopRightLine = Drawing.new("Line"),
+        BottomLeftLine = Drawing.new("Line"), BottomRightLine = Drawing.new("Line")
+    }
+    t.Connections.Box = RunService.RenderStepped:Connect(function()
+        if not WallHack.Settings.Enabled or not WallHack.Visuals.BoxSettings.Enabled then
+            for _, v in pairs(t.Box) do v.Visible = false end
+            return
+        end
+        local char = plr.Character
+        if not char or not char:FindFirstChild("HumanoidRootPart") or not char:FindFirstChild("Head") then
+            for _, v in pairs(t.Box) do v.Visible = false end
+            return
+        end
+        local vec, onScreen = Camera:WorldToViewportPoint(char.HumanoidRootPart.Position)
+        if not onScreen or not t.Checks.Alive or not t.Checks.Team then
+            for _, v in pairs(t.Box) do v.Visible = false end
+            return
+        end
+        local isTarget = (Aimbot.Locked == plr)
+        local boxColor = isTarget and SanitizeColor(WallHack.Visuals.BoxSettings.TargetColor) or SanitizeColor(WallHack.Visuals.BoxSettings.Color)
+        local hrpCF = char.HumanoidRootPart.CFrame
+        local size = char.HumanoidRootPart.Size * WallHack.Visuals.BoxSettings.Increase
+        local posTL = Camera:WorldToViewportPoint((hrpCF * CFrame.new(size.X, size.Y, 0)).Position)
+        local posTR = Camera:WorldToViewportPoint((hrpCF * CFrame.new(-size.X, size.Y, 0)).Position)
+        local posBL = Camera:WorldToViewportPoint((hrpCF * CFrame.new(size.X, -size.Y - 0.5, 0)).Position)
+        local posBR = Camera:WorldToViewportPoint((hrpCF * CFrame.new(-size.X, -size.Y - 0.5, 0)).Position)
+        if WallHack.Visuals.BoxSettings.Type == 2 then
+            t.Box.Square.Visible = true
+            for k, v in pairs(t.Box) do if k ~= "Square" then v.Visible = false end end
+            t.Box.Square.Thickness = WallHack.Visuals.BoxSettings.Thickness
+            t.Box.Square.Color = boxColor
+            t.Box.Square.Transparency = WallHack.Visuals.BoxSettings.Transparency
+            t.Box.Square.Filled = WallHack.Visuals.BoxSettings.Filled
+            local headY = Camera:WorldToViewportPoint(char.Head.Position + Vector3.new(0, 0.5, 0)).Y
+            local legY = Camera:WorldToViewportPoint(char.HumanoidRootPart.Position - Vector3.new(0, 3, 0)).Y
+            t.Box.Square.Size = Vector2.new(2000 / vec.Z, headY - legY)
+            t.Box.Square.Position = Vector2.new(vec.X - t.Box.Square.Size.X / 2, vec.Y - t.Box.Square.Size.Y / 2)
+        else
+            t.Box.Square.Visible = false
+            for _, ln in pairs({"TopLeftLine","TopRightLine","BottomLeftLine","BottomRightLine"}) do
+                t.Box[ln].Visible = true
+                t.Box[ln].Thickness = WallHack.Visuals.BoxSettings.Thickness
+                t.Box[ln].Transparency = WallHack.Visuals.BoxSettings.Transparency
+                t.Box[ln].Color = boxColor
+            end
+            t.Box.TopLeftLine.From, t.Box.TopLeftLine.To = Vector2.new(posTL.X, posTL.Y), Vector2.new(posTR.X, posTR.Y)
+            t.Box.TopRightLine.From, t.Box.TopRightLine.To = Vector2.new(posTR.X, posTR.Y), Vector2.new(posBR.X, posBR.Y)
+            t.Box.BottomLeftLine.From, t.Box.BottomLeftLine.To = Vector2.new(posBL.X, posBL.Y), Vector2.new(posTL.X, posTL.Y)
+            t.Box.BottomRightLine.From, t.Box.BottomRightLine.To = Vector2.new(posBR.X, posBR.Y), Vector2.new(posBL.X, posBL.Y)
+        end
+    end)
+end
+
+local function InitChecks(plr)
+    local t = GetPlayerTable(plr)
+    t.Connections.UpdateChecks = RunService.RenderStepped:Connect(function()
+        local char = plr.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if char and hum then
+            t.Checks.Alive = WallHack.Settings.AliveCheck and hum.Health > 0 or not WallHack.Settings.AliveCheck
+            t.Checks.Team = not WallHack.Settings.TeamCheck or (LocalPlayer.Team and plr.Team and LocalPlayer.Team ~= plr.Team)
+        else
+            t.Checks.Alive = false
+            t.Checks.Team = false
+        end
+        ApplyGlowForPlayer(plr)
+    end)
+end
+
+local function AssignRigType(plr)
+    local t = GetPlayerTable(plr)
+    task.wait()
+    repeat task.wait() until plr.Character
+    if plr.Character:FindFirstChild("Torso") and not plr.Character:FindFirstChild("LowerTorso") then t.RigType = "R6"
+    elseif plr.Character:FindFirstChild("LowerTorso") then t.RigType = "R15"
+    else AssignRigType(plr) end
+end
+
+local function Wrap(plr)
+    if not GetPlayerTable(plr) then
+        local val = { Name = plr.Name, Checks = { Alive = true, Team = true }, Connections = {}, Box = {} }
+        WallHack.WrappedPlayers[#WallHack.WrappedPlayers + 1] = val
+        AssignRigType(plr)
+        InitChecks(plr)
+        AddBox(plr)
+        ApplyGlowForPlayer(plr)
+        plr.CharacterAdded:Connect(function() ApplyGlowForPlayer(plr) end)
+    end
+end
+
+local function UnWrap(plr)
+    for i, v in pairs(WallHack.WrappedPlayers) do
+        if v.Name == plr.Name then
+            for _, c in pairs(v.Connections) do c:Disconnect() end
+            for _, b in pairs(v.Box) do if b and b.Remove then b:Remove() end end
+            if v.Glow then v.Glow:Destroy() end
+            WallHack.WrappedPlayers[i] = nil
+            break
+        end
+    end
+end
+
+local function LoadWH()
+    WHConnections.PlayerAdded = Players.PlayerAdded:Connect(Wrap)
+    WHConnections.PlayerRemoving = Players.PlayerRemoving:Connect(UnWrap)
+    WHConnections.ReWrap = RunService.RenderStepped:Connect(function()
+        for _, v in pairs(Players:GetPlayers()) do if v ~= LocalPlayer then Wrap(v) end end
+        task.wait(30)
+    end)
+end
+LoadWH()
+
+WallHack.Functions = {
+    Exit = function()
+        for _, v in pairs(WHConnections) do v:Disconnect() end
+        for _, v in pairs(Players:GetPlayers()) do if v ~= LocalPlayer then UnWrap(v) end end
+    end,
+    Restart = function() for _, v in pairs(WHConnections) do v:Disconnect() end LoadWH() end,
+    ResetSettings = function()
+        WallHack.Settings = {Enabled = false, TeamCheck = false, AliveCheck = true}
+        WallHack.Visuals.BoxSettings = {Enabled = true, Type = 1, Color = Color3.fromRGB(255,255,255), TargetColor = Color3.fromRGB(255,0,0), Transparency = 0.7, Thickness = 1, Filled = false, Increase = 1}
+        WallHack.Visuals.GlowSettings = {Enabled = true, Color = Color3.fromRGB(0, 255, 255), Transparency = 0.5, Mode = "Outline"}
+        ApplyGlowToAll()
+    end
+}
+
+--====================================================================================
+--  Server Position
+--====================================================================================
+getgenv().AirHub.ServerPosition = {
+    Settings = { Enabled = false, RGB = true, Strength = 1, MaxLimb = 6 },
+    Internal = { Connection = nil, Ghosts = {} }
+}
+local ServerPosition = getgenv().AirHub.ServerPosition
+
+local part_names = {
+    "HumanoidRootPart","Head","Left Arm","Right Arm","Left Leg","Right Leg",
+    "LeftUpperArm","RightUpperArm","LeftLowerArm","RightLowerArm",
+    "LeftHand","RightHand","LeftUpperLeg","RightUpperLeg",
+    "LeftLowerLeg","RightLowerLeg","LeftFoot","RightFoot"
+}
+
+local function rgb(t) return Color3.fromHSV((t%5)/5,1,1) end
+
+local function make_ghost(real)
+    local g = Instance.new("Part")
+    g.Name = real.Name.."_ghost"
+    g.Size = real.Size
+    g.Anchored = true
+    g.CanCollide = false
+    g.Transparency = 1
+    g.CFrame = real.CFrame
+    g.Parent = workspace
+    local b = Instance.new("SelectionBox")
+    b.Adornee = g
+    b.LineThickness = 0.04
+    b.Parent = g
+    return {real = real, ghost = g, box = b}
+end
+
+local function is_replicate(p) return p and not p.Anchored end
+local function is_owner(p) return p and p.ReceiveAge == 0 end
+
+local function StartServerPosition()
+    if ServerPosition.Internal.Connection then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildWhichIsA("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp then return end
+    for _, g in pairs(ServerPosition.Internal.Ghosts) do if g.ghost then g.ghost:Destroy() end end
+    ServerPosition.Internal.Ghosts = {}
+    for _, n in ipairs(part_names) do
+        local p = char:FindFirstChild(n)
+        if p and p:IsA("BasePart") then ServerPosition.Internal.Ghosts[n] = make_ghost(p) end
+    end
+    local server_cf = hrp.CFrame
+    local lin_vel = Vector3.new(0,0,0)
+    local last = os.clock()
+    local acc = 0
+    local frames = {}
+    ServerPosition.Internal.Connection = RunService.Heartbeat:Connect(function(dt)
+        if not hrp or not hrp.Parent then
+            for _, g in pairs(ServerPosition.Internal.Ghosts) do if g.ghost then g.ghost:Destroy() end end
+            ServerPosition.Internal.Ghosts = {}
+            ServerPosition.Internal.Connection:Disconnect()
+            ServerPosition.Internal.Connection = nil
+            return
+        end
+        local now = os.clock()
+        local delta = now - last
+        last = now
+        local ping = LocalPlayer.GetNetworkPing and LocalPlayer:GetNetworkPing() or 0.08
+        if is_replicate(hrp) then
+            if is_owner(hrp) then lin_vel = hrp.AssemblyLinearVelocity
+            else lin_vel = -hrp.AssemblyLinearVelocity end
+            if acc >= ping then server_cf = hrp.CFrame acc = 0
+            else acc = acc + delta end
+        end
+        local hrp_cf = server_cf
+        local rel = {}
+        for n, g in pairs(ServerPosition.Internal.Ghosts) do
+            if g.real and g.real.Parent then rel[n] = hrp_cf:ToObjectSpace(g.real.CFrame) end
+        end
+        table.insert(frames, {t = now, cf = hrp_cf, pos = hrp_cf.Position, vel = lin_vel, rel = rel})
+        if #frames > 240 then for i = 1, 60 do table.remove(frames, 1) end end
+        local target_t = now - ping
+        local f
+        for i = #frames, 1, -1 do if frames[i].t <= target_t then f = frames[i] break end end
+        if not f then f = frames[1] end
+        if not f then return end
+        local td = math.min(target_t - f.t, 0.06)
+        local pred_pos = f.pos + f.vel * td * ServerPosition.Settings.Strength
+        local pred_cf = CFrame.new(pred_pos) * (f.cf - f.cf.Position)
+        for n, g in pairs(ServerPosition.Internal.Ghosts) do
+            local ghost = g.ghost
+            local box = g.box
+            local r = f.rel[n]
+            local tgt = r and pred_cf * r or (g.real and g.real.CFrame or ghost.CFrame)
+            local d = (tgt.Position - pred_cf.Position).Magnitude
+            if d > ServerPosition.Settings.MaxLimb then
+                local dir = (tgt.Position - pred_cf.Position).Unit
+                local p = pred_cf.Position + dir * ServerPosition.Settings.MaxLimb
+                local rx, ry, rz = tgt:ToEulerAnglesXYZ()
+                tgt = CFrame.new(p) * CFrame.Angles(rx, ry, rz)
+            end
+            ghost.CFrame = ghost.CFrame:Lerp(tgt, math.min(delta * 18, 1))
+            if ServerPosition.Settings.RGB then box.Color3 = rgb(now) else box.Color3 = Color3.new(1,1,1) end
+        end
+    end)
+end
+
+local function StopServerPosition()
+    if ServerPosition.Internal.Connection then
+        ServerPosition.Internal.Connection:Disconnect()
+        ServerPosition.Internal.Connection = nil
+    end
+    for _, g in pairs(ServerPosition.Internal.Ghosts) do if g.ghost then g.ghost:Destroy() end end
+    ServerPosition.Internal.Ghosts = {}
+end
+
+LocalPlayer.CharacterAdded:Connect(function()
+    if ServerPosition.Settings.Enabled then
+        task.wait(0.2)
+        StopServerPosition()
+        StartServerPosition()
+    end
+end)
+
+--====================================================================================
+--  Fly
+--====================================================================================
+getgenv().AirHub.Fly = {
+    Settings = {
+        Enabled    = false, ToggleKey = "F", Toggle = false,
+        Method     = "BodyVelocity", Speed = 30, UpSpeed = 20,
+        Smoothness = 0.5, UseKeys = true
+    },
+    Internal = {
+        BodyVelocity = nil, LinearVelocity = nil, Attachment = nil,
+        Active = false, LastUpdate = 0
+    }
+}
+local Fly = getgenv().AirHub.Fly
+
+local function Fly_ClearInstances()
+    if Fly.Internal.BodyVelocity then Fly.Internal.BodyVelocity:Destroy() Fly.Internal.BodyVelocity = nil end
+    if Fly.Internal.LinearVelocity then Fly.Internal.LinearVelocity:Destroy() Fly.Internal.LinearVelocity = nil end
+    if Fly.Internal.Attachment then Fly.Internal.Attachment:Destroy() Fly.Internal.Attachment = nil end
+end
+
+local function Fly_GetHRP()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart")
+end
+
+local function Fly_EnsureInstance(hrp)
+    local method = Fly.Settings.Method
+    if method == "BodyVelocity" then
+        if Fly.Internal.LinearVelocity or Fly.Internal.Attachment then Fly_ClearInstances() end
+        if not Fly.Internal.BodyVelocity then
+            local bv = Instance.new("BodyVelocity")
+            bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+            bv.Velocity = Vector3.new(0, 0, 0)
+            bv.Parent = hrp
+            Fly.Internal.BodyVelocity = bv
+        end
+    elseif method == "LinearVelocity" then
+        if Fly.Internal.BodyVelocity then Fly_ClearInstances() end
+        if not Fly.Internal.Attachment then
+            local att = Instance.new("Attachment")
+            att.Parent = hrp
+            Fly.Internal.Attachment = att
+        end
+        if not Fly.Internal.LinearVelocity then
+            local lv = Instance.new("LinearVelocity")
+            lv.MaxForce = math.huge
+            lv.VectorVelocity = Vector3.new(0, 0, 0)
+            lv.Attachment0 = Fly.Internal.Attachment
+            lv.Parent = hrp
+            Fly.Internal.LinearVelocity = lv
+        end
+    else
+        Fly_ClearInstances()
+    end
+end
+
+local function Fly_GetMoveDir()
+    local moveDir = Vector3.new(0, 0, 0)
+    if not Fly.Settings.UseKeys then return moveDir end
+    local forward = Camera.CFrame.LookVector
+    local right   = Camera.CFrame.RightVector
+    local up      = Vector3.new(0, 1, 0)
+    local forwardFlat = Vector3.new(forward.X, 0, forward.Z)
+    local rightFlat   = Vector3.new(right.X, 0, right.Z)
+    if forwardFlat.Magnitude > 0.001 then forwardFlat = forwardFlat.Unit end
+    if rightFlat.Magnitude > 0.001 then rightFlat = rightFlat.Unit end
+    local w = UserInputService:IsKeyDown(Enum.KeyCode.W)
+    local s = UserInputService:IsKeyDown(Enum.KeyCode.S)
+    local a = UserInputService:IsKeyDown(Enum.KeyCode.A)
+    local d = UserInputService:IsKeyDown(Enum.KeyCode.D)
+    local sp = UserInputService:IsKeyDown(Enum.KeyCode.Space)
+    local ct = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
+             or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
+    if w then moveDir = moveDir + forwardFlat end
+    if s then moveDir = moveDir - forwardFlat end
+    if a then moveDir = moveDir - rightFlat end
+    if d then moveDir = moveDir + rightFlat end
+    if sp then moveDir = moveDir + up end
+    if ct then moveDir = moveDir - up end
+    if moveDir.Magnitude > 0 then moveDir = moveDir.Unit end
+    return moveDir
+end
+
+local function Fly_Update()
+    local S = Fly.Settings
+    local I = Fly.Internal
+    if not S.Enabled or not I.Active then
+        if I.BodyVelocity or I.LinearVelocity or I.Attachment then Fly_ClearInstances() end
+        if I.Active and not S.Enabled then I.Active = false end
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.PlatformStand then hum.PlatformStand = false end
+        end
+        return
+    end
+    local hrp = Fly_GetHRP()
+    if not hrp then Fly_ClearInstances() return end
+    Fly_EnsureInstance(hrp)
+    local moveDir = Fly_GetMoveDir()
+    local targetVel
+    if moveDir.Y ~= 0 then
+        targetVel = Vector3.new(moveDir.X * S.Speed, moveDir.Y * S.UpSpeed, moveDir.Z * S.Speed)
+    else
+        targetVel = Vector3.new(moveDir.X * S.Speed, 0, moveDir.Z * S.Speed)
+    end
+    local now = tick()
+    local dt = now - I.LastUpdate
+    if dt <= 0 or dt > 0.5 then dt = 1/60 end
+    I.LastUpdate = now
+    if S.Method == "BodyVelocity" then
+        if I.BodyVelocity then I.BodyVelocity.Velocity = I.BodyVelocity.Velocity:Lerp(targetVel, math.clamp(S.Smoothness, 0.01, 1)) end
+    elseif S.Method == "LinearVelocity" then
+        if I.LinearVelocity then I.LinearVelocity.VectorVelocity = I.LinearVelocity.VectorVelocity:Lerp(targetVel, math.clamp(S.Smoothness, 0.01, 1)) end
+    elseif S.Method == "Velocity" then
+        hrp.Velocity = targetVel
+    elseif S.Method == "CFrame" then
+        hrp.CFrame = hrp.CFrame + (moveDir * S.Speed * dt)
+    end
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then hum.PlatformStand = true end
+end
+
+RunService.RenderStepped:Connect(function() xpcall(Fly_Update, HandleError) end)
+
+UserInputService.InputBegan:Connect(function(inp, gpe)
+    if gpe then return end
+    if Typing or UserInputService:GetFocusedTextBox() then return end
+    if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    if not Fly.Settings.Enabled then return end
+    local kc = SafeKeyCode(Fly.Settings.ToggleKey)
+    if not kc or inp.KeyCode ~= kc then return end
+    if Fly.Settings.Toggle then
+        Fly.Internal.Active = not Fly.Internal.Active
+        if not Fly.Internal.Active then
+            Fly_ClearInstances()
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hum.PlatformStand = false end
+            end
+        end
+    else Fly.Internal.Active = true end
+end)
+
+UserInputService.InputEnded:Connect(function(inp)
+    if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local kc = SafeKeyCode(Fly.Settings.ToggleKey)
+    if not kc or inp.KeyCode ~= kc then return end
+    if not Fly.Settings.Toggle then
+        Fly.Internal.Active = false
+        Fly_ClearInstances()
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then hum.PlatformStand = false end
+        end
+    end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.3)
+    Fly_ClearInstances()
+    Fly.Internal.Active = false
+    Fly.Internal.LastUpdate = 0
+end)
+
+Fly.Functions = {
+    ResetSettings = function()
+        Fly.Settings = { Enabled = false, ToggleKey = "F", Toggle = false, Method = "BodyVelocity",
+            Speed = 30, UpSpeed = 20, Smoothness = 0.5, UseKeys = true }
+        Fly_ClearInstances()
+        Fly.Internal.Active = false
+        Fly.Internal.LastUpdate = 0
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then hum.PlatformStand = false end
+        end
+    end
+}
+
+--====================================================================================
+--  Bhop + Spider
+--====================================================================================
+getgenv().AirHub.Bhop = {
+    Settings = { 
+        Enabled = false, 
+        AutoJumpKey = "Space", 
+        BypassJump = true, 
+        JumpCooldown = 0.1,
+        Spider = { 
+            Enabled = false, 
+            Range = 2.5, 
+            RayCount = 8
+        } 
+    },
+    Internal = { 
+        KeyHeld = false, 
+        LastJumpTime = 0, 
+        Active = false, 
+        SpiderTouching = false,
+        WallNormal = nil
+    }
+}
+local Bhop = getgenv().AirHub.Bhop
+
+UserInputService.InputBegan:Connect(function(inp)
+    if Typing then return end
+    if not Bhop.Settings.Enabled then return end
+    if inp.UserInputType == Enum.UserInputType.Keyboard and inp.KeyCode == Enum.KeyCode[Bhop.Settings.AutoJumpKey] then
+        Bhop.Internal.KeyHeld = true
+    end
+end)
+UserInputService.InputEnded:Connect(function(inp)
+    if inp.UserInputType == Enum.UserInputType.Keyboard and inp.KeyCode == Enum.KeyCode[Bhop.Settings.AutoJumpKey] then
+        Bhop.Internal.KeyHeld = false
+    end
+end)
+
+local function Spider_DetectWall(char, hrp)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = {char}
+    rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+    rayParams.IgnoreWater = true
+    local range = Bhop.Settings.Spider.Range
+    local rayCount = math.max(4, Bhop.Settings.Spider.RayCount or 8)
+    local step = (math.pi * 2) / rayCount
+    local heights = { -1.2, 0, 1.2 }
+    for _, hOffset in ipairs(heights) do
+        local origin = hrp.Position + Vector3.new(0, hOffset, 0)
+        for i = 0, rayCount - 1 do
+            local angle = i * step
+            local dir = Vector3.new(math.cos(angle), 0, math.sin(angle))
+            local result = workspace:Raycast(origin, dir * range, rayParams)
+            if result and result.Instance and result.Instance.CanCollide then
+                Bhop.Internal.WallNormal = result.Normal
+                return true
+            end
+        end
+    end
+    Bhop.Internal.WallNormal = nil
+    return false
+end
+
+local function BhopLoop()
+    while task.wait(0.01) do
+        if not Bhop.Settings.Enabled then
+            Bhop.Internal.Active = false
+            Bhop.Internal.SpiderTouching = false
+            continue
+        end
+        local char = LocalPlayer.Character
+        if not char then continue end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hum or not hrp then continue end
+        Bhop.Internal.Active = true
+        Bhop.Internal.SpiderTouching = false
+        if Bhop.Settings.Spider.Enabled then
+            Bhop.Internal.SpiderTouching = Spider_DetectWall(char, hrp)
+        end
+        if Bhop.Internal.KeyHeld then
+            local now = tick()
+            if now - Bhop.Internal.LastJumpTime >= Bhop.Settings.JumpCooldown then
+                local bypass = Bhop.Settings.BypassJump
+                if Bhop.Internal.SpiderTouching then bypass = true end
+                if bypass then
+                    hum:ChangeState(Enum.HumanoidStateType.Jumping)
+                    Bhop.Internal.LastJumpTime = now
+                else
+                    if hum.FloorMaterial ~= Enum.Material.Air then
+                        hum:ChangeState(Enum.HumanoidStateType.Jumping)
+                        Bhop.Internal.LastJumpTime = now
+                    end
+                end
+            end
+        end
+    end
+end
+coroutine.wrap(BhopLoop)()
+
+Bhop.Functions = {
+    ResetSettings = function()
+        Bhop.Settings = { Enabled = false, AutoJumpKey = "Space", BypassJump = true, JumpCooldown = 0.1,
+            Spider = { Enabled = false, Range = 2.5, RayCount = 8 } }
+        Bhop.Internal = {KeyHeld = false, LastJumpTime = 0, Active = false, SpiderTouching = false, WallNormal = nil}
+    end
+}
+
+--====================================================================================
+--  Speed
+--====================================================================================
+getgenv().AirHub.Speed = {
+    Settings = { 
+        Enabled = false, 
+        Method = "WalkSpeed", 
+        GroundSpeed = 30, 
+        AirSpeed = 30, 
+        UseAirSpeed = false,
+        InAirOnly = false 
+    },
+    Internal = {Active = false, OriginalWalkSpeed = 16}
+}
+local Speed = getgenv().AirHub.Speed
+
+local function IsGrounded(character)
+    if not character then return false end
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    if hum and hum.FloorMaterial ~= Enum.Material.Air then return true end
+    local params = RaycastParams.new()
+    params.FilterDescendantsInstances = {character}
+    params.FilterType = Enum.RaycastFilterType.Blacklist
+    return workspace:Raycast(hrp.Position, Vector3.new(0, -2.2, 0), params) ~= nil
+end
+
+local function GetMoveDirection()
+    local char = LocalPlayer.Character
+    if not char then return Vector3.new(0,0,0) end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return Vector3.new(0,0,0) end
+    local w = UserInputService:IsKeyDown(Enum.KeyCode.W)
+    local s = UserInputService:IsKeyDown(Enum.KeyCode.S)
+    local a = UserInputService:IsKeyDown(Enum.KeyCode.A)
+    local d = UserInputService:IsKeyDown(Enum.KeyCode.D)
+    if not (w or s or a or d) then return Vector3.new(0,0,0) end
+    local camForward = Camera.CFrame.LookVector
+    local camRight = Camera.CFrame.RightVector
+    local forward = Vector3.new(camForward.X, 0, camForward.Z).Unit
+    local right = Vector3.new(camRight.X, 0, camRight.Z).Unit
+    local dir = Vector3.new(0,0,0)
+    if w then dir = dir + forward end
+    if s then dir = dir - forward end
+    if a then dir = dir - right end
+    if d then dir = dir + right end
+    if dir.Magnitude > 0 then dir = dir.Unit end
+    return dir
+end
+
+local function SpeedLoop()
+    while task.wait(0.016) do
+        if not Speed.Settings.Enabled then
+            if Speed.Internal.Active then
+                Speed.Internal.Active = false
+                local char = LocalPlayer.Character
+                if char then
+                    local hum = char:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.WalkSpeed ~= Speed.Internal.OriginalWalkSpeed then
+                        hum.WalkSpeed = Speed.Internal.OriginalWalkSpeed
+                    end
+                end
+            end
+            continue
+        end
+        local char = LocalPlayer.Character
+        if not char then continue end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hum or not hrp then continue end
+        if not Speed.Internal.Active then
+            Speed.Internal.OriginalWalkSpeed = hum.WalkSpeed
+            Speed.Internal.Active = true
+        end
+        local method = Speed.Settings.Method
+        local grounded = IsGrounded(char)
+        local spd
+        if Speed.Settings.UseAirSpeed and not grounded then spd = Speed.Settings.AirSpeed
+        else spd = Speed.Settings.GroundSpeed end
+        if Speed.Settings.InAirOnly then
+            if grounded then
+                if method == "WalkSpeed" and hum.WalkSpeed ~= Speed.Internal.OriginalWalkSpeed then
+                    hum.WalkSpeed = Speed.Internal.OriginalWalkSpeed
+                end
+                continue
+            end
+        end
+        if method == "WalkSpeed" then
+            if hum.WalkSpeed ~= spd then hum.WalkSpeed = spd end
+        elseif method == "CFrame" then
+            local dir = GetMoveDirection()
+            if dir.Magnitude > 0 then hrp.CFrame = hrp.CFrame + dir * spd * 0.016 end
+        elseif method == "Velocity" then
+            local dir = GetMoveDirection()
+            if dir.Magnitude > 0 then hrp.Velocity = Vector3.new(dir.X * spd, hrp.Velocity.Y, dir.Z * spd) end
+        end
+    end
+end
+coroutine.wrap(SpeedLoop)()
+Speed.Functions = {
+    ResetSettings = function()
+        Speed.Settings = { Enabled = false, Method = "WalkSpeed", GroundSpeed = 30, AirSpeed = 30, UseAirSpeed = false, InAirOnly = false }
+        Speed.Internal = {Active = false, OriginalWalkSpeed = 16}
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.WalkSpeed ~= 16 then hum.WalkSpeed = 16 end
+        end
+    end
+}
+
+--====================================================================================
+--  FastStop
+--====================================================================================
+getgenv().AirHub.FastStop = {
+    Settings = { Enabled = false, StopY = false },
+    Internal = { LastActive = false }
+}
+local FastStop = getgenv().AirHub.FastStop
+
+local function FS_AnyMoveHeld()
+    return UserInputService:IsKeyDown(Enum.KeyCode.W)
+        or UserInputService:IsKeyDown(Enum.KeyCode.A)
+        or UserInputService:IsKeyDown(Enum.KeyCode.S)
+        or UserInputService:IsKeyDown(Enum.KeyCode.D)
+end
+
+local function FastStopLoop()
+    while task.wait(0.01) do
+        if not FastStop.Settings.Enabled then
+            FastStop.Internal.LastActive = false
+            continue
+        end
+        if FS_AnyMoveHeld() then
+            FastStop.Internal.LastActive = false
+            continue
+        end
+        local char = LocalPlayer.Character
+        if not char then continue end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hrp or not hum then continue end
+        if hum.Health <= 0 then continue end
+        if FastStop.Settings.StopY then
+            hrp.Velocity = Vector3.new(0, 0, 0)
+        else
+            hrp.Velocity = Vector3.new(0, hrp.Velocity.Y, 0)
+        end
+        FastStop.Internal.LastActive = true
+    end
+end
+coroutine.wrap(FastStopLoop)()
+
+FastStop.Functions = {
+    ResetSettings = function()
+        FastStop.Settings = { Enabled = false, StopY = false }
+        FastStop.Internal = { LastActive = false }
+    end
+}
+
+--====================================================================================
+--  AutoStrafer
+--====================================================================================
+getgenv().AirHub.AutoStrafer = {
+    Settings = { Enabled = false, Mode = "Legit", Key = "Space", Toggle = false, Invert = false, SpamDelay = 0.05 },
+    Internal = { Active = false, LastYaw = nil, KeyA = false, KeyD = false, SpamDir = -1, LastSpam = 0 }
+}
+local AutoStrafer = getgenv().AirHub.AutoStrafer
+
+local function AS_IsTyping() return UserInputService:GetFocusedTextBox() ~= nil end
+local function AS_GetCameraYaw() local look = Camera.CFrame.LookVector return math.atan2(look.X, look.Z) end
+local function AS_WrapAngle(d)
+    while d >  math.pi do d = d - math.pi * 2 end
+    while d < -math.pi do d = d + math.pi * 2 end
+    return d
+end
+
+local function AS_PressA()
+    if AutoStrafer.Internal.KeyA then return end
+    if UserInputService:IsKeyDown(Enum.KeyCode.A) then return end
+    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.A, false, game)
+    AutoStrafer.Internal.KeyA = true
+end
+local function AS_ReleaseA()
+    if not AutoStrafer.Internal.KeyA then return end
+    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.A, false, game)
+    AutoStrafer.Internal.KeyA = false
+end
+local function AS_PressD()
+    if AutoStrafer.Internal.KeyD then return end
+    if UserInputService:IsKeyDown(Enum.KeyCode.D) then return end
+    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.D, false, game)
+    AutoStrafer.Internal.KeyD = true
+end
+local function AS_ReleaseD()
+    if not AutoStrafer.Internal.KeyD then return end
+    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.D, false, game)
+    AutoStrafer.Internal.KeyD = false
+end
+local function AS_ReleaseAll() AS_ReleaseA() AS_ReleaseD() end
+
+local function AS_Update()
+    local S = AutoStrafer.Settings
+    local I = AutoStrafer.Internal
+    if not S.Enabled or not I.Active then AS_ReleaseAll() return end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then AS_ReleaseAll() return end
+    if S.Mode == "Spam" then
+        local now = tick()
+        if now - I.LastSpam >= S.SpamDelay then
+            I.LastSpam = now
+            I.SpamDir = -I.SpamDir
+            if I.SpamDir == -1 then AS_PressA() AS_ReleaseD()
+            else AS_PressD() AS_ReleaseA() end
+        end
+        return
+    end
+    local yaw = AS_GetCameraYaw()
+    if I.LastYaw == nil then I.LastYaw = yaw return end
+    local delta = AS_WrapAngle(yaw - I.LastYaw)
+    I.LastYaw = yaw
+    if delta == 0 then AS_ReleaseAll() return end
+    local turningRight = delta > 0
+    if S.Invert then turningRight = not turningRight end
+    if turningRight then AS_PressA() AS_ReleaseD()
+    else AS_PressD() AS_ReleaseA() end
+end
+
+RunService.RenderStepped:Connect(function() xpcall(AS_Update, HandleError) end)
+
+UserInputService.InputBegan:Connect(function(inp)
+    if AS_IsTyping() then return end
+    if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    if not AutoStrafer.Settings.Enabled then return end
+    local kc = SafeKeyCode(AutoStrafer.Settings.Key)
+    if not kc or inp.KeyCode ~= kc then return end
+    if AutoStrafer.Settings.Toggle then
+        AutoStrafer.Internal.Active = not AutoStrafer.Internal.Active
+        if not AutoStrafer.Internal.Active then AS_ReleaseAll() end
+    else AutoStrafer.Internal.Active = true end
+end)
+
+UserInputService.InputEnded:Connect(function(inp)
+    if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local kc = SafeKeyCode(AutoStrafer.Settings.Key)
+    if not kc or inp.KeyCode ~= kc then return end
+    if not AutoStrafer.Settings.Toggle then
+        AutoStrafer.Internal.Active = false
+        AS_ReleaseAll()
+    end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    AS_ReleaseAll()
+    AutoStrafer.Internal.Active = false
+    AutoStrafer.Internal.LastYaw = nil
+end)
+
+AutoStrafer.Functions = {
+    ResetSettings = function()
+        AS_ReleaseAll()
+        AutoStrafer.Settings = { Enabled = false, Mode = "Legit", Key = "Space", Toggle = false, Invert = false, SpamDelay = 0.05 }
+        AutoStrafer.Internal = { Active = false, LastYaw = nil, KeyA = false, KeyD = false, SpamDir = -1, LastSpam = 0 }
+    end,
+    Stop = function()
+        AutoStrafer.Settings.Enabled = false
+        AutoStrafer.Internal.Active = false
+        AS_ReleaseAll()
+    end,
+}
+
+--====================================================================================
+--  Noclip
+--====================================================================================
+getgenv().AirHub.Noclip = { Settings = { Enabled = false }, Internal = { Active = false } }
+local Noclip = getgenv().AirHub.Noclip
+local function NoclipLoop()
+    while task.wait(0.1) do
+        if not Noclip.Settings.Enabled then
+            if Noclip.Internal.Active then
+                Noclip.Internal.Active = false
+                local char = LocalPlayer.Character
+                if char then
+                    for _, part in ipairs(char:GetDescendants()) do
+                        if part:IsA("BasePart") then part.CanCollide = true end
+                    end
+                end
+            end
+            continue
+        end
+        Noclip.Internal.Active = true
+        local char = LocalPlayer.Character
+        if char then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then part.CanCollide = false end
+            end
+        end
+    end
+end
+coroutine.wrap(NoclipLoop)()
+Noclip.Functions = {
+    ResetSettings = function()
+        Noclip.Settings = { Enabled = false }
+        Noclip.Internal = { Active = false }
+        local char = LocalPlayer.Character
+        if char then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then part.CanCollide = true end
+            end
+        end
+    end
+}
+
+--====================================================================================
+--  Post-Config Hook
+--====================================================================================
+local function ApplyAllEnabledStates()
+    local H = getgenv().AirHub
+    if not H then return end
+    if WallHack.Settings.Enabled then ApplyGlowToAll() end
+    if H.AntiAim and H.AntiAim.Desync.Settings.Enabled then
+        StopDesync()
+        task.defer(function()
+            if getgenv().AirHub and getgenv().AirHub.AntiAim.Desync.Settings.Enabled then
+                StartDesync()
+            end
+        end)
+    else StopDesync() end
+    if H.ServerPosition and H.ServerPosition.Settings.Enabled then
+        StopServerPosition()
+        task.defer(function()
+            if getgenv().AirHub and getgenv().AirHub.ServerPosition.Settings.Enabled then
+                StartServerPosition()
+            end
+        end)
+    else StopServerPosition() end
+    if H.Fly then
+        Fly_ClearInstances()
+        if H.Fly.Settings.Enabled and H.Fly.Settings.Toggle then
+            H.Fly.Internal.Active = true
+        else H.Fly.Internal.Active = false end
+    end
+    if H.Bhop then
+        H.Bhop.Internal.KeyHeld = false
+        H.Bhop.Internal.Active = false
+        H.Bhop.Internal.SpiderTouching = false
+    end
+    if H.Speed then H.Speed.Internal.Active = false end
+    if H.Noclip then H.Noclip.Internal.Active = false end
+    if H.AutoStrafer then
+        AutoStrafer.Internal.Active = false
+        AS_ReleaseAll()
+    end
+    if H.FastStop then FastStop.Internal.LastActive = false end
+end--====================================================================================
+--  Custom GUI Library (inline, no dependencies)
+--====================================================================================
+local function CreateCustomGUI()
+    local LIB = {}
+    LIB.__index = LIB
+    LIB._windows = {}
+
+    local Theme = {
+        Window       = Color3.fromRGB(15, 16, 22),
+        Header       = Color3.fromRGB(22, 23, 32),
+        Sidebar      = Color3.fromRGB(18, 19, 26),
+        Content      = Color3.fromRGB(24, 25, 35),
+        Panel        = Color3.fromRGB(30, 31, 43),
+        Control      = Color3.fromRGB(38, 39, 54),
+        ControlHover = Color3.fromRGB(48, 49, 66),
+        Accent       = Color3.fromRGB(90, 132, 255),
+        Text         = Color3.fromRGB(236, 238, 248),
+        SubText      = Color3.fromRGB(150, 152, 172),
+        Border       = Color3.fromRGB(44, 45, 60),
+        ToggleOff    = Color3.fromRGB(62, 63, 82),
+        Danger       = Color3.fromRGB(232, 72, 72),
+        White        = Color3.fromRGB(255, 255, 255),
+    }
+
+    local function new(cls, props)
+        local i = Instance.new(cls)
+        for k, v in pairs(props or {}) do i[k] = v end
+        return i
+    end
+    local function corner(p, r) return new("UICorner", { CornerRadius = UDim.new(0, r), Parent = p }) end
+    local function stroke(p, c, t, tr)
+        return new("UIStroke", {
+            Color = c or Theme.Border, Thickness = t or 1, Transparency = tr or 0,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = p,
+        })
+    end
+    local function pad(p, a, b, c, d)
+        return new("UIPadding", {
+            PaddingTop = UDim.new(0, a or 0), PaddingBottom = UDim.new(0, b or a or 0),
+            PaddingLeft = UDim.new(0, c or a or 0), PaddingRight = UDim.new(0, d or c or a or 0),
+            Parent = p,
+        })
+    end
+    local function list(p, dir, gap, align)
+        return new("UIListLayout", {
+            FillDirection = dir or Enum.FillDirection.Vertical,
+            HorizontalAlignment = align or Enum.HorizontalAlignment.Left,
+            SortOrder = Enum.SortOrder.LayoutOrder,
+            Padding = UDim.new(0, gap or 6),
+            Parent = p,
+        })
+    end
+    local function tw(inst, time, props)
+        local t = TweenService:Create(inst, TweenInfo.new(time or 0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props)
+        t:Play()
+        return t
+    end
+    local function mkdrag(frame, handle)
+        handle = handle or frame
+        local dragging, dragStart, startPos
+        handle.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true
+                dragStart = input.Position
+                startPos = frame.Position
+            end
+        end)
+        handle.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = false
+            end
+        end)
+        handle.InputChanged:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                local d = input.Position - dragStart
+                frame.Position = UDim2.new(
+                    startPos.X.Scale, startPos.X.Offset + d.X,
+                    startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            end
+        end)
+    end
+    local function colorToHex(c)
+        return string.format("#%02X%02X%02X",
+            math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+    end
+    local function hexToColor(s)
+        s = tostring(s):gsub("#", "")
+        if #s ~= 6 then return nil end
+        local r = tonumber(s:sub(1,2), 16)
+        local g = tonumber(s:sub(3,4), 16)
+        local b = tonumber(s:sub(5,6), 16)
+        if not (r and g and b) then return nil end
+        return Color3.fromRGB(r, g, b)
+    end
+
+    local ScreenGui = new("ScreenGui", {
+        Name = "AirHub_Custom_GUI",
+        ResetOnSpawn = false,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+        IgnoreGuiInset = true,
+    })
+    pcall(function() ScreenGui.Parent = game:GetService("CoreGui") end)
+    if not ScreenGui.Parent then
+        ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    end
+    LIB._screen = ScreenGui
+
+    -- Notifications
+    local NotifyFolder = new("Frame", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(0, 320, 1, -40),
+        Position = UDim2.new(1, -20, 0, 20),
+        Parent = ScreenGui,
+    })
+    list(NotifyFolder, Enum.FillDirection.Vertical, 8)
+
+    local function Notify(text, color)
+        color = color or Theme.Accent
+        local card = new("Frame", {
+            BackgroundColor3 = Theme.Panel, BorderSizePixel = 0,
+            Size = UDim2.new(1, 0, 0, 40), Parent = NotifyFolder,
+        })
+        corner(card, 8)
+        stroke(card, color, 1, 0.4)
+        local bar = new("Frame", {
+            BackgroundColor3 = color, BorderSizePixel = 0,
+            Size = UDim2.new(0, 3, 1, -12),
+            Position = UDim2.new(0, 6, 0, 6), Parent = card,
+        })
+        corner(bar, 2)
+        new("TextLabel", {
+            BackgroundTransparency = 1, Text = tostring(text),
+            Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = Theme.Text,
+            TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true,
+            Size = UDim2.new(1, -24, 1, 0), Position = UDim2.new(0, 16, 0, 0), Parent = card,
+        })
+        card.BackgroundTransparency = 1
+        card.Position = UDim2.new(1, 30, 0, 0)
+        tw(card, 0.25, { BackgroundTransparency = 0, Position = UDim2.new(0, 0, 0, 0) })
+        task.delay(3, function()
+            tw(card, 0.25, { BackgroundTransparency = 1, Position = UDim2.new(1, 30, 0, 0) })
+            task.wait(0.3)
+            if card and card.Parent then card:Destroy() end
+        end)
+    end
+
+    -- Window
+    local Window = {}
+    Window.__index = Window
+
+    function LIB:CreateWindow(cfg)
+        cfg = cfg or {}
+        local name = cfg.Name or "AirHub"
+        local info = (cfg.Themeable and cfg.Themeable.Info) or ""
+
+        local w = setmetatable({}, Window)
+        w.Tabs = {}
+        w.ActiveTab = nil
+        w.Visible = true
+
+        local frame = new("Frame", {
+            Name = "Window",
+            Size = UDim2.new(0, 640, 0, 420),
+            Position = UDim2.new(0.5, -320, 0.5, -210),
+            BackgroundColor3 = Theme.Window, BorderSizePixel = 0, Parent = ScreenGui,
+        })
+        corner(frame, 12)
+        stroke(frame, Theme.Border, 1)
+        w.Frame = frame
+
+        local header = new("Frame", {
+            Name = "Header", Size = UDim2.new(1, 0, 0, 40),
+            BackgroundColor3 = Theme.Header, BorderSizePixel = 0, Parent = frame,
+        })
+        corner(header, 12)
+        new("Frame", {
+            Size = UDim2.new(1, 0, 0, 12), Position = UDim2.new(0, 0, 1, -12),
+            BackgroundColor3 = Theme.Header, BorderSizePixel = 0, Parent = header,
+        })
+        new("TextLabel", {
+            Text = name, Font = Enum.Font.GothamBold, TextSize = 16, TextColor3 = Theme.Text,
+            BackgroundTransparency = 1, Size = UDim2.new(0.6, 0, 1, 0),
+            Position = UDim2.new(0, 16, 0, 0), TextXAlignment = Enum.TextXAlignment.Left, Parent = header,
+        })
+        new("TextLabel", {
+            Text = info, Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = Theme.SubText,
+            BackgroundTransparency = 1, Size = UDim2.new(0.6, 0, 1, 0),
+            Position = UDim2.new(0.35, 0, 0, 0), TextXAlignment = Enum.TextXAlignment.Right, Parent = header,
+        })
+
+        local closeBtn = new("TextButton", {
+            Text = "✕", Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = Theme.SubText,
+            BackgroundColor3 = Theme.Control, BackgroundTransparency = 1,
+            Size = UDim2.new(0, 26, 0, 26), Position = UDim2.new(1, -34, 0.5, -13),
+            AutoButtonColor = false, Parent = header,
+        })
+        corner(closeBtn, 6)
+        closeBtn.MouseEnter:Connect(function() tw(closeBtn, 0.12, { BackgroundTransparency = 0, TextColor3 = Theme.Danger }) end)
+        closeBtn.MouseLeave:Connect(function() tw(closeBtn, 0.12, { BackgroundTransparency = 1, TextColor3 = Theme.SubText }) end)
+        closeBtn.MouseButton1Click:Connect(function() w:Hide() end)
+
+        local body = new("Frame", {
+            Name = "Body", Position = UDim2.new(0, 0, 0, 40),
+            Size = UDim2.new(1, 0, 1, -40), BackgroundColor3 = Theme.Content,
+            BorderSizePixel = 0, Parent = frame,
+        })
+        corner(body, 12)
+
+        local sidebar = new("Frame", {
+            Name = "Sidebar", Size = UDim2.new(0, 150, 1, 0),
+            BackgroundColor3 = Theme.Sidebar, BorderSizePixel = 0, Parent = body,
+        })
+        corner(sidebar, 12)
+        new("Frame", {
+            Size = UDim2.new(0, 12, 1, 0), Position = UDim2.new(1, -12, 0, 0),
+            BackgroundColor3 = Theme.Sidebar, BorderSizePixel = 0, Parent = sidebar,
+        })
+        local sidebarPad = new("Frame", {
+            Size = UDim2.new(1, -16, 1, -16), Position = UDim2.new(0, 8, 0, 8),
+            BackgroundTransparency = 1, Parent = sidebar,
+        })
+        list(sidebarPad, Enum.FillDirection.Vertical, 4)
+
+        local content = new("Frame", {
+            Name = "Content", Position = UDim2.new(0, 158, 0, 8),
+            Size = UDim2.new(1, -166, 1, -16), BackgroundTransparency = 1, Parent = body,
+        })
+        w.Sidebar = sidebarPad
+        w.Content = content
+        mkdrag(frame, header)
+
+        UserInputService.InputBegan:Connect(function(inp, gp)
+            if gp then return end
+            if inp.KeyCode == Enum.KeyCode.RightShift then
+                if w.Visible then w:Hide() else w:Show() end
+            end
+        end)
+
+        table.insert(LIB._windows, w)
+        return w
+    end
+
+    function LIB:Show() for _, w in ipairs(self._windows) do w:Show() end end
+    function LIB:Hide() for _, w in ipairs(self._windows) do w:Hide() end end
+    function LIB:Toggle() for _, w in ipairs(self._windows) do w:Toggle() end end
+    function LIB:Unload()
+        if type(LIB.UnloadCallback) == "function" then pcall(LIB.UnloadCallback) end
+        if ScreenGui and ScreenGui.Parent then pcall(function() ScreenGui:Destroy() end) end
+    end
+    LIB.Open = LIB.Show
+    LIB.Close = LIB.Hide
+    LIB.Destroy = LIB.Unload
+
+    function Window:Show() self.Visible = true self.Frame.Visible = true end
+    function Window:Hide() self.Visible = false self.Frame.Visible = false end
+    function Window:Toggle() if self.Visible then self:Hide() else self:Show() end end
+
+    -- Tab
+    local Tab = {}
+    Tab.__index = Tab
+
+    function Window:CreateTab(cfg)
+        cfg = cfg or {}
+        local tabName = cfg.Name or "Tab"
+        local tab = setmetatable({ Name = tabName, Sections = {}, Window = self }, Tab)
+
+        local btn = new("TextButton", {
+            Name = tabName, Text = "  " .. tabName, Font = Enum.Font.GothamMedium,
+            TextSize = 13, TextColor3 = Theme.SubText, TextXAlignment = Enum.TextXAlignment.Left,
+            BackgroundColor3 = Theme.Panel, BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 30), AutoButtonColor = false, Parent = self.Sidebar,
+        })
+        corner(btn, 6)
+        tab.Button = btn
+
+        local page = new("Frame", {
+            Name = "Page_" .. tabName, Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1, Visible = false, Parent = self.Content,
+        })
+
+        local colL = new("ScrollingFrame", {
+            Size = UDim2.new(0.5, -6, 1, 0), Position = UDim2.new(0, 0, 0, 0),
+            BackgroundTransparency = 1, BorderSizePixel = 0,
+            CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            ScrollBarThickness = 4, ScrollBarImageColor3 = Theme.Border, Parent = page,
+        })
+        list(colL, Enum.FillDirection.Vertical, 10)
+
+        local colR = new("ScrollingFrame", {
+            Size = UDim2.new(0.5, -6, 1, 0), Position = UDim2.new(0.5, 6, 0, 0),
+            BackgroundTransparency = 1, BorderSizePixel = 0,
+            CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            ScrollBarThickness = 4, ScrollBarImageColor3 = Theme.Border, Parent = page,
+        })
+        list(colR, Enum.FillDirection.Vertical, 10)
+
+        tab.Page = page
+        tab.Columns = { Left = colL, Right = colR }
+
+        btn.MouseEnter:Connect(function()
+            if self.ActiveTab ~= tab then tw(btn, 0.12, { BackgroundTransparency = 0.5 }) end
+        end)
+        btn.MouseLeave:Connect(function()
+            if self.ActiveTab ~= tab then tw(btn, 0.12, { BackgroundTransparency = 1 }) end
+        end)
+        btn.MouseButton1Click:Connect(function() self:SelectTab(tab) end)
+
+        table.insert(self.Tabs, tab)
+        if not self.ActiveTab then self:SelectTab(tab) end
+        return tab
+    end
+
+    function Window:SelectTab(tab)
+        for _, t in ipairs(self.Tabs) do
+            t.Page.Visible = false
+            tw(t.Button, 0.12, { BackgroundTransparency = 1, TextColor3 = Theme.SubText })
+        end
+        tab.Page.Visible = true
+        tw(tab.Button, 0.12, { BackgroundTransparency = 0, TextColor3 = Theme.Text })
+        self.ActiveTab = tab
+    end
+
+    -- Section
+    local Section = {}
+    Section.__index = Section
+
+    function Tab:CreateSection(cfg)
+        cfg = cfg or {}
+        local name = cfg.Name or "Section"
+        local side = cfg.Side or "Left"
+        local parent = (side == "Right") and self.Columns.Right or self.Columns.Left
+
+        local sec = setmetatable({ Name = name, Controls = {}, _order = 0 }, Section)
+
+        local frame = new("Frame", {
+            Name = "Section_" .. name, BackgroundColor3 = Theme.Panel, BorderSizePixel = 0,
+            Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+            LayoutOrder = #self.Sections + 1, Parent = parent,
+        })
+        corner(frame, 10)
+        stroke(frame, Theme.Border, 1)
+
+        local padFrame = new("Frame", {
+            BackgroundTransparency = 1, Size = UDim2.new(1, -20, 0, 0),
+            Position = UDim2.new(0, 10, 0, 8), AutomaticSize = Enum.AutomaticSize.Y, Parent = frame,
+        })
+        list(padFrame, Enum.FillDirection.Vertical, 8)
+
+        new("TextLabel", {
+            Text = name, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = Theme.Text,
+            BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 20),
+            TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 0, Parent = padFrame,
+        })
+
+        sec.Frame = frame
+        sec.Body = padFrame
+        sec.Parent = self
+        table.insert(self.Sections, sec)
+        return sec
+    end
+
+    function Section:_next()
+        self._order = (self._order or 0) + 1
+        return self._order
+    end
+
+    -- Toggle
+    function Section:AddToggle(cfg)
+        cfg = cfg or {}
+        local name = cfg.Name or "Toggle"
+        local value = cfg.Value and true or false
+        local callback = cfg.Callback or function() end
+
+        local row = new("Frame", {
+            BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30),
+            LayoutOrder = self:_next(), Parent = self.Body,
+        })
+        new("TextLabel", {
+            Text = name, Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = Theme.Text,
+            BackgroundTransparency = 1, Size = UDim2.new(0.7, 0, 1, 0),
+            TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+        })
+        local track = new("Frame", {
+            BackgroundColor3 = value and Theme.Accent or Theme.ToggleOff,
+            BorderSizePixel = 0, Size = UDim2.new(0, 40, 0, 20),
+            Position = UDim2.new(1, -40, 0.5, -10), Parent = row,
+        })
+        corner(track, 10)
+        local knob = new("Frame", {
+            BackgroundColor3 = Theme.White, BorderSizePixel = 0,
+            Size = UDim2.new(0, 16, 0, 16),
+            Position = value and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8),
+            Parent = track,
+        })
+        corner(knob, 8)
+        local btn = new("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Parent = track })
+        local obj = { Value = value }
+        local function apply(v, fire)
+            obj.Value = v
+            tw(track, 0.15, { BackgroundColor3 = v and Theme.Accent or Theme.ToggleOff })
+            tw(knob, 0.15, { Position = v and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8) })
+            if fire then task.spawn(function() callback(v) end) end
+        end
+        btn.MouseButton1Click:Connect(function() apply(not obj.Value, true) end)
+        function obj:Set(v) apply(v and true or false, true) end
+        function obj:GetValue() return self.Value end
+        table.insert(self.Controls, obj)
+        return obj
+    end
+
+    -- Slider
+    function Section:AddSlider(cfg)
+        cfg = cfg or {}
+        local name = cfg.Name or "Slider"
+        local min = cfg.Min or 0
+        local max = cfg.Max or 100
+        local decimals = cfg.Decimals or 0
+        local value = cfg.Value or min
+        local callback = cfg.Callback or function() end
+
+        local row = new("Frame", {
+            BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 42),
+            LayoutOrder = self:_next(), Parent = self.Body,
+        })
+        new("TextLabel", {
+            Text = name, Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = Theme.Text,
+            BackgroundTransparency = 1, Size = UDim2.new(0.7, 0, 0, 18),
+            TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+        })
+        local valueLbl = new("TextLabel", {
+            Text = "", Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = Theme.Accent,
+            BackgroundTransparency = 1, Size = UDim2.new(0.3, 0, 0, 18),
+            Position = UDim2.new(0.7, 0, 0, 0), TextXAlignment = Enum.TextXAlignment.Right, Parent = row,
+        })
+        local track = new("Frame", {
+            BackgroundColor3 = Theme.Control, BorderSizePixel = 0,
+            Size = UDim2.new(1, 0, 0, 6), Position = UDim2.new(0, 0, 0, 28), Parent = row,
+        })
+        corner(track, 3)
+        local fill = new("Frame", {
+            BackgroundColor3 = Theme.Accent, BorderSizePixel = 0,
+            Size = UDim2.new(0, 0, 1, 0), Parent = track,
+        })
+        corner(fill, 3)
+        local knob = new("Frame", {
+            BackgroundColor3 = Theme.White, BorderSizePixel = 0,
+            Size = UDim2.new(0, 12, 0, 12), AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.new(0, 0, 0.5, 0), Parent = track,
+        })
+        corner(knob, 6)
+        local trackHit = new("TextButton", {
+            Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 20),
+            Position = UDim2.new(0, 0, 0.5, -10), Parent = track,
+        })
+        local dragging = false
+        local function fmt(v)
+            if decimals <= 0 then return tostring(math.floor(v + 0.5)) end
+            return string.format("%." .. decimals .. "f", v)
+        end
+        local function setVisual(v)
+            local alpha = (max > min) and ((v - min) / (max - min)) or 0
+            alpha = math.clamp(alpha, 0, 1)
+            fill.Size = UDim2.new(alpha, 0, 1, 0)
+            knob.Position = UDim2.new(alpha, 0, 0.5, 0)
+            valueLbl.Text = fmt(v)
+        end
+        local obj = { Value = value }
+        local function apply(v, fire)
+            v = math.clamp(tonumber(v) or min, min, max)
+            if decimals <= 0 then v = math.floor(v + 0.5) end
+            obj.Value = v
+            setVisual(v)
+            if fire then task.spawn(function() callback(v) end) end
+        end
+        local function fromInput(input)
+            local pos = track.AbsolutePosition
+            local size = track.AbsoluteSize
+            if size.X <= 0 then return end
+            local alpha = math.clamp((input.Position.X - pos.X) / size.X, 0, 1)
+            apply(min + (max - min) * alpha, true)
+        end
+        trackHit.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true fromInput(input)
+            end
+        end)
+        trackHit.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = false
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                fromInput(input)
+            end
+        end)
+        setVisual(value)
+        function obj:Set(v) apply(v, true) end
+        function obj:GetValue() return self.Value end
+        table.insert(self.Controls, obj)
+        return obj
+    end
+
+    -- Dropdown
+    function Section:AddDropdown(cfg)
+        cfg = cfg or {}
+        local name = cfg.Name or "Dropdown"
+        local options = cfg.List or {}
+        local value = cfg.Value or (options[1] or "")
+        local callback = cfg.Callback or function() end
+
+        local row = new("Frame", {
+            BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30),
+            LayoutOrder = self:_next(), Parent = self.Body,
+        })
+        new("TextLabel", {
+            Text = name, Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = Theme.Text,
+            BackgroundTransparency = 1, Size = UDim2.new(0.5, 0, 1, 0),
+            TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+        })
+        local btn = new("TextButton", {
+            Text = tostring(value) .. " ▾", Font = Enum.Font.GothamMedium, TextSize = 12,
+            TextColor3 = Theme.Text, BackgroundColor3 = Theme.Control, AutoButtonColor = false,
+            TextTruncate = Enum.TextTruncate.AtEnd, Size = UDim2.new(0.5, -4, 1, 0),
+            Position = UDim2.new(0.5, 4, 0, 0), Parent = row,
+        })
+        corner(btn, 6)
+        stroke(btn, Theme.Border, 1, 0.3)
+        btn.MouseEnter:Connect(function() tw(btn, 0.1, { BackgroundColor3 = Theme.ControlHover }) end)
+        btn.MouseLeave:Connect(function() tw(btn, 0.1, { BackgroundColor3 = Theme.Control }) end)
+
+        local obj = { Value = value, List = options }
+        local popup
+        local function destroyPopup() if popup then popup:Destroy() popup = nil end end
+        local function buildPopup()
+            destroyPopup()
+            local maxH = math.min(200, #options * 26 + 8)
+            popup = new("Frame", {
+                BackgroundColor3 = Theme.Panel, BorderSizePixel = 0,
+                Size = UDim2.new(0, btn.AbsoluteSize.X, 0, maxH),
+                Position = UDim2.new(0, btn.AbsolutePosition.X, 0, btn.AbsolutePosition.Y + btn.AbsoluteSize.Y + 4),
+                ZIndex = 50, Parent = ScreenGui,
+            })
+            corner(popup, 8)
+            stroke(popup, Theme.Border, 1, 0.2)
+            local sc = new("ScrollingFrame", {
+                BackgroundTransparency = 1, Size = UDim2.new(1, -8, 1, -8),
+                Position = UDim2.new(0, 4, 0, 4), BorderSizePixel = 0,
+                CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+                ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.Border, Parent = popup,
+            })
+            list(sc, Enum.FillDirection.Vertical, 2)
+            for _, opt in ipairs(options) do
+                local ob = new("TextButton", {
+                    Text = "  " .. tostring(opt), Font = Enum.Font.Gotham, TextSize = 12,
+                    TextColor3 = (opt == obj.Value) and Theme.Accent or Theme.Text,
+                    BackgroundColor3 = Theme.Control, BackgroundTransparency = 1,
+                    Size = UDim2.new(1, 0, 0, 24), AutoButtonColor = false,
+                    TextXAlignment = Enum.TextXAlignment.Left, Parent = sc,
+                })
+                corner(ob, 5)
+                ob.MouseEnter:Connect(function() tw(ob, 0.1, { BackgroundTransparency = 0 }) end)
+                ob.MouseLeave:Connect(function() tw(ob, 0.1, { BackgroundTransparency = 1 }) end)
+                ob.MouseButton1Click:Connect(function()
+                    obj.Value = opt
+                    btn.Text = tostring(opt) .. " ▾"
+                    task.spawn(function() callback(opt) end)
+                    destroyPopup()
+                end)
+            end
+            task.delay(0.05, function()
+                local conn
+                conn = UserInputService.InputBegan:Connect(function(input)
+                    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                        if popup and popup.Parent then
+                            local mp = input.Position
+                            local p = popup.AbsolutePosition
+                            local s = popup.AbsoluteSize
+                            if not (mp.X >= p.X and mp.X <= p.X + s.X and mp.Y >= p.Y and mp.Y <= p.Y + s.Y) then
+                                destroyPopup()
+                            end
+                        end
+                        if conn then conn:Disconnect() end
+                    end
+                end)
+            end)
+        end
+        btn.MouseButton1Click:Connect(function()
+            if popup then destroyPopup() else buildPopup() end
+        end)
+        function obj:Set(v)
+            obj.Value = v
+            btn.Text = tostring(v) .. " ▾"
+            task.spawn(function() callback(v) end)
+        end
+        function obj:GetValue() return self.Value end
+        table.insert(self.Controls, obj)
+        return obj
+    end
+
+    -- Textbox
+    function Section:AddTextbox(cfg)
+        cfg = cfg or {}
+        local name = cfg.Name or "Textbox"
+        local value = cfg.Value or ""
+        local callback = cfg.Callback or function() end
+        local row = new("Frame", {
+            BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30),
+            LayoutOrder = self:_next(), Parent = self.Body,
+        })
+        new("TextLabel", {
+            Text = name, Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = Theme.Text,
+            BackgroundTransparency = 1, Size = UDim2.new(0.5, 0, 1, 0),
+            TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+        })
+        local box = new("TextBox", {
+            Text = tostring(value), PlaceholderText = "...", Font = Enum.Font.Gotham,
+            TextSize = 12, TextColor3 = Theme.Text, PlaceholderColor3 = Theme.SubText,
+            BackgroundColor3 = Theme.Control, BorderSizePixel = 0, ClearTextOnFocus = false,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Size = UDim2.new(0.5, -4, 1, 0), Position = UDim2.new(0.5, 4, 0, 0), Parent = row,
+        })
+        corner(box, 6)
+        stroke(box, Theme.Border, 1, 0.3)
+        pad(box, 0, 0, 8, 8)
+        local obj = { Value = value }
+        box.Focused:Connect(function() tw(box, 0.1, { BackgroundColor3 = Theme.ControlHover }) end)
+        box.FocusLost:Connect(function(enter)
+            tw(box, 0.1, { BackgroundColor3 = Theme.Control })
+            obj.Value = box.Text
+            if enter then task.spawn(function() callback(box.Text) end) end
+        end)
+        function obj:Set(v) obj.Value = tostring(v) box.Text = tostring(v) end
+        function obj:GetValue() return self.Value end
+        function obj:SetValue(v) obj:Set(v) end
+        function obj:SetText(v) obj:Set(v) end
+        table.insert(self.Controls, obj)
+        return obj
+    end
+
+    -- Button
+    function Section:AddButton(cfg)
+        cfg = cfg or {}
+        local name = cfg.Name or "Button"
+        local callback = cfg.Callback or function() end
+        local btn = new("TextButton", {
+            Text = name, Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = Theme.Text,
+            BackgroundColor3 = Theme.Control, AutoButtonColor = false,
+            Size = UDim2.new(1, 0, 0, 30), LayoutOrder = self:_next(), Parent = self.Body,
+        })
+        corner(btn, 8)
+        stroke(btn, Theme.Border, 1, 0.3)
+        btn.MouseEnter:Connect(function() tw(btn, 0.1, { BackgroundColor3 = Theme.ControlHover }) end)
+        btn.MouseLeave:Connect(function() tw(btn, 0.1, { BackgroundColor3 = Theme.Control }) end)
+        btn.MouseButton1Down:Connect(function() tw(btn, 0.08, { BackgroundColor3 = Theme.Accent }) end)
+        btn.MouseButton1Click:Connect(function()
+            tw(btn, 0.15, { BackgroundColor3 = Theme.Control })
+            task.spawn(function() callback() end)
+        end)
+        local obj = { Button = btn }
+        function obj:Set(v) btn.Text = tostring(v) end
+        table.insert(self.Controls, obj)
+        return obj
+    end
+
+    -- Colorpicker
+    function Section:AddColorpicker(cfg)
+        cfg = cfg or {}
+        local name = cfg.Name or "Color"
+        local value = cfg.Value or Color3.fromRGB(255, 255, 255)
+        local callback = cfg.Callback or function() end
+
+        local row = new("Frame", {
+            BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30),
+            LayoutOrder = self:_next(), Parent = self.Body,
+        })
+        new("TextLabel", {
+            Text = name, Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = Theme.Text,
+            BackgroundTransparency = 1, Size = UDim2.new(0.6, 0, 1, 0),
+            TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+        })
+        local swatch = new("TextButton", {
+            Text = "", BackgroundColor3 = value, AutoButtonColor = false,
+            Size = UDim2.new(0, 60, 0, 22), Position = UDim2.new(1, -60, 0.5, -11), Parent = row,
+        })
+        corner(swatch, 6)
+        stroke(swatch, Theme.Border, 1, 0.2)
+        local obj = { Value = value }
+        local popup
+        local function closePopup() if popup then popup:Destroy() popup = nil end end
+        local function buildPopup()
+            closePopup()
+            local wPx, hPx = 220, 240
+            local px = swatch.AbsolutePosition.X
+            local py = swatch.AbsolutePosition.Y + swatch.AbsoluteSize.Y + 6
+            local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(800, 600)
+            if px + wPx > vp.X then px = vp.X - wPx - 8 end
+            if py + hPx > vp.Y then py = swatch.AbsolutePosition.Y - hPx - 6 end
+            popup = new("Frame", {
+                BackgroundColor3 = Theme.Panel, BorderSizePixel = 0,
+                Size = UDim2.new(0, wPx, 0, hPx), Position = UDim2.new(0, px, 0, py),
+                ZIndex = 60, Parent = ScreenGui,
+            })
+            corner(popup, 10)
+            stroke(popup, Theme.Border, 1, 0.2)
+            pad(popup, 10)
+            local preview = new("Frame", {
+                BackgroundColor3 = obj.Value, BorderSizePixel = 0,
+                Size = UDim2.new(1, 0, 0, 36), Parent = popup,
+            })
+            corner(preview, 6)
+            stroke(preview, Theme.Border, 1, 0.4)
+            local hexBox = new("TextBox", {
+                Text = colorToHex(obj.Value), Font = Enum.Font.Gotham, TextSize = 12,
+                TextColor3 = Theme.Text, BackgroundColor3 = Theme.Control,
+                BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 24),
+                Position = UDim2.new(0, 0, 0, 44), TextXAlignment = Enum.TextXAlignment.Left, Parent = popup,
+            })
+            corner(hexBox, 6)
+            pad(hexBox, 0, 0, 8, 8)
+            local sliders = {}
+            local function addSlider(label, color, key)
+                local holder = new("Frame", {
+                    BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30),
+                    Position = UDim2.new(0, 0, 0, 78 + #sliders * 30), Parent = popup,
+                })
+                new("TextLabel", {
+                    Text = label, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = color,
+                    BackgroundTransparency = 1, Size = UDim2.new(0, 20, 1, 0),
+                    TextXAlignment = Enum.TextXAlignment.Left, Parent = holder,
+                })
+                local track = new("Frame", {
+                    BackgroundColor3 = Theme.Control, BorderSizePixel = 0,
+                    Size = UDim2.new(1, -30, 0, 6), Position = UDim2.new(0, 26, 0.5, -3), Parent = holder,
+                })
+                corner(track, 3)
+                local fill = new("Frame", {
+                    BackgroundColor3 = color, BorderSizePixel = 0,
+                    Size = UDim2.new(obj.Value[key], 0, 1, 0), Parent = track,
+                })
+                corner(fill, 3)
+                local hit = new("TextButton", {
+                    Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 20),
+                    Position = UDim2.new(0, 0, 0.5, -10), Parent = track,
+                })
+                sliders[key] = { fill = fill, track = track, hit = hit }
+                local dragging = false
+                local function fromInput(input)
+                    local p = track.AbsolutePosition
+                    local s = track.AbsoluteSize
+                    if s.X <= 0 then return end
+                    local a = math.clamp((input.Position.X - p.X) / s.X, 0, 1)
+                    local c = obj.Value
+                    local r, g, b = c.R, c.G, c.B
+                    if key == "R" then r = a elseif key == "G" then g = a else b = a end
+                    local nc = Color3.new(r, g, b)
+                    obj.Value = nc
+                    preview.BackgroundColor3 = nc
+                    swatch.BackgroundColor3 = nc
+                    hexBox.Text = colorToHex(nc)
+                    sliders.R.fill.Size = UDim2.new(nc.R, 0, 1, 0)
+                    sliders.G.fill.Size = UDim2.new(nc.G, 0, 1, 0)
+                    sliders.B.fill.Size = UDim2.new(nc.B, 0, 1, 0)
+                    task.spawn(function() callback(nc) end)
+                end
+                hit.InputBegan:Connect(function(input)
+                    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                        dragging = true fromInput(input)
+                    end
+                end)
+                hit.InputEnded:Connect(function(input)
+                    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                        dragging = false
+                    end
+                end)
+                UserInputService.InputChanged:Connect(function(input)
+                    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                        fromInput(input)
+                    end
+                end)
+            end
+            addSlider("R", Color3.fromRGB(230, 70, 70), "R")
+            addSlider("G", Color3.fromRGB(70, 210, 110), "G")
+            addSlider("B", Color3.fromRGB(80, 130, 240), "B")
+            hexBox.FocusLost:Connect(function()
+                local c = hexToColor(hexBox.Text)
+                if c then
+                    obj.Value = c
+                    preview.BackgroundColor3 = c
+                    swatch.BackgroundColor3 = c
+                    sliders.R.fill.Size = UDim2.new(c.R, 0, 1, 0)
+                    sliders.G.fill.Size = UDim2.new(c.G, 0, 1, 0)
+                    sliders.B.fill.Size = UDim2.new(c.B, 0, 1, 0)
+                    task.spawn(function() callback(c) end)
+                else
+                    hexBox.Text = colorToHex(obj.Value)
+                end
+            end)
+            task.delay(0.05, function()
+                local conn
+                conn = UserInputService.InputBegan:Connect(function(input)
+                    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                        if popup and popup.Parent then
+                            local mp = input.Position
+                            local p = popup.AbsolutePosition
+                            local s = popup.AbsoluteSize
+                            if not (mp.X >= p.X and mp.X <= p.X + s.X and mp.Y >= p.Y and mp.Y <= p.Y + s.Y) then
+                                closePopup()
+                            end
+                        end
+                        if conn then conn:Disconnect() end
+                    end
+                end)
+            end)
+        end
+        swatch.MouseButton1Click:Connect(function()
+            if popup then closePopup() else buildPopup() end
+        end)
+        function obj:Set(c)
+            if typeof(c) == "Color3" then
+                obj.Value = c
+                swatch.BackgroundColor3 = c
+                task.spawn(function() callback(c) end)
+            end
+        end
+        function obj:GetValue() return self.Value end
+        table.insert(self.Controls, obj)
+        return obj
+    end
+
+    LIB.Theme = Theme
+    LIB.Notify = Notify
+    return LIB
+end
+
+--====================================================================================
+--  UI
+--====================================================================================
+task.delay(math.random(1,3), function()
+    local Library = CreateCustomGUI()
+    if not Library then ShowError("GUI failed to load") return end
+
+    local function SafeShow()
+        if not Library then return end
+        if type(Library.Show) == "function" then pcall(function() Library:Show() end) return end
+        if type(Library.Open) == "function" then pcall(function() Library:Open() end) return end
+        if type(Library.Toggle) == "function" then pcall(function() Library:Toggle() end) return end
+    end
+    local function SafeHide()
+        if not Library then return end
+        if type(Library.Hide) == "function" then pcall(function() Library:Hide() end) return end
+        if type(Library.Close) == "function" then pcall(function() Library:Close() end) return end
+    end
+    local function SafeUnload()
+        if not Library then return end
+        if type(Library.Unload) == "function" then pcall(function() Library:Unload() end) return end
+        if type(Library.Destroy) == "function" then pcall(function() Library:Destroy() end) return end
+    end
+
+    local teamModes = {"Enemies","Allies","All","IgnoreNeutrals"}
+    local aaModes = {"Static", "Spin", "Jitter", "Sway"}
+    local refModes = {"Camera", "Movement", "Player"}
+    local aaMethods = {"CFrame", "BodyGyro", "Motor6D", "AlignOrientation", "AngularVelocity"}
+    local bhopKeys = {"Space", "LeftControl", "LeftShift", "C", "X", "Z"}
+    local speedMethods = {"WalkSpeed", "CFrame", "Velocity"}
+    local glowModes = {"Outline", "Fill", "Both", "Pulse"}
+    local silentAimModes = {"Camera", "GunHandler", "RayHook", "MouseHit"}
+    local wallCheckModes = {"Fast", "Perfect"}
+    local strafeModes = {"Legit", "Spam"}
+    local strafeKeys = {"Space", "LeftShift", "LeftControl", "C", "X", "Z", "Q", "E"}
+    local flyMethods = {"BodyVelocity", "LinearVelocity", "Velocity", "CFrame"}
+    local flyKeys = {"F", "G", "H", "V", "B", "N", "Space", "LeftShift"}
+    local desyncModes = {"Random", "OldPosition"}
+    local soundIDs = { gamesense = 83717596220569, neverlose = 139452805868562,
+        crit = 122699784909910, primordial = 97511223764004 }
+
+    local function Rejoin() TeleportService:Teleport(game.PlaceId, LocalPlayer) end
+    local function ServerHop()
+        local ok, data = pcall(function()
+            local body
+            if type(game.HttpGet) == "function" then
+                body = game:HttpGet("https://games.roblox.com/v1/games/"..game.PlaceId.."/servers/Public?limit=100")
+            elseif type(request) == "function" then
+                body = request({Url = "https://games.roblox.com/v1/games/"..game.PlaceId.."/servers/Public?limit=100", Method = "GET"}).Body
+            end
+            return HttpService:JSONDecode(body or "")
+        end)
+        if not ok or not data then ShowError("ServerHop failed"); return end
+        local servers = {}
+        for _, v in ipairs(data.data or {}) do
+            if v.playing and v.id ~= game.JobId then servers[#servers+1] = v.id end
+        end
+        if #servers > 0 then TeleportService:TeleportToPlaceInstance(game.PlaceId, servers[math.random(1, #servers)], LocalPlayer)
+        else ShowError("No other servers") end
+    end
+
+    UserInputService.InputBegan:Connect(function(inp)
+        if inp.KeyCode == Enum.KeyCode.RightShift then
+            MenuVisible = not MenuVisible
+            if MenuVisible then SafeShow() else SafeHide() end
+        end
+    end)
+
+    Library.UnloadCallback = function()
+        Aimbot.Settings.Enabled = false
+        Aimbot.FOVSettings.Enabled = false
+        WallHack.Settings.Enabled = false
+        WallHack.Visuals.BoxSettings.Enabled = false
+        WallHack.Visuals.GlowSettings.Enabled = false
+        AntiAim.Settings.Enabled = false
+        AntiAim.Desync.Settings.Enabled = false
+        ServerPosition.Settings.Enabled = false
+        Fly.Settings.Enabled = false
+        Bhop.Settings.Enabled = false
+        Speed.Settings.Enabled = false
+        FastStop.Settings.Enabled = false
+        AutoStrafer.Settings.Enabled = false
+        Noclip.Settings.Enabled = false
+
+        Fly.Internal.Active = false
+        Bhop.Internal.KeyHeld = false
+        Bhop.Internal.Active = false
+        AutoStrafer.Internal.Active = false
+        Speed.Internal.Active = false
+        Noclip.Internal.Active = false
+        FastStop.Internal.LastActive = false
+
+        pcall(function() Aimbot.FOVCircle:Remove() end)
+        pcall(function() WallHack.Functions.Exit() end)
+        pcall(StopServerPosition)
+        pcall(StopDesync)
+        pcall(Fly_ClearInstances)
+        pcall(function()
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    hum.PlatformStand = false
+                    if hum.WalkSpeed ~= 16 then hum.WalkSpeed = 16 end
+                end
+                for _, part in ipairs(char:GetDescendants()) do
+                    if part:IsA("BasePart") then part.CanCollide = true end
+                end
+            end
+        end)
+        pcall(function() if AutoStrafer.Internal.KeyA or AutoStrafer.Internal.KeyD then AS_ReleaseAll() end end)
+        pcall(RemoveRayHook)
+        pcall(RemoveMouseHitHook)
+        pcall(CleanupAntiAim)
+        pcall(function() ErrorText:Remove() end)
+        pcall(function() for _, log in ipairs(ActiveLogs) do log.text:Remove() end end)
+        ActiveLogs = {}
+        pcall(function() if Hitsound then Hitsound:Destroy() end end)
+        pcall(function() if Killsound then Killsound:Destroy() end end)
+        getgenv().AirHub = nil
+        pcall(function()
+            local t = Drawing.new("Text")
+            t.Text = "AirHub unloaded"
+            t.Size = 20
+            t.Color = Color3.fromRGB(255, 80, 80)
+            t.Center = true
+            t.Outline = true
+            t.Position = workspace.CurrentCamera.ViewportSize / 2
+            task.delay(2, function() t:Remove() end)
+        end)
+    end
+
+    local MainFrame = Library:CreateWindow({
+        Name = "AirHub",
+        Themeable = { Info = "Strafe Helper | Silent Aim | Ghost | Fly" }
+    })
+
+    local AimbotTab    = MainFrame:CreateTab({ Name = "Aimbot" })
+    local VisualsTab   = MainFrame:CreateTab({ Name = "Visuals" })
+    local AntiTab      = MainFrame:CreateTab({ Name = "Anti-Aim" })
+    local MovementTab  = MainFrame:CreateTab({ Name = "Movement" })
+    local SettingsTab  = MainFrame:CreateTab({ Name = "Settings" })
+
+    -- Aimbot
+    local secA = AimbotTab:CreateSection({ Name = "Main" })
+    secA:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.Enabled, Callback = function(v) Aimbot.Settings.Enabled = v end })
+    secA:AddToggle({ Name = "Toggle", Value = Aimbot.Settings.Toggle, Callback = function(v) Aimbot.Settings.Toggle = v end })
+    secA:AddToggle({ Name = "360° (Ignore FOV)", Value = Aimbot.Settings.IgnoreFOV, Callback = function(v) Aimbot.Settings.IgnoreFOV = v end })
+    secA:AddToggle({ Name = "Check visibility from player on TP", Value = Aimbot.Settings.CheckFromPlayerOnTP, Callback = function(v) Aimbot.Settings.CheckFromPlayerOnTP = v end })
+    secA:AddDropdown({ Name = "Lock Part", Value = Aimbot.Settings.LockPart, List = {"Head","Torso","Nearest"}, Callback = function(v) Aimbot.Settings.LockPart = v end })
+    secA:AddToggle({ Name = "Fallback to visible parts", Value = Aimbot.Settings.FallbackToVisible, Callback = function(v) Aimbot.Settings.FallbackToVisible = v end })
+    secA:AddTextbox({ Name = "Aim Key (MouseButton1/2 or KeyCode)", Value = Aimbot.Settings.TriggerKey, Callback = function(v) Aimbot.Settings.TriggerKey = v end })
+    secA:AddDropdown({ Name = "Aim Method", Value = Aimbot.Settings.AimMethod, List = {"Smooth","Instant"}, Callback = function(v) Aimbot.Settings.AimMethod = v end })
+    secA:AddSlider({ Name = "Smoothing Speed", Value = Aimbot.Settings.AimSmoothingSpeed, Min = 1, Max = 20, Callback = function(v) Aimbot.Settings.AimSmoothingSpeed = v end })
+
+    local predSec = AimbotTab:CreateSection({ Name = "Prediction" })
+    predSec:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.PredictionEnabled, Callback = function(v) Aimbot.Settings.PredictionEnabled = v end })
+    predSec:AddSlider({ Name = "Prediction X (%)", Value = Aimbot.Settings.PredictionX, Min = 0, Max = 100, Callback = function(v) Aimbot.Settings.PredictionX = v end })
+    predSec:AddSlider({ Name = "Prediction Y (%)", Value = Aimbot.Settings.PredictionY, Min = 0, Max = 100, Callback = function(v) Aimbot.Settings.PredictionY = v end })
+    predSec:AddSlider({ Name = "Base Time (s)", Value = Aimbot.Settings.PredictionTime, Min = 0.01, Max = 0.5, Decimals = 2, Callback = function(v) Aimbot.Settings.PredictionTime = v end })
+
+    local secW = AimbotTab:CreateSection({ Name = "Visibility", Side = "Right" })
+    secW:AddToggle({ Name = "WallCheck", Value = Aimbot.Settings.WallCheck, Callback = function(v) Aimbot.Settings.WallCheck = v end })
+    secW:AddDropdown({ Name = "WallCheck Mode", Value = Aimbot.Settings.WallCheckMode, List = wallCheckModes, Callback = function(v) Aimbot.Settings.WallCheckMode = v end })
+    secW:AddSlider({ Name = "Perfect Delay Tolerance (s)", Value = Aimbot.Settings.WallCheckDelay, Min = 0, Max = 1, Decimals = 2, Callback = function(v) Aimbot.Settings.WallCheckDelay = v end })
+    secW:AddToggle({ Name = "Alive Check", Value = Aimbot.Settings.AliveCheck, Callback = function(v) Aimbot.Settings.AliveCheck = v end })
+    secW:AddToggle({ Name = "Team Check", Value = Aimbot.Settings.TeamCheck.Enabled, Callback = function(v) Aimbot.Settings.TeamCheck.Enabled = v end })
+    secW:AddDropdown({ Name = "Team Mode", Value = Aimbot.Settings.TeamCheck.Mode, List = teamModes, Callback = function(v) Aimbot.Settings.TeamCheck.Mode = v end })
+    secW:AddToggle({ Name = "Treat Neutrals as Enemies", Value = Aimbot.Settings.TeamCheck.TreatNeutralAsEnemy, Callback = function(v) Aimbot.Settings.TeamCheck.TreatNeutralAsEnemy = v end })
+
+    local secD = AimbotTab:CreateSection({ Name = "Silent Aim", Side = "Right" })
+    secD:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.SilentAim, Callback = function(v) Aimbot.Settings.SilentAim = v end })
+    secD:AddDropdown({ Name = "Mode", Value = Aimbot.Settings.SilentAimMode, List = silentAimModes, Callback = function(v)
+        Aimbot.Settings.SilentAimMode = v
+        if v ~= "RayHook" then RemoveRayHook() end
+        if v ~= "MouseHit" then RemoveMouseHitHook() end
+    end })
+
+    local secAS = AimbotTab:CreateSection({ Name = "Auto Shoot", Side = "Right" })
+    secAS:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.AutoShoot.Enabled, Callback = function(v) Aimbot.Settings.AutoShoot.Enabled = v end })
+    secAS:AddToggle({ Name = "Only when aiming", Value = Aimbot.Settings.AutoShoot.OnlyWhenAiming, Callback = function(v) Aimbot.Settings.AutoShoot.OnlyWhenAiming = v end })
+    secAS:AddTextbox({ Name = "Manual delay (s)", Value = tostring(Aimbot.Settings.AutoShoot.FireRate), Callback = function(v)
+        local num = tonumber(v)
+        if num then Aimbot.Settings.AutoShoot.FireRate = math.clamp(num, 0.001, 1) end
+    end })
+    secAS:AddDropdown({ Name = "Shoot Key", Value = "Left Click", List = {"Left Click","Right Click"}, Callback = function(v)
+        Aimbot.Settings.AutoShoot.ShootKey = (v=="Left Click") and "MouseButton1" or "MouseButton2"
+    end })
+    secAS:AddToggle({ Name = "AutoStop", Value = Aimbot.Settings.AutoShoot.AutoStop.Enabled, Callback = function(v) Aimbot.Settings.AutoShoot.AutoStop.Enabled = v end })
+    secAS:AddSlider({ Name = "Stop time (s)", Value = Aimbot.Settings.AutoShoot.AutoStop.Time, Min = 0.01, Max = 0.5, Decimals = 2, Callback = function(v) Aimbot.Settings.AutoShoot.AutoStop.Time = v end })
+
+    local secE = AimbotTab:CreateSection({ Name = "FOV" })
+    secE:AddToggle({ Name = "Enabled", Value = Aimbot.FOVSettings.Enabled, Callback = function(v) Aimbot.FOVSettings.Enabled = v end })
+    secE:AddToggle({ Name = "Visible", Value = Aimbot.FOVSettings.Visible, Callback = function(v) Aimbot.FOVSettings.Visible = v end })
+    secE:AddSlider({ Name = "Radius", Value = Aimbot.FOVSettings.Amount, Min = 10, Max = 300, Callback = function(v) Aimbot.FOVSettings.Amount = v end })
+
+    -- Visuals
+    local vis1 = VisualsTab:CreateSection({ Name = "WallHack" })
+    vis1:AddToggle({ Name = "Enabled", Value = WallHack.Settings.Enabled, Callback = function(v) WallHack.Settings.Enabled = v ApplyGlowToAll() end })
+    vis1:AddToggle({ Name = "Team Check", Value = WallHack.Settings.TeamCheck, Callback = function(v) WallHack.Settings.TeamCheck = v end })
+    vis1:AddToggle({ Name = "Alive Check", Value = WallHack.Settings.AliveCheck, Callback = function(v) WallHack.Settings.AliveCheck = v end })
+
+    local visBox = VisualsTab:CreateSection({ Name = "Boxes" })
+    visBox:AddToggle({ Name = "Enabled", Value = WallHack.Visuals.BoxSettings.Enabled, Callback = function(v) WallHack.Visuals.BoxSettings.Enabled = v end })
+    visBox:AddDropdown({ Name = "Type", Value = (WallHack.Visuals.BoxSettings.Type == 1 and "3D" or "2D"), List = {"3D","2D"}, Callback = function(v) WallHack.Visuals.BoxSettings.Type = (v == "3D") and 1 or 2 end })
+    visBox:AddColorpicker({ Name = "Color", Value = WallHack.Visuals.BoxSettings.Color, Callback = function(v) WallHack.Visuals.BoxSettings.Color = SanitizeColor(v) end })
+    visBox:AddColorpicker({ Name = "Target Color", Value = WallHack.Visuals.BoxSettings.TargetColor, Callback = function(v) WallHack.Visuals.BoxSettings.TargetColor = SanitizeColor(v) end })
+    visBox:AddSlider({ Name = "Transparency", Value = WallHack.Visuals.BoxSettings.Transparency, Min = 0, Max = 1, Decimals = 2, Callback = function(v) WallHack.Visuals.BoxSettings.Transparency = v end })
+    visBox:AddSlider({ Name = "Thickness", Value = WallHack.Visuals.BoxSettings.Thickness, Min = 1, Max = 5, Callback = function(v) WallHack.Visuals.BoxSettings.Thickness = v end })
+    visBox:AddToggle({ Name = "Filled (2D)", Value = WallHack.Visuals.BoxSettings.Filled, Callback = function(v) WallHack.Visuals.BoxSettings.Filled = v end })
+    visBox:AddSlider({ Name = "Scale (3D)", Value = WallHack.Visuals.BoxSettings.Increase, Min = 1, Max = 5, Callback = function(v) WallHack.Visuals.BoxSettings.Increase = v end })
+
+    local glowSec = VisualsTab:CreateSection({ Name = "Glow", Side = "Right" })
+    glowSec:AddToggle({ Name = "Enabled", Value = WallHack.Visuals.GlowSettings.Enabled, Callback = function(v) WallHack.Visuals.GlowSettings.Enabled = v ApplyGlowToAll() end })
+    glowSec:AddColorpicker({ Name = "Color", Value = WallHack.Visuals.GlowSettings.Color, Callback = function(v)
+        WallHack.Visuals.GlowSettings.Color = SanitizeColor(v) ApplyGlowToAll()
+    end })
+    glowSec:AddSlider({ Name = "Transparency", Value = WallHack.Visuals.GlowSettings.Transparency, Min = 0, Max = 1, Decimals = 2, Callback = function(v)
+        local n = tonumber(v) if n then WallHack.Visuals.GlowSettings.Transparency = math.clamp(n, 0, 1) end
+        ApplyGlowToAll()
+    end })
+    glowSec:AddDropdown({ Name = "Mode", Value = WallHack.Visuals.GlowSettings.Mode, List = glowModes, Callback = function(v)
+        WallHack.Visuals.GlowSettings.Mode = (type(v) == "string" and v) or "Outline"
+        ApplyGlowToAll()
+    end })
+
+    local spSec = VisualsTab:CreateSection({ Name = "Server Position (Ghost)", Side = "Right" })
+    spSec:AddToggle({ Name = "Enabled", Value = ServerPosition.Settings.Enabled, Callback = function(v)
+        ServerPosition.Settings.Enabled = v
+        if v then StopServerPosition() StartServerPosition() else StopServerPosition() end
+    end })
+    spSec:AddToggle({ Name = "RGB Color", Value = ServerPosition.Settings.RGB, Callback = function(v) ServerPosition.Settings.RGB = v end })
+    spSec:AddSlider({ Name = "Strength", Value = ServerPosition.Settings.Strength, Min = 0, Max = 5, Decimals = 1, Callback = function(v) ServerPosition.Settings.Strength = v end })
+    spSec:AddSlider({ Name = "Max Limb Distance", Value = ServerPosition.Settings.MaxLimb, Min = 1, Max = 20, Callback = function(v) ServerPosition.Settings.MaxLimb = v end })
+
+    -- Anti-Aim
+    local aaMain = AntiTab:CreateSection({ Name = "Body (Server)" })
+    aaMain:AddToggle({ Name = "Enabled", Value = AntiAim.Settings.Enabled, Callback = function(v) AntiAim.Settings.Enabled = v end })
+    aaMain:AddDropdown({ Name = "Mode", Value = AntiAim.Settings.Mode, List = aaModes, Callback = function(v) AntiAim.Settings.Mode = v end })
+    aaMain:AddDropdown({ Name = "Method", Value = AntiAim.Settings.Method, List = aaMethods, Callback = function(v) AntiAim.Settings.Method = v end })
+    aaMain:AddDropdown({ Name = "Reference", Value = AntiAim.Settings.Body.Reference, List = refModes, Callback = function(v) AntiAim.Settings.Body.Reference = v end })
+    aaMain:AddSlider({ Name = "Yaw", Value = AntiAim.Settings.Body.Yaw, Min = -180, Max = 180, Callback = function(v) AntiAim.Settings.Body.Yaw = v end })
+    aaMain:AddTextbox({ Name = "Spin Speed", Value = tostring(AntiAim.Settings.Body.SpinSpeed), Callback = function(v)
+        local num = tonumber(v) if num then AntiAim.Settings.Body.SpinSpeed = num end
+    end })
+    aaMain:AddTextbox({ Name = "Jitter Amount", Value = tostring(AntiAim.Settings.Body.JitterAmount), Callback = function(v)
+        local num = tonumber(v) if num then AntiAim.Settings.Body.JitterAmount = num end
+    end })
+    aaMain:AddTextbox({ Name = "Jitter Speed", Value = tostring(AntiAim.Settings.Body.JitterSpeed), Callback = function(v)
+        local num = tonumber(v) if num then AntiAim.Settings.Body.JitterSpeed = num end
+    end })
+    aaMain:AddSlider({ Name = "Sway Amount", Value = AntiAim.Settings.Body.SwayAmount, Min = 0, Max = 90, Callback = function(v) AntiAim.Settings.Body.SwayAmount = v end })
+    aaMain:AddSlider({ Name = "Sway Speed", Value = AntiAim.Settings.Body.SwaySpeed, Min = 0.1, Max = 10, Decimals = 1, Callback = function(v) AntiAim.Settings.Body.SwaySpeed = v end })
+    aaMain:AddToggle({ Name = "Ignore when moving", Value = AntiAim.Settings.Body.IgnoreMoving, Callback = function(v) AntiAim.Settings.Body.IgnoreMoving = v end })
+    aaMain:AddSlider({ Name = "Move speed threshold", Value = AntiAim.Settings.Body.MoveSpeedThreshold, Min = 0.1, Max = 5, Decimals = 2, Callback = function(v) AntiAim.Settings.Body.MoveSpeedThreshold = v end })
+
+    local desyncSec = AntiTab:CreateSection({ Name = "Desync (Client)", Side = "Right" })
+    desyncSec:AddToggle({ Name = "Enabled", Value = AntiAim.Desync.Settings.Enabled, Callback = function(v)
+        AntiAim.Desync.Settings.Enabled = v
+        if v then StartDesync() else StopDesync() end
+    end })
+    desyncSec:AddDropdown({ Name = "Mode", Value = AntiAim.Desync.Settings.Mode, List = desyncModes, Callback = function(v)
+        AntiAim.Desync.Settings.Mode = v
+        if AntiAim.Desync.Settings.Enabled then StopDesync() task.wait(0.05) StartDesync() end
+    end })
+    desyncSec:AddSlider({ Name = "X Radius", Value = AntiAim.Desync.Settings.RadiusX, Min = -100, Max = 100, Callback = function(v) AntiAim.Desync.Settings.RadiusX = v end })
+    desyncSec:AddSlider({ Name = "Y Radius", Value = AntiAim.Desync.Settings.RadiusY, Min = -100, Max = 100, Callback = function(v) AntiAim.Desync.Settings.RadiusY = v end })
+    desyncSec:AddSlider({ Name = "Z Radius", Value = AntiAim.Desync.Settings.RadiusZ, Min = -100, Max = 100, Callback = function(v) AntiAim.Desync.Settings.RadiusZ = v end })
+    desyncSec:AddSlider({ Name = "Update Interval", Value = AntiAim.Desync.Settings.UpdateInterval, Min = 0.01, Max = 1, Decimals = 2, Callback = function(v) AntiAim.Desync.Settings.UpdateInterval = v end })
+    desyncSec:AddSlider({ Name = "Smoothness", Value = AntiAim.Desync.Settings.Smoothness, Min = 0.01, Max = 1, Decimals = 2, Callback = function(v) AntiAim.Desync.Settings.Smoothness = v end })
+    desyncSec:AddToggle({ Name = "Only In Air", Value = AntiAim.Desync.Settings.OnlyInAir, Callback = function(v) AntiAim.Desync.Settings.OnlyInAir = v end })
+    desyncSec:AddToggle({ Name = "Not In Air (OldPos)", Value = AntiAim.Desync.Settings.NotInAir, Callback = function(v) AntiAim.Desync.Settings.NotInAir = v end })
+    desyncSec:AddToggle({ Name = "Freeze Old Position", Value = AntiAim.Desync.Settings.FreezeOldPos, Callback = function(v) AntiAim.Desync.Settings.FreezeOldPos = v end })
+    desyncSec:AddToggle({ Name = "Random Delay (Old Position)", Value = AntiAim.Desync.Settings.RandomDelayEnabled, Callback = function(v)
+        AntiAim.Desync.Settings.RandomDelayEnabled = v
+        AntiAim.Desync.Internal.OldPosTimer = 0
+        AntiAim.Desync.Internal.NextUpdate = PickNextDelay(AntiAim.Desync.Settings)
+    end })
+    desyncSec:AddSlider({ Name = "Delay Min (s)", Value = AntiAim.Desync.Settings.AutoUpdateMin, Min = 0, Max = 5, Decimals = 2, Callback = function(v)
+        local n = tonumber(v) or 0.2
+        AntiAim.Desync.Settings.AutoUpdateMin = n
+        if AntiAim.Desync.Settings.AutoUpdateMax < n then AntiAim.Desync.Settings.AutoUpdateMax = n end
+    end })
+    desyncSec:AddSlider({ Name = "Delay Max (s)", Value = AntiAim.Desync.Settings.AutoUpdateMax, Min = 0, Max = 10, Decimals = 2, Callback = function(v)
+        local n = tonumber(v) or 1.0
+        AntiAim.Desync.Settings.AutoUpdateMax = n
+        if AntiAim.Desync.Settings.AutoUpdateMin > n then AntiAim.Desync.Settings.AutoUpdateMin = n end
+    end })
+    desyncSec:AddButton({ Name = "Save Current Position", Callback = function()
+        local ok = AntiAim.Functions.SaveOldPosition()
+        if ok then ShowError("Old position saved") else ShowError("No character") end
+    end })
+
+    -- Movement: AutoStrafer
+    local asSec = MovementTab:CreateSection({ Name = "AutoStrafer" })
+    asSec:AddToggle({ Name = "Enabled", Value = AutoStrafer.Settings.Enabled, Callback = function(v)
+        AutoStrafer.Settings.Enabled = v
+        if not v then AutoStrafer.Functions.Stop() end
+    end })
+    asSec:AddDropdown({ Name = "Key", Value = AutoStrafer.Settings.Key, List = strafeKeys, Callback = function(v) AutoStrafer.Settings.Key = v end })
+    asSec:AddToggle({ Name = "Toggle Mode", Value = AutoStrafer.Settings.Toggle, Callback = function(v) AutoStrafer.Settings.Toggle = v end })
+    asSec:AddDropdown({ Name = "Mode", Value = AutoStrafer.Settings.Mode, List = strafeModes, Callback = function(v) AutoStrafer.Settings.Mode = v end })
+    asSec:AddToggle({ Name = "Invert", Value = AutoStrafer.Settings.Invert, Callback = function(v) AutoStrafer.Settings.Invert = v end })
+    asSec:AddSlider({ Name = "Spam Delay (Spam mode)", Value = AutoStrafer.Settings.SpamDelay, Min = 0.01, Max = 0.3, Decimals = 2, Callback = function(v) AutoStrafer.Settings.SpamDelay = v end })
+
+    -- Fly
+    local flySec = MovementTab:CreateSection({ Name = "Fly" })
+    flySec:AddToggle({ Name = "Enabled", Value = Fly.Settings.Enabled, Callback = function(v)
+        Fly.Settings.Enabled = v
+        if not v then
+            Fly.Internal.Active = false
+            Fly_ClearInstances()
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hum.PlatformStand = false end
+            end
+        end
+    end })
+    flySec:AddDropdown({ Name = "Method", Value = Fly.Settings.Method, List = flyMethods, Callback = function(v) Fly.Settings.Method = v Fly_ClearInstances() end })
+    flySec:AddDropdown({ Name = "Key", Value = Fly.Settings.ToggleKey, List = flyKeys, Callback = function(v) Fly.Settings.ToggleKey = v end })
+    flySec:AddToggle({ Name = "Toggle Mode", Value = Fly.Settings.Toggle, Callback = function(v) Fly.Settings.Toggle = v end })
+    flySec:AddSlider({ Name = "Speed", Value = Fly.Settings.Speed, Min = 1, Max = 200, Callback = function(v) Fly.Settings.Speed = v end })
+    flySec:AddSlider({ Name = "Up/Down Speed", Value = Fly.Settings.UpSpeed, Min = 1, Max = 200, Callback = function(v) Fly.Settings.UpSpeed = v end })
+    flySec:AddSlider({ Name = "Smoothness", Value = Fly.Settings.Smoothness, Min = 0.05, Max = 1, Decimals = 2, Callback = function(v) Fly.Settings.Smoothness = v end })
+    flySec:AddToggle({ Name = "Use WASD + Space/Ctrl", Value = Fly.Settings.UseKeys, Callback = function(v) Fly.Settings.UseKeys = v end })
+
+    -- Bhop
+    local bhopSec = MovementTab:CreateSection({ Name = "Bhop", Side = "Right" })
+    bhopSec:AddToggle({ Name = "Enabled", Value = Bhop.Settings.Enabled, Callback = function(v)
+        Bhop.Settings.Enabled = v
+        if not v then Bhop.Internal.KeyHeld = false Bhop.Internal.Active = false Bhop.Internal.SpiderTouching = false end
+    end })
+    bhopSec:AddDropdown({ Name = "Jump Key", Value = Bhop.Settings.AutoJumpKey, List = bhopKeys, Callback = function(v) Bhop.Settings.AutoJumpKey = v end })
+    bhopSec:AddToggle({ Name = "Bypass Jump Restrictions", Value = Bhop.Settings.BypassJump, Callback = function(v) Bhop.Settings.BypassJump = v end })
+    bhopSec:AddSlider({ Name = "Jump Cooldown", Value = Bhop.Settings.JumpCooldown, Min = 0.01, Max = 0.5, Decimals = 2, Callback = function(v) Bhop.Settings.JumpCooldown = v end })
+
+    -- Spider
+    local spiderSec = MovementTab:CreateSection({ Name = "Spider (Bhop assist)", Side = "Right" })
+    spiderSec:AddToggle({ Name = "Enabled", Value = Bhop.Settings.Spider.Enabled, Callback = function(v) Bhop.Settings.Spider.Enabled = v end })
+    spiderSec:AddSlider({ Name = "Wall Range", Value = Bhop.Settings.Spider.Range, Min = 1, Max = 10, Decimals = 1, Callback = function(v) Bhop.Settings.Spider.Range = v end })
+    spiderSec:AddSlider({ Name = "Ray Count", Value = Bhop.Settings.Spider.RayCount, Min = 4, Max = 24, Callback = function(v) Bhop.Settings.Spider.RayCount = v end })
+
+    -- Speed
+    local speedSec = MovementTab:CreateSection({ Name = "Speed", Side = "Right" })
+    speedSec:AddToggle({ Name = "Enabled", Value = Speed.Settings.Enabled, Callback = function(v) Speed.Settings.Enabled = v end })
+    speedSec:AddDropdown({ Name = "Method", Value = Speed.Settings.Method, List = speedMethods, Callback = function(v) Speed.Settings.Method = v end })
+    speedSec:AddSlider({ Name = "Ground Speed", Value = Speed.Settings.GroundSpeed, Min = 1, Max = 500, Callback = function(v) Speed.Settings.GroundSpeed = v end })
+    speedSec:AddToggle({ Name = "Use Different Air Speed", Value = Speed.Settings.UseAirSpeed, Callback = function(v) Speed.Settings.UseAirSpeed = v end })
+    speedSec:AddSlider({ Name = "Air Speed", Value = Speed.Settings.AirSpeed, Min = 1, Max = 500, Callback = function(v) Speed.Settings.AirSpeed = v end })
+    speedSec:AddToggle({ Name = "In Air Only", Value = Speed.Settings.InAirOnly, Callback = function(v) Speed.Settings.InAirOnly = v end })
+
+    -- FastStop
+    local fsSec = MovementTab:CreateSection({ Name = "FastStop" })
+    fsSec:AddToggle({ Name = "Enabled", Value = FastStop.Settings.Enabled, Callback = function(v) FastStop.Settings.Enabled = v end })
+    fsSec:AddToggle({ Name = "Also stop Y velocity", Value = FastStop.Settings.StopY, Callback = function(v) FastStop.Settings.StopY = v end })
+
+    -- Noclip
+    local noclipSec = MovementTab:CreateSection({ Name = "Noclip", Side = "Right" })
+    noclipSec:AddToggle({ Name = "Enabled", Value = Noclip.Settings.Enabled, Callback = function(v) Noclip.Settings.Enabled = v end })
+
+    -- Settings: Logging & Sound
+    local logSec = SettingsTab:CreateSection({ Name = "Shot Logs & Sounds" })
+    logSec:AddToggle({ Name = "Logs Enabled", Value = getgenv().AirHub.Logging.Enabled, Callback = function(v) getgenv().AirHub.Logging.Enabled = v end })
+    logSec:AddToggle({ Name = "Show Hits", Value = getgenv().AirHub.Logging.ShowHit, Callback = function(v) getgenv().AirHub.Logging.ShowHit = v end })
+    logSec:AddToggle({ Name = "Show Misses", Value = getgenv().AirHub.Logging.ShowMiss, Callback = function(v) getgenv().AirHub.Logging.ShowMiss = v end })
+    logSec:AddSlider({ Name = "Duration (s)", Value = getgenv().AirHub.Logging.Duration, Min = 0.5, Max = 5, Decimals = 1, Callback = function(v) getgenv().AirHub.Logging.Duration = v end })
+    logSec:AddSlider({ Name = "Font Size", Value = getgenv().AirHub.Logging.FontSize, Min = 12, Max = 30, Callback = function(v) getgenv().AirHub.Logging.FontSize = v end })
+    logSec:AddToggle({ Name = "Hitsound Enabled", Value = getgenv().AirHub.Sound.HitsoundEnabled, Callback = function(v) getgenv().AirHub.Sound.HitsoundEnabled = v end })
+    logSec:AddDropdown({ Name = "Hitsound", Value = "gamesense", List = {"gamesense","neverlose","crit","primordial"}, Callback = function(v) getgenv().AirHub.Sound.HitsoundID = soundIDs[v] end })
+    logSec:AddSlider({ Name = "Hitsound Volume", Value = getgenv().AirHub.Sound.HitsoundVolume, Min = 0, Max = 10, Decimals = 1, Callback = function(v) getgenv().AirHub.Sound.HitsoundVolume = v end })
+    logSec:AddToggle({ Name = "Killsound Enabled", Value = getgenv().AirHub.Sound.KillsoundEnabled, Callback = function(v) getgenv().AirHub.Sound.KillsoundEnabled = v end })
+    logSec:AddDropdown({ Name = "Killsound", Value = "gamesense", List = {"gamesense","neverlose","crit","primordial"}, Callback = function(v) getgenv().AirHub.Sound.KillsoundID = soundIDs[v] end })
+    logSec:AddSlider({ Name = "Killsound Volume", Value = getgenv().AirHub.Sound.KillsoundVolume, Min = 0, Max = 10, Decimals = 1, Callback = function(v) getgenv().AirHub.Sound.KillsoundVolume = v end })
+
+    -- Main
+    local mainSec = SettingsTab:CreateSection({ Name = "Main", Side = "Right" })
+    mainSec:AddButton({ Name = "Reset All", Callback = function()
+        Aimbot.Settings = { Enabled = false, TeamCheck = {Enabled = true, Mode = "Enemies", TreatNeutralAsEnemy = true}, AliveCheck = true, WallCheck = false, FallbackToVisible = false, WallCheckMode = "Perfect", WallCheckDelay = 0.15, AimSmoothingSpeed = 6, TriggerKey = "MouseButton2", Toggle = false, LockPart = "Head", AimMethod = "Smooth", SilentAim = true, SilentAimMode = "Camera", IgnoreFOV = false, CheckFromPlayerOnTP = true, PredictionEnabled = false, PredictionX = 0, PredictionY = 0, PredictionTime = 0.15, AutoShoot = {Enabled = false, ShootKey = "MouseButton1", FireRate = 0.05, OnlyWhenAiming = true, AutoStop = {Enabled = false, Time = 0.1}} }
+        Aimbot.FOVSettings = {Enabled = true, Visible = true, Amount = 90}
+        WallHack.Functions.ResetSettings()
+        AntiAim.Functions.ResetSettings()
+        ServerPosition.Settings = { Enabled = false, RGB = true, Strength = 1, MaxLimb = 6 }
+        StopServerPosition()
+        Fly.Functions.ResetSettings()
+        Bhop.Functions.ResetSettings()
+        Speed.Functions.ResetSettings()
+        FastStop.Functions.ResetSettings()
+        AutoStrafer.Functions.ResetSettings()
+        Noclip.Functions.ResetSettings()
+        getgenv().AirHub.Logging = {Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18}
+        getgenv().AirHub.Sound = { HitsoundEnabled = false, HitsoundID = 83717596220569, HitsoundVolume = 1, KillsoundEnabled = false, KillsoundID = 83717596220569, KillsoundVolume = 1 }
+        ApplyGlowToAll()
+        ShowError("All settings reset")
+    end })
+    mainSec:AddButton({ Name = "Rejoin", Callback = Rejoin })
+    mainSec:AddButton({ Name = "Server Hop", Callback = ServerHop })
+    mainSec:AddButton({ Name = "Exit (Unload All)", Callback = function() SafeUnload() end })
+
+    ShowError("AirHub loaded")
+end)
