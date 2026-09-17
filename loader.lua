@@ -1,13 +1,3 @@
---// ============================================================================
---// AirHub Remake — Loader v3 (Local Bypasses + Menu Control + Working Kick Log)
---// ============================================================================
---// Что исправлено:
---//   • Меню РЕАЛЬНО управляет — байпасы выполняются локально, а не из remote URL
---//   • Kick Logger ставится ПОСЛЕ байпасов (не перекрывается их hook'ом)
---//   • Ловит: Player:Kick, Player:Disconnect, PlayerRemoving, Moderator-сообщения,
---//     UI-элементы Adonis, OnClientEvent кик-remotes
---// ============================================================================
-
 local REPO = "https://raw.githubusercontent.com/lolipopins/airhub-remake/main/src/"
 
 local FILES = {
@@ -25,7 +15,7 @@ local FILES = {
 local CONFIG = {
     MENU_TITLE      = "AirHub Loader",
     KICK_LOG_PREFIX = "[AirHub][KICK]",
-    BLOCK_KICK      = true,   -- спуфить кик (true) или пропустить (false)
+    BLOCK_KICK      = true,
     READY_TIMEOUT   = 3,
 }
 
@@ -123,7 +113,7 @@ local RunService        = game:GetService("RunService")
 local LP                = Players.LocalPlayer
 
 --// ============================================================================
---// NAMECALL MANAGER (общий для всех байпасов)
+--// NAMECALL MANAGER
 --// ============================================================================
 local NM = {
     hooked   = false,
@@ -183,7 +173,6 @@ end
 --// KICK REASON LOGGER
 --// ============================================================================
 local KickLogger = {
-    hooked = false,
     events = {},
     max_events = 100,
     installed_sources = {},
@@ -233,7 +222,6 @@ local function callerDebug()
     return ok and info or "?"
 end
 
---// ── Source 1: namecall hook (Kick / Disconnect) ──
 local function installKickNamecallHook()
     if KickLogger.installed_sources.namecall then return true end
     if not NM_Ensure() then return false, "hookmetamethod unavailable" end
@@ -258,7 +246,6 @@ local function installKickNamecallHook()
     return true
 end
 
---// ── Source 2: PlayerRemoving ──
 local function installPlayerRemovingHook()
     if KickLogger.installed_sources.removing then return true end
     safe(function()
@@ -273,7 +260,6 @@ local function installPlayerRemovingHook()
     return KickLogger.installed_sources.removing
 end
 
---// ── Source 3: OnClientEvent кик-remotes ──
 local function installModeratorHook()
     if KickLogger.installed_sources.moderator then return true end
     safe(function()
@@ -281,7 +267,7 @@ local function installModeratorHook()
             if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
                 local n = obj.Name:lower()
                 if n:find("moderator") or n:find("mod message") or n:find("modkick")
-                   or n:find("kick") or n:find("ban") or n:find("adonis") then
+                   or n:find("kick") or n:find("ban") then
                     pcall(function()
                         obj.OnClientEvent:Connect(function(...)
                             local args = { ... }
@@ -303,7 +289,6 @@ local function installModeratorHook()
     return KickLogger.installed_sources.moderator
 end
 
---// ── Source 4: UI-watcher (Adonis Moderator message GUI) ──
 local function installUIWatcher()
     if KickLogger.installed_sources.ui then return true end
     safe(function()
@@ -312,18 +297,17 @@ local function installUIWatcher()
 
         local function checkGui(gui)
             local name = tostring(gui.Name):lower()
-            if name:find("adonis") or name:find("moderator") or name:find("anti kick")
+            if name:find("moderator") or name:find("anti kick")
                or name:find("antikick") or name:find("kick") then
-                -- Вытаскиваем текст из GUI как причину
                 task.wait(0.05)
-                local reason = "Adonis UI"
+                local reason = "Moderator UI"
                 for _, d in ipairs(gui:GetDescendants()) do
                     if d:IsA("TextLabel") and #d.Text > 0 and not d.Text:match("^%s*$") then
                         reason = d.Text
                         break
                     end
                 end
-                logKick(reason, "Adonis GUI", gui.Name, gui:GetFullName())
+                logKick(reason, "Moderator GUI", gui.Name, gui:GetFullName())
                 if CONFIG.BLOCK_KICK then
                     pcall(function() gui:Destroy() end)
                 end
@@ -342,7 +326,6 @@ local function installUIWatcher()
     return KickLogger.installed_sources.ui
 end
 
---// ── Установить всё ──
 local function installAllKickHooks()
     local nc_ok, nc_err = installKickNamecallHook()
     if nc_ok then say(CONFIG.KICK_LOG_PREFIX .. " namecall hook installed")
@@ -356,7 +339,7 @@ local function installAllKickHooks()
 end
 
 --// ============================================================================
---// BYPASS STEPS (локальные, выбираются из меню)
+--// BYPASS STEPS
 --// ============================================================================
 local Steps = {}
 
@@ -525,14 +508,12 @@ end
 
 Steps.namecall = function()
     local ok = NM_Ensure()
-    -- Kick здесь НЕ трогаем — оставлено для Kick Logger (ставится после)
     return ok and "hook installed" or "hookmetamethod unavailable"
 end
 
 Steps.namecall_inst = function()
     if not NM_Ensure() then return "hookmetamethod unavailable" end
     local getmt = getExec("getrawmetatable")
-    local getMethod = getExec("getnamecallmethod")
     local checkC = getExec("checkcaller")
 
     NM_Register("GetDebugId", function(self)
@@ -641,122 +622,6 @@ Steps.anti_detect = function()
     shields += 1
 
     return shields .. " shields"
-end
-
-Steps.adonis_check = function()
-    local env = GENV()
-    local found = false
-    if rawget(env, "Adonis") then found = true end
-    if not found then
-        for _, h in ipairs({ _G, rawget(env, "shared"), shared }) do
-            if type(h) == "table" then
-                for k in pairs(h) do
-                    if type(k) == "string" and k:lower():find("adonis") then
-                        found = true; break
-                    end
-                end
-            end
-            if found then break end
-        end
-    end
-
-    local getmt = getExec("getrawmetatable")
-    local hookf = getExec("hookfunction")
-    local newc = getExec("newcclosure")
-
-    if found and getmt and hookf then
-        safe(function()
-            local orig = getmt
-            local fake = function(obj)
-                local mt = orig(obj)
-                if obj == env.Adonis and type(mt) == "table" then
-                    local c = {}
-                    for k, v in pairs(mt) do c[k] = v end
-                    return c
-                end
-                return mt
-            end
-            if newc then pcall(function() fake = newc(fake) end) end
-            pcall(function() hookf(getmt, fake) end)
-        end)
-    end
-
-    -- Защита ключевых функций от clearing environment
-    local PROT = { "hookmetamethod","getnamecallmethod","newcclosure","checkcaller",
-                   "getrawmetatable","setrawmetatable","hookfunction","getgc",
-                   "getupvalues","setupvalue","getconnections","firetouchinterest" }
-    local saved = {}
-    local g = GENV()
-    for _, k in ipairs(PROT) do saved[k] = rawget(g, k) or rawget(_G, k) end
-    task.spawn(function()
-        while true do
-            task.wait(2)
-            local gg = GENV()
-            for _, k in ipairs(PROT) do
-                if rawget(gg, k) == nil and saved[k] ~= nil then
-                    pcall(function() rawset(gg, k, saved[k]) end)
-                end
-            end
-        end
-    end)
-
-    return "Adonis " .. (found and "detected" or "not found") .. " | env protected"
-end
-
-Steps.adonis_kick = function()
-    if not NM_Ensure() then return "hookmetamethod unavailable" end
-
-    -- Спуф Kick (в общий NM)
-    local spoof = function(self)
-        if type(self) == "Instance" and self:IsA("Player") then
-            return "spoof_kick"
-        end
-    end
-    NM_Register("Kick", spoof)
-    NM_Register("kick", spoof)
-
-    -- Блок Moderator-remotes
-    local mod = {}
-    safe(function()
-        for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-                local n = obj.Name:lower()
-                if n:find("moderator") or n:find("mod message") or n:find("modkick")
-                   or n:find("anti kick") or n:find("antikick")
-                   or n:find("adonis") or n:find("kick") or n:find("ban") then
-                    mod[obj] = true
-                end
-            end
-        end
-    end)
-    local blocked = 0
-    local count = 0
-    for _ in pairs(mod) do count += 1 end
-    if count > 0 then
-        local filter = function(self)
-            if mod[self] then blocked += 1; return "block" end
-        end
-        NM_Register("FireServer", filter)
-        NM_Register("InvokeServer", filter)
-    end
-
-    -- Удаление UI Adonis'а
-    local ui = 0
-    local pg = LP:FindFirstChildOfClass("PlayerGui")
-    if pg then
-        local function clean(child)
-            local n = tostring(child.Name):lower()
-            if n:find("adonis") or n:find("moderator") or n:find("anti kick")
-               or n:find("antikick") or n:find("adonisgui") then
-                pcall(function() child:Destroy() end)
-                ui += 1
-            end
-        end
-        for _, c in ipairs(pg:GetChildren()) do clean(c) end
-        pg.ChildAdded:Connect(function(c) task.wait(0.1); clean(c) end)
-    end
-
-    return string.format("kick spoofed | %d mod-remotes blocked | %d UIs removed", count, ui)
 end
 
 Steps.sandbox = function()
@@ -873,8 +738,6 @@ local BYPASS_OPTIONS = {
     { id = "namecall",      label = "Namecall Bypass",         default = true },
     { id = "namecall_inst", label = "NamecallInstance Bypass", default = true },
     { id = "anti_detect",   label = "Anti-Detection Shield",   default = true },
-    { id = "adonis_check",  label = "Adonis ClientCheck",      default = true },
-    { id = "adonis_kick",   label = "Adonis Anti-Kick (0x4)",  default = true },
     { id = "sandbox",       label = "Sandbox Bypass",          default = true },
     { id = "debug",         label = "Debug Library Bypass",    default = true },
     { id = "coroutine",     label = "Coroutine Bypass",        default = true },
@@ -902,8 +765,8 @@ local function buildMenu(onInject, onCancel)
     end
 
     local frame = Instance.new("Frame", gui)
-    frame.Size = UDim2.new(0, 460, 0, 620)
-    frame.Position = UDim2.new(0.5, -230, 0.5, -310)
+    frame.Size = UDim2.new(0, 460, 0, 580)
+    frame.Position = UDim2.new(0.5, -230, 0.5, -290)
     frame.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
     frame.BorderSizePixel = 0
     Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
@@ -1080,7 +943,6 @@ local function runSelectedBypasses(cfg)
     local ok_count, skip_count = 0, 0
     local total = #BYPASS_OPTIONS
 
-    -- Упорядоченный список (в порядке BYPASS_OPTIONS)
     for i, opt in ipairs(BYPASS_OPTIONS) do
         if opt.id ~= "kick_logger" then
             if cfg[opt.id] then
@@ -1143,15 +1005,12 @@ local function startFlow()
         destroyMenu()
         say("[AirHub] user config applied")
 
-        -- 1) Локальные байпасы по выбору
         runSelectedBypasses(cfg)
 
-        -- 2) Kick Logger — ПОСЛЕ байпасов, чтобы наш хук был верхним
         if cfg.kick_logger then
             installAllKickHooks()
         end
 
-        -- 3) Грузим AirHub
         tick()
         loadAllModules()
     end, function()
@@ -1160,7 +1019,6 @@ local function startFlow()
     end)
 end
 
---// Публичный API
 pcall(function()
     GENV().AirHubLoader = {
         getKickHistory = function() return KickLogger.events end,
