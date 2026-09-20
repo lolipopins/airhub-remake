@@ -1,6 +1,6 @@
 --// ============================================================================
 --// AirHub — 03_antiaim.lua
---// Anti-Aim (body) + Desync (client-side) + Spoof Animations.
+--// Anti-Aim (body) + Desync (client-side).
 --// Desync modes: Default / OldPosition / Void / InPlayer
 --// ============================================================================
 local H = getgenv().AirHub
@@ -72,23 +72,6 @@ H.AntiAim = {
         AngularVelocity   = nil,
         CurrentMotor      = nil,
         OriginalC0        = nil,
-    },
-    SpoofAnim = {
-        Settings = {
-            Enabled      = false,
-            AnimationId  = "rbxassetid://0",
-            Speed        = 1,
-            Looped       = true,
-            StopOnMove   = false,
-            Priority     = "Action",
-        },
-        Internal = {
-            Track    = nil,
-            Anim     = nil,
-            LoadedId = nil,
-            Conn     = nil,
-        },
-        Functions = {},
     },
 }
 local AntiAim = H.AntiAim
@@ -500,124 +483,6 @@ RunService:BindToRenderStep(AA_BIND_NAME, 201, function()
 end)
 
 --// ---------------------------------------------------------------------------
---// Spoof Animations
---// ---------------------------------------------------------------------------
-local function StopSpoofAnimInternal()
-    local SA = AntiAim.SpoofAnim
-    if SA.Internal.Track then
-        pcall(function() SA.Internal.Track:Stop() end)
-        SA.Internal.Track = nil
-    end
-    if SA.Internal.Anim then
-        pcall(function() SA.Internal.Anim:Destroy() end)
-        SA.Internal.Anim = nil
-    end
-    SA.Internal.LoadedId = nil
-    if SA.Internal.Conn then
-        pcall(function() SA.Internal.Conn:Disconnect() end)
-        SA.Internal.Conn = nil
-    end
-end
-
-local function GetAnimator()
-    local char = LocalPlayer.Character
-    if not char then return nil end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum then return nil end
-    local animator = hum:FindFirstChildOfClass("Animator")
-    if not animator then
-        animator = Instance.new("Animator")
-        animator.Parent = hum
-    end
-    return animator
-end
-
-local function PlaySpoofAnim()
-    local SA = AntiAim.SpoofAnim
-    local S  = SA.Settings
-    if not S.Enabled then return end
-
-    local animator = GetAnimator()
-    if not animator then return end
-
-    local id = S.AnimationId
-    if not id or id == "" then return end
-
-    if SA.Internal.LoadedId ~= id then
-        if SA.Internal.Track then
-            pcall(function() SA.Internal.Track:Stop() end)
-            SA.Internal.Track = nil
-        end
-        if SA.Internal.Anim then
-            pcall(function() SA.Internal.Anim:Destroy() end)
-            SA.Internal.Anim = nil
-        end
-
-        local anim = Instance.new("Animation")
-        anim.AnimationId = id
-        local ok, track = pcall(function() return animator:LoadAnimation(anim) end)
-        if not ok or not track then
-            anim:Destroy()
-            return
-        end
-        SA.Internal.Anim = anim
-        SA.Internal.Track = track
-        SA.Internal.LoadedId = id
-    end
-
-    local track = SA.Internal.Track
-    if not track then return end
-
-    track.Looped = S.Looped and true or false
-    local prio = Enum.AnimationPriority[S.Priority or "Action"] or Enum.AnimationPriority.Action
-    pcall(function() track.Priority = prio end)
-    local spd = tonumber(S.Speed) or 1
-    pcall(function() track:AdjustSpeed(spd) end)
-    if not track.IsPlaying then
-        pcall(function() track:Play(0.1, 1, spd) end)
-    end
-
-    if S.StopOnMove then
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if hum and hum.MoveDirection.Magnitude > 0.05 then
-            pcall(function() track:Stop() end)
-        end
-    end
-end
-
-AntiAim.SpoofAnim.Functions.Start = function()
-    local SA = AntiAim.SpoofAnim
-    if SA.Internal.Conn then return end
-    PlaySpoofAnim()
-    SA.Internal.Conn = RunService.Heartbeat:Connect(function()
-        if H.ShuttingDown then return end
-        if not SA.Settings.Enabled then return end
-        PlaySpoofAnim()
-    end)
-end
-
-AntiAim.SpoofAnim.Functions.Stop = function()
-    StopSpoofAnimInternal()
-end
-
-AntiAim.SpoofAnim.Functions.Restart = function()
-    StopSpoofAnimInternal()
-    if AntiAim.SpoofAnim.Settings.Enabled then
-        AntiAim.SpoofAnim.Functions.Start()
-    end
-end
-
---// Stop spoof anim on character respawn
-Track(LocalPlayer.CharacterAdded:Connect(function()
-    task.wait(0.5)
-    if H.ShuttingDown then return end
-    if AntiAim.SpoofAnim.Settings.Enabled then
-        AntiAim.SpoofAnim.Functions.Restart()
-    end
-end))
-
---// ---------------------------------------------------------------------------
 --// Public functions
 --// ---------------------------------------------------------------------------
 AntiAim.Functions = {
@@ -661,15 +526,6 @@ AntiAim.Functions = {
         AntiAim.Desync.Internal.OldPosTimer     = 0
         AntiAim.Desync.Internal.PendingRefresh  = false
         AntiAim.Desync.Internal.RotAcc          = 0
-        AntiAim.SpoofAnim.Settings = {
-            Enabled = false,
-            AnimationId = "rbxassetid://0",
-            Speed = 1,
-            Looped = true,
-            StopOnMove = false,
-            Priority = "Action",
-        }
-        StopSpoofAnimInternal()
         CleanupAntiAim()
         StopDesync()
     end,
