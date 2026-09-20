@@ -1,8 +1,7 @@
 --// ============================================================================
 --// AirHub — 03_antiaim.lua
---// Anti-Aim (body) + Desync (client-side).
+--// Anti-Aim (body) + Desync (client-side) + Spoof Animations.
 --// Desync modes: Default / OldPosition / Void / InPlayer
---// Body settings: unified Amount + Speed (used by all modes)
 --// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 03_antiaim: core not loaded") return end
@@ -22,32 +21,28 @@ H.AntiAim = {
         Method  = "CFrame",
         Body = {
             Reference          = "Camera",
-            Yaw                = 0,       -- base yaw offset applied to all modes
-            Amount             = 15,      -- magnitude (Static yaw / Spin max / Jitter / Sway)
-            Speed              = 5,       -- speed for Spin/Jitter/Sway
+            Yaw                = 0,
+            Amount             = 15,       -- any number (textbox in UI)
+            Speed              = 5,        -- any number (textbox in UI)
             IgnoreMoving       = false,
             MoveSpeedThreshold = 0.5,
         },
     },
     Desync = {
         Settings = {
-            Enabled        = false,
-            Mode           = "Default",   -- Default / OldPosition / Void / InPlayer
-            --// Default mode position
-            X              = 5,
-            Y              = 5,
-            Z              = 5,
-            Random         = false,
-            UpdateInterval = 0.05,
-            --// OldPosition mode
-            OldPosDelay    = 0.5,
-            --// Void mode
-            VoidDepth      = -1000,
-            --// InPlayer mode
-            InPlayerOffset = 2,           -- extra studs offset behind target
-            --// Shared
-            RefreshOnShot  = false,
-            RandomRotate   = false,       -- instant random pitch/yaw/roll on interval
+            Enabled            = false,
+            Mode               = "Default",   -- Default / OldPosition / Void / InPlayer
+            X                  = 5,
+            Y                  = 5,
+            Z                  = 5,
+            Random             = false,
+            UpdateInterval     = 0.05,
+            OldPosDelayEnabled = true,        -- NEW
+            OldPosDelay        = 0.5,
+            VoidDepth          = -1000,
+            InPlayerOffset     = 2,
+            RefreshOnShot      = false,
+            RandomRotate       = false,
         },
         Internal = {
             Connection       = nil,
@@ -61,7 +56,6 @@ H.AntiAim = {
             RealRotVelocity  = nil,
             OldPosTimer      = 0,
             PendingRefresh   = false,
-            --// RandomRotate state
             RotAcc           = 0,
             RotPitch         = 0,
             RotYaw           = 0,
@@ -78,6 +72,23 @@ H.AntiAim = {
         AngularVelocity   = nil,
         CurrentMotor      = nil,
         OriginalC0        = nil,
+    },
+    SpoofAnim = {
+        Settings = {
+            Enabled      = false,
+            AnimationId  = "rbxassetid://0",
+            Speed        = 1,
+            Looped       = true,
+            StopOnMove   = false,
+            Priority     = "Action",
+        },
+        Internal = {
+            Track   = nil,
+            Anim    = nil,
+            LoadedId = nil,
+            Conn    = nil,
+        },
+        Functions = {},
     },
 }
 local AntiAim = H.AntiAim
@@ -130,7 +141,6 @@ local function BuildDefaultOffset(settings)
     return Vector3.new(X, Y, Z)
 end
 
---// Find nearest live player's HumanoidRootPart (excluding self)
 local function GetNearestPlayerHRP(myPos)
     if not myPos then return nil end
     local nearest, nearestDist = nil, math.huge
@@ -209,12 +219,15 @@ local function StartDesync()
                 desync.Internal.OldPosTimer = 0
             end
 
-            local delay = tonumber(S.OldPosDelay) or 0.5
-            if delay < 0.01 then delay = 0.01 end
-            desync.Internal.OldPosTimer = desync.Internal.OldPosTimer + dt
-            if desync.Internal.OldPosTimer >= delay then
-                desync.Internal.SavedCFrame = oldcf
-                desync.Internal.OldPosTimer = 0
+            --// Only re-capture position if OldPosDelay is enabled
+            if S.OldPosDelayEnabled then
+                local delay = tonumber(S.OldPosDelay) or 0.5
+                if delay < 0.01 then delay = 0.01 end
+                desync.Internal.OldPosTimer = desync.Internal.OldPosTimer + dt
+                if desync.Internal.OldPosTimer >= delay then
+                    desync.Internal.SavedCFrame = oldcf
+                    desync.Internal.OldPosTimer = 0
+                end
             end
 
             targetCF = desync.Internal.SavedCFrame
@@ -225,12 +238,10 @@ local function StartDesync()
             targetCF = CFrame.new(oldcf.X, voidY, oldcf.Z)
 
         --// ===================== InPlayer ============================
-        --// Teleport desync onto the nearest live player.
         elseif mode == "InPlayer" then
             local targetHrp = GetNearestPlayerHRP(oldcf.Position)
             if targetHrp then
                 local offset = tonumber(S.InPlayerOffset) or 0
-                -- offset behind them based on their look direction
                 local look = targetHrp.CFrame.LookVector
                 local flatLook = Vector3.new(look.X, 0, look.Z)
                 if flatLook.Magnitude < 0.001 then
@@ -252,8 +263,7 @@ local function StartDesync()
             targetCF = oldcf * CFrame.new(desync.Internal.TargetOffset)
         end
 
-        --// ===================== RandomRotate ========================
-        --// Instant random pitch/yaw/roll applied on interval to any mode.
+        --// RandomRotate
         if S.RandomRotate then
             desync.Internal.RotAcc = desync.Internal.RotAcc + dt
             if desync.Internal.RotAcc >= interval then
@@ -282,7 +292,6 @@ end
 local function StopDesync()
     local desync = AntiAim.Desync
 
-    --// STEP 1: restore real client CFrame
     local hrp = GetCurrentHRP()
     if hrp then
         local realCF = desync.Internal.RealCFrame
@@ -374,9 +383,10 @@ local function ApplyAntiAim()
 
     if shouldApply then
         local baseYaw = GetBaseYaw(bodySet.Reference, char)
-        local amount  = math.clamp(tonumber(bodySet.Amount) or 15, 0, 180)
-        local speed   = math.max(tonumber(bodySet.Speed) or 5, 0.1)
-        local yaw     = 0
+        local amount  = tonumber(bodySet.Amount) or 15
+        local speed   = tonumber(bodySet.Speed) or 5
+        if speed <= 0 then speed = 0.01 end
+        local yaw = 0
 
         if mode == "Static" then
             yaw = baseYaw + math.rad(bodySet.Yaw + amount)
@@ -491,6 +501,126 @@ RunService:BindToRenderStep(AA_BIND_NAME, 201, function()
 end)
 
 --// ---------------------------------------------------------------------------
+--// Spoof Animations
+--// ---------------------------------------------------------------------------
+local function StopSpoofAnimInternal()
+    local SA = AntiAim.SpoofAnim
+    if SA.Internal.Track then
+        pcall(function() SA.Internal.Track:Stop() end)
+        SA.Internal.Track = nil
+    end
+    if SA.Internal.Anim then
+        pcall(function() SA.Internal.Anim:Destroy() end)
+        SA.Internal.Anim = nil
+    end
+    SA.Internal.LoadedId = nil
+    if SA.Internal.Conn then
+        pcall(function() SA.Internal.Conn:Disconnect() end)
+        SA.Internal.Conn = nil
+    end
+end
+
+local function GetAnimator()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return nil end
+    local animator = hum:FindFirstChildOfClass("Animator")
+    if not animator then
+        animator = Instance.new("Animator")
+        animator.Parent = hum
+    end
+    return animator
+end
+
+local function PlaySpoofAnim()
+    local SA = AntiAim.SpoofAnim
+    local S  = SA.Settings
+    if not S.Enabled then return end
+
+    local animator = GetAnimator()
+    if not animator then return end
+
+    local id = S.AnimationId
+    if not id or id == "" then return end
+
+    --// Load new animation if changed
+    if SA.Internal.LoadedId ~= id then
+        if SA.Internal.Track then
+            pcall(function() SA.Internal.Track:Stop() end)
+            SA.Internal.Track = nil
+        end
+        if SA.Internal.Anim then
+            pcall(function() SA.Internal.Anim:Destroy() end)
+            SA.Internal.Anim = nil
+        end
+
+        local anim = Instance.new("Animation")
+        anim.AnimationId = id
+        local ok, track = pcall(function() return animator:LoadAnimation(anim) end)
+        if not ok or not track then
+            anim:Destroy()
+            return
+        end
+        SA.Internal.Anim = anim
+        SA.Internal.Track = track
+        SA.Internal.LoadedId = id
+    end
+
+    local track = SA.Internal.Track
+    if not track then return end
+
+    track.Looped = S.Looped and true or false
+    local prio = Enum.AnimationPriority[S.Priority or "Action"] or Enum.AnimationPriority.Action
+    pcall(function() track.Priority = prio end)
+    local spd = tonumber(S.Speed) or 1
+    pcall(function() track:AdjustSpeed(spd) end)
+    if not track.IsPlaying then
+        pcall(function() track:Play(0.1, 1, spd) end)
+    end
+
+    --// Stop on move
+    if S.StopOnMove then
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum and hum.MoveDirection.Magnitude > 0.05 then
+            pcall(function() track:Stop() end)
+        end
+    end
+end
+
+AntiAim.SpoofAnim.Functions.Start = function()
+    local SA = AntiAim.SpoofAnim
+    if SA.Internal.Conn then return end
+    PlaySpoofAnim()
+    SA.Internal.Conn = RunService.Heartbeat:Connect(function()
+        if H.ShuttingDown then return end
+        if not SA.Settings.Enabled then return end
+        PlaySpoofAnim()
+    end)
+end
+
+AntiAim.SpoofAnim.Functions.Stop = function()
+    StopSpoofAnimInternal()
+end
+
+AntiAim.SpoofAnim.Functions.Restart = function()
+    StopSpoofAnimInternal()
+    if AntiAim.SpoofAnim.Settings.Enabled then
+        AntiAim.SpoofAnim.Functions.Start()
+    end
+end
+
+--// Stop spoof anim on character respawn
+Track(LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    if H.ShuttingDown then return end
+    if AntiAim.SpoofAnim.Settings.Enabled then
+        AntiAim.SpoofAnim.Functions.Restart()
+    end
+end))
+
+--// ---------------------------------------------------------------------------
 --// Public functions
 --// ---------------------------------------------------------------------------
 AntiAim.Functions = {
@@ -514,6 +644,7 @@ AntiAim.Functions = {
             X = 5, Y = 5, Z = 5,
             Random = false,
             UpdateInterval = 0.05,
+            OldPosDelayEnabled = true,
             OldPosDelay = 0.5,
             VoidDepth = -1000,
             InPlayerOffset = 2,
@@ -533,6 +664,15 @@ AntiAim.Functions = {
         AntiAim.Desync.Internal.OldPosTimer     = 0
         AntiAim.Desync.Internal.PendingRefresh  = false
         AntiAim.Desync.Internal.RotAcc          = 0
+        AntiAim.SpoofAnim.Settings = {
+            Enabled = false,
+            AnimationId = "rbxassetid://0",
+            Speed = 1,
+            Looped = true,
+            StopOnMove = false,
+            Priority = "Action",
+        }
+        StopSpoofAnimInternal()
         CleanupAntiAim()
         StopDesync()
     end,
