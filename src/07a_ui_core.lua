@@ -94,7 +94,7 @@ local function ApplyAllEnabledStates()
         end
     end
 
-    --// Spoof Anim restore
+    --// Spoof Anim restore (module exists, no UI tab)
     if Hg.AntiAim and Hg.AntiAim.SpoofAnim and Hg.AntiAim.SpoofAnim.Functions then
         if Hg.AntiAim.SpoofAnim.Settings.Enabled then
             Hg.AntiAim.SpoofAnim.Functions.Start()
@@ -250,7 +250,6 @@ task.delay(math.random(1, 3), function()
     H._UI.AimbotTab    = MainFrame:CreateTab({ Name = "Aimbot" })
     H._UI.VisualsTab   = MainFrame:CreateTab({ Name = "Visuals" })
     H._UI.AntiTab      = MainFrame:CreateTab({ Name = "Anti-Aim" })
-    H._UI.SpoofAnimTab = MainFrame:CreateTab({ Name = "Spoof Anims" })
     H._UI.MovementTab  = MainFrame:CreateTab({ Name = "Movement" })
     H._UI.WorldTab     = MainFrame:CreateTab({ Name = "World" })
     H._UI.ExploitsTab  = MainFrame:CreateTab({ Name = "Exploits" })
