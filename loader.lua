@@ -1,11 +1,9 @@
 --// Features:
---//   • Supports FIVE AirHub versions:
---//         - Full     (lolipopins modular, 12 files from /src/)
---//         - Lite     (lolipopins single-file)
---//         - Legacy   (lolipopins single-file, archived)
---//         - Original V2 (Exunys official V2, single-file)
---//         - Original    (Exunys official V1, single-file)
---//   • Version picker in the menu (5 buttons, wraps into 2 rows)
+--//   • Supports FIVE AirHub versions (Full / Lite / Legacy / Original V2 / Original)
+--//   • LOCAL PRIORITY: читает файлы из workspace (AirHub/src/...) если они есть,
+--//     иначе качает по HTTP с GitHub. Так можно править модули локально
+--//     без форка репозитория.
+--//   • Version picker in the menu (5 buttons)
 --//   • Kick Logger with reason-change detection
 --//   • All bypasses embedded, selectable from menu (OFF by default)
 --// ============================================================================
@@ -37,6 +35,7 @@ local AIRHUB_VERSIONS = {
         description = "Single-file, GUI bypass, no config system",
         type        = "single",
         url         = "https://raw.githubusercontent.com/lolipopins/airhub-remake/refs/heads/main/airhub%20lite",
+        localPath   = "airhub lite.lua",
     },
     legacy = {
         id          = "legacy",
@@ -44,6 +43,7 @@ local AIRHUB_VERSIONS = {
         description = "Single-file, archived (no updates)",
         type        = "single",
         url         = "https://raw.githubusercontent.com/lolipopins/airhub-remake/refs/heads/main/airhub%20legacy",
+        localPath   = "airhub legacy.lua",
     },
     original_v2 = {
         id          = "original_v2",
@@ -51,6 +51,7 @@ local AIRHUB_VERSIONS = {
         description = "Exunys official V2 (Aimbot + ESP + Crosshair)",
         type        = "single",
         url         = "https://raw.githubusercontent.com/Exunys/AirHub-V2/main/src/Main.lua",
+        localPath   = "original_v2.lua",
     },
     original = {
         id          = "original",
@@ -58,11 +59,26 @@ local AIRHUB_VERSIONS = {
         description = "Exunys official V1 (Aimbot + WallHack)",
         type        = "single",
         url         = "https://raw.githubusercontent.com/Exunys/AirHub/main/AirHub.lua",
+        localPath   = "original.lua",
     },
 }
 
---// Ordered list for UI (5 items - row 1: full, lite, legacy  |  row 2: original_v2, original)
+--// Порядок в UI (5 items - row 1: full, lite, legacy | row 2: original_v2, original)
 local AIRHUB_VERSION_ORDER = { "full", "lite", "legacy", "original_v2", "original" }
+
+--// Пробуем эти пути по порядку для локальных модулей и single-file версий.
+--// Первый существующий файл побеждает. Если ничего нет — идём в HTTP.
+local LOCAL_DIRS_MODULES = {
+    "AirHub/src/",
+    "airhub/src/",
+    "src/",
+    "",
+}
+local LOCAL_DIRS_SINGLE = {
+    "AirHub/",
+    "airhub/",
+    "",
+}
 
 local CONFIG = {
     MENU_TITLE      = "AirHub Loader",
@@ -113,6 +129,8 @@ local function safe(fn, ...)
     return true, table.unpack(r, 2, r.n)
 end
 
+--// ---- File sources ---------------------------------------------------------
+
 local function httpGet(url)
     local methods = {
         function() if type(HttpGet) == "function" then return HttpGet(url) end end,
@@ -142,6 +160,21 @@ local function httpGet(url)
         if ok and type(res) == "string" and #res > 0 then return res end
     end
     return nil
+end
+
+--// Пробуем прочитать локальный файл по списку директорий. Возвращает
+--// (content, fullPath) или (nil, nil) если ничего не нашли.
+local function tryReadLocal(filename, dirs)
+    if type(readfile) ~= "function" then return nil, nil end
+    if type(filename) ~= "string" or filename == "" then return nil, nil end
+    for _, dir in ipairs(dirs) do
+        local path = dir .. filename
+        local ok, content = pcall(readfile, path)
+        if ok and type(content) == "string" and #content > 0 then
+            return content, path
+        end
+    end
+    return nil, nil
 end
 
 local function compile(src, name)
@@ -221,7 +254,7 @@ local function NM_Register(method, handler)
 end
 
 --// ============================================================================
---// KICK REASON LOGGER (with change detection)
+--// KICK REASON LOGGER
 --// ============================================================================
 local KickLogger = {
     events = {},
@@ -636,9 +669,6 @@ Steps.namecall = function()
     return ok and "hook installed" or "hookmetamethod unavailable"
 end
 
---// FIXED: previously this step blocked GetFullName/IsDescendantOf/GetPropertyChangedSignal
---// for ANY non-executor call, which broke engine-internal code every frame.
---// Now it only blocks calls targeting the LocalPlayer instance.
 Steps.namecall_inst = function()
     if not NM_Ensure() then return "hookmetamethod unavailable" end
     local getmt   = getExec("getrawmetatable")
@@ -671,9 +701,6 @@ Steps.namecall_inst = function()
         mtVerified and "verified" or "unverified")
 end
 
---// FIXED: previously this step installed a rate-limiter that blocked
---// FindFirstChild/IsDescendantOf/GetFullName after 50 calls/sec, which broke
---// the entire engine. The probe has been removed.
 Steps.anti_detect = function()
     if not NM.hooked then return "hook not installed - skip" end
     local shields = 0
@@ -788,7 +815,6 @@ Steps.thread_detect = function()
     return scanned .. " connections"
 end
 
---// FIXED: previously returned `nil` instead of "block", so the bypass was a no-op.
 Steps.rate_limit = function()
     local remotes = {}
     safe(function()
@@ -843,7 +869,6 @@ end
 --// ============================================================================
 --// MENU
 --// ============================================================================
---// ВАЖНО: все обходы античита по умолчанию ВЫКЛЮЧЕНЫ (default = false)
 local BYPASS_OPTIONS = {
     { id = "metamethod",    label = "Metamethod Bypass",       default = false },
     { id = "handshake",     label = "Handshake Bypass",        default = false },
@@ -1156,20 +1181,44 @@ end
 --// ============================================================================
 --// AIRHUB LOADERS
 --// ============================================================================
-local function loadSingleFile(url, name)
-    local src = httpGet(url)
-    if not src then return false, "download failed" end
-    local chunk, err = compile(src, name or "airhub_single")
-    if not chunk then return false, "compile: " .. tostring(err) end
+local function loadSingleFile(url, name, localFileName, localDirs)
+    local src, source
+
+    --// 1) Try LOCAL first (readfile in workspace)
+    if localFileName then
+        local localSrc, localPath = tryReadLocal(localFileName, localDirs or LOCAL_DIRS_MODULES)
+        if localSrc then
+            src = localSrc
+            source = "LOCAL:" .. localPath
+        end
+    end
+
+    --// 2) Fall back to HTTP
+    if not src then
+        src = httpGet(url)
+        source = "HTTP:" .. tostring(url)
+    end
+
+    if not src then return false, "no source (local + http both failed)" end
+
+    local chunk, err = compile(src, name or "airhub_file")
+    if not chunk then return false, "compile [" .. source .. "]: " .. tostring(err) end
     local ok, rerr = pcall(chunk)
-    if not ok then return false, "runtime: " .. tostring(rerr) end
+    if not ok then return false, "runtime [" .. source .. "]: " .. tostring(rerr) end
+
+    say("[AirHub]  loaded " .. tostring(name) .. "  ←  " .. source)
     return true
 end
 
 local function loadModularVersion(version)
     local loaded, failed = 0, 0
     for _, file in ipairs(version.files) do
-        local ok, err = loadSingleFile(version.repo .. file, file)
+        local ok, err = loadSingleFile(
+            version.repo .. file,   -- HTTP url
+            file,                   -- chunk name
+            file,                   -- local filename ("02_aimbot.lua")
+            LOCAL_DIRS_MODULES
+        )
         if ok then
             loaded += 1
         else
@@ -1199,7 +1248,12 @@ local function loadAirHub(versionId)
     if v.type == "modules" then
         loadModularVersion(v)
     elseif v.type == "single" then
-        local ok, err = loadSingleFile(v.url, "airhub_" .. v.id)
+        local ok, err = loadSingleFile(
+            v.url,
+            "airhub_" .. v.id,
+            v.localPath,          -- e.g. "airhub lite.lua"
+            LOCAL_DIRS_SINGLE
+        )
         if ok then
             say(string.format("[AirHub] %s loaded successfully", v.label))
         else
