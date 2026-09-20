@@ -1,5 +1,5 @@
 --// AirHub - 07b_ui_tabs.lua
---// Visuals, Anti-Aim (Body + Desync + Spoof Anims), Movement, Settings tabs.
+--// Visuals, Anti-Aim (Body + Desync), Movement, Settings tabs.
 
 local H = getgenv().AirHub
 if not H or not H._UI then warn("[AirHub] 07b: 07a not loaded"); return end
@@ -229,13 +229,12 @@ task.spawn(function()
         Callback = function(v) ServerPosition.Settings.MaxLimb = v end })
 
     --// =====================================================================
-    --// ANTI-AIM TAB  (Body + Desync + Spoof Animations)
+    --// ANTI-AIM TAB  (Body + Desync only)
     --// =====================================================================
-    local aaModes        = { "Static", "Spin", "Jitter", "Sway" }
-    local refModes       = { "Camera", "Movement", "Player" }
-    local aaMethods      = { "CFrame", "BodyGyro", "Motor6D", "AlignOrientation", "AngularVelocity" }
-    local desyncModes    = { "Default", "OldPosition", "Void", "InPlayer" }
-    local animPriorities = { "Core", "Idle", "Movement", "Action", "Action2", "Action3", "Action4" }
+    local aaModes     = { "Static", "Spin", "Jitter", "Sway" }
+    local refModes    = { "Camera", "Movement", "Player" }
+    local aaMethods   = { "CFrame", "BodyGyro", "Motor6D", "AlignOrientation", "AngularVelocity" }
+    local desyncModes = { "Default", "OldPosition", "Void", "InPlayer" }
 
     --// LEFT: Body
     local aaMain = AntiTab:CreateSection({ Name = "Body (Server)" })
@@ -317,165 +316,6 @@ task.spawn(function()
             local ok = AntiAim.Functions.SaveOldPosition()
             if ok then ShowError("Old position saved") else ShowError("No character") end
         end })
-
-    --// SPOOF ANIMATIONS (below Body + Desync in Anti-Aim tab)
-    local saMain = AntiTab:CreateSection({ Name = "Spoof Animation" })
-    saMain:AddToggle({ Name = "Enabled", Value = AntiAim.SpoofAnim.Settings.Enabled,
-        Callback = function(v)
-            AntiAim.SpoofAnim.Settings.Enabled = v
-            if v then AntiAim.SpoofAnim.Functions.Start() else AntiAim.SpoofAnim.Functions.Stop() end
-        end })
-    local animIdBox = saMain:AddTextbox({
-        Name = "Animation ID",
-        Value = AntiAim.SpoofAnim.Settings.AnimationId,
-        Callback = function(v)
-            AntiAim.SpoofAnim.Settings.AnimationId = v
-            AntiAim.SpoofAnim.Functions.Restart()
-        end,
-    })
-    saMain:AddButton({ Name = "Play Spoof",
-        Callback = function()
-            AntiAim.SpoofAnim.Functions.Restart()
-            ShowError("Spoof animation reloaded")
-        end })
-    saMain:AddButton({ Name = "Stop Spoof",
-        Callback = function()
-            AntiAim.SpoofAnim.Functions.Stop()
-            ShowError("Spoof animation stopped")
-        end })
-    saMain:AddTextbox({ Name = "Speed (any number)", Value = tostring(AntiAim.SpoofAnim.Settings.Speed),
-        Callback = function(v)
-            local n = tonumber(v)
-            if n then
-                AntiAim.SpoofAnim.Settings.Speed = n
-                AntiAim.SpoofAnim.Functions.Restart()
-            end
-        end })
-    saMain:AddToggle({ Name = "Looped", Value = AntiAim.SpoofAnim.Settings.Looped,
-        Callback = function(v)
-            AntiAim.SpoofAnim.Settings.Looped = v
-            local tr = AntiAim.SpoofAnim.Internal.Track
-            if tr then pcall(function() tr.Looped = v end) end
-        end })
-    saMain:AddToggle({ Name = "Stop when moving", Value = AntiAim.SpoofAnim.Settings.StopOnMove,
-        Callback = function(v) AntiAim.SpoofAnim.Settings.StopOnMove = v end })
-    saMain:AddDropdown({ Name = "Priority", Value = AntiAim.SpoofAnim.Settings.Priority, List = animPriorities,
-        Callback = function(v)
-            AntiAim.SpoofAnim.Settings.Priority = v
-            AntiAim.SpoofAnim.Functions.Restart()
-        end })
-
-    --// Anim Presets (right column, same tab)
-    local saPresets = AntiTab:CreateSection({ Name = "Anim Presets", Side = "Right" })
-
-    --// Core Movements (R15) — dropdown
-    local coreR15 = {
-        ["Idle"]     = "rbxassetid://507766388",
-        ["Walk"]     = "rbxassetid://507777826",
-        ["Run"]      = "rbxassetid://507767714",
-        ["Jump"]     = "rbxassetid://507765000",
-        ["Fall"]     = "rbxassetid://507767968",
-        ["Climb"]    = "rbxassetid://507765644",
-        ["Swim"]     = "rbxassetid://507784897",
-        ["SwimIdle"] = "rbxassetid://507785072",
-        ["Sit"]      = "rbxassetid://2506281703",
-    }
-    saPresets:AddDropdown({
-        Name = "Core Movements (R15)",
-        Value = "Idle",
-        List = { "Idle", "Walk", "Run", "Jump", "Fall", "Climb", "Swim", "SwimIdle", "Sit" },
-        Callback = function(v)
-            local id = coreR15[v]
-            if not id then return end
-            AntiAim.SpoofAnim.Settings.AnimationId = id
-            if animIdBox and type(animIdBox.Set) == "function" then
-                pcall(function() animIdBox:Set(id) end)
-            end
-            AntiAim.SpoofAnim.Functions.Restart()
-            ShowError("Loaded: " .. v)
-        end,
-    })
-
-    --// Core Movements (R6) — dropdown
-    local coreR6 = {
-        ["Idle"]  = "rbxassetid://180435571",
-        ["Walk"]  = "rbxassetid://180426354",
-        ["Run"]   = "rbxassetid://180426354",
-        ["Jump"]  = "rbxassetid://125750702",
-        ["Fall"]  = "rbxassetid://180436148",
-        ["Climb"] = "rbxassetid://180436334",
-        ["Sit"]   = "rbxassetid://178130996",
-    }
-    saPresets:AddDropdown({
-        Name = "Core Movements (R6)",
-        Value = "Idle",
-        List = { "Idle", "Walk", "Run", "Jump", "Fall", "Climb", "Sit" },
-        Callback = function(v)
-            local id = coreR6[v]
-            if not id then return end
-            AntiAim.SpoofAnim.Settings.AnimationId = id
-            if animIdBox and type(animIdBox.Set) == "function" then
-                pcall(function() animIdBox:Set(id) end)
-            end
-            AntiAim.SpoofAnim.Functions.Restart()
-            ShowError("Loaded: " .. v)
-        end,
-    })
-
-    --// Emotes (R15)
-    local EMOTES = {
-        { name = "Wave",       id = "rbxassetid://507770239" },
-        { name = "Point",      id = "rbxassetid://507770453" },
-        { name = "Cheer",      id = "rbxassetid://507770677" },
-        { name = "Laugh",      id = "rbxassetid://507770818" },
-        { name = "Dance",      id = "rbxassetid://507771019" },
-        { name = "Dance 2",    id = "rbxassetid://507776043" },
-        { name = "Dance 3",    id = "rbxassetid://507776720" },
-        { name = "Salute",     id = "rbxassetid://3360689775" },
-        { name = "Shrug",      id = "rbxassetid://3334392772" },
-        { name = "Bow",        id = "rbxassetid://507770186" },
-        { name = "Cry",        id = "rbxassetid://507770643" },
-        { name = "Facepalm",   id = "rbxassetid://507770903" },
-        { name = "Thumbs Up",  id = "rbxassetid://507770538" },
-        { name = "Floss",      id = "rbxassetid://10407164740" },
-        { name = "Dab",        id = "rbxassetid://4673728251" },
-    }
-
-    local emoteNames = {}
-    for _, e in ipairs(EMOTES) do table.insert(emoteNames, e.name) end
-
-    saPresets:AddDropdown({
-        Name = "Emotes (R15)",
-        Value = "Wave",
-        List = emoteNames,
-        Callback = function(v)
-            for _, e in ipairs(EMOTES) do
-                if e.name == v then
-                    AntiAim.SpoofAnim.Settings.AnimationId = e.id
-                    if animIdBox and type(animIdBox.Set) == "function" then
-                        pcall(function() animIdBox:Set(e.id) end)
-                    end
-                    AntiAim.SpoofAnim.Functions.Restart()
-                    ShowError("Loaded: " .. v)
-                    return
-                end
-            end
-        end,
-    })
-
-    --// Random emote button
-    saPresets:AddButton({
-        Name = "Random Emote",
-        Callback = function()
-            local pick = EMOTES[math.random(1, #EMOTES)]
-            AntiAim.SpoofAnim.Settings.AnimationId = pick.id
-            if animIdBox and type(animIdBox.Set) == "function" then
-                pcall(function() animIdBox:Set(pick.id) end)
-            end
-            AntiAim.SpoofAnim.Functions.Restart()
-            ShowError("Random: " .. pick.name)
-        end,
-    })
 
     --// =====================================================================
     --// MOVEMENT TAB
