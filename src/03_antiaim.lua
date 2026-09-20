@@ -190,18 +190,15 @@ local function StartDesync()
 
         local targetCF
 
-        --// ===================== OldPosition =========================
         if mode == "OldPosition" then
             if not desync.Internal.SavedCFrame then
                 desync.Internal.SavedCFrame = oldcf
             end
-
             if desync.Internal.PendingRefresh then
                 desync.Internal.PendingRefresh = false
                 desync.Internal.SavedCFrame = oldcf
                 desync.Internal.OldPosTimer = 0
             end
-
             if S.OldPosDelayEnabled then
                 local delay = tonumber(S.OldPosDelay) or 0.5
                 if delay < 0.01 then delay = 0.01 end
@@ -211,15 +208,12 @@ local function StartDesync()
                     desync.Internal.OldPosTimer = 0
                 end
             end
-
             targetCF = desync.Internal.SavedCFrame
 
-        --// ===================== Void ================================
         elseif mode == "Void" then
             local voidY = tonumber(S.VoidDepth) or -1000
             targetCF = CFrame.new(oldcf.X, voidY, oldcf.Z)
 
-        --// ===================== InPlayer ============================
         elseif mode == "InPlayer" then
             local targetHrp = GetNearestPlayerHRP(oldcf.Position)
             if targetHrp then
@@ -235,7 +229,6 @@ local function StartDesync()
                 targetCF = oldcf
             end
 
-        --// ===================== Default =============================
         else
             desync.Internal.Acc = desync.Internal.Acc + dt
             if desync.Internal.Acc >= interval then
@@ -245,7 +238,6 @@ local function StartDesync()
             targetCF = oldcf * CFrame.new(desync.Internal.TargetOffset)
         end
 
-        --// RandomRotate
         if S.RandomRotate then
             desync.Internal.RotAcc = desync.Internal.RotAcc + dt
             if desync.Internal.RotAcc >= interval then
