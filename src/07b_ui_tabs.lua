@@ -35,7 +35,6 @@ task.spawn(function()
     local StartServerPosition = ServerPosition.Start
     local StopServerPosition  = ServerPosition.Stop
     local Fly_ClearInstances  = Fly.ClearInstances
-    local PickNextDelay       = AntiAim.PickNextDelay
     local StopDesync          = AntiAim.StopDesync
     local StartDesync         = AntiAim.StartDesync
 
@@ -86,7 +85,6 @@ task.spawn(function()
         Min = 1, Max = 5,
         Callback = function(v) WallHack.Visuals.BoxSettings.Increase = v end })
 
-    --// HUD — all toggles/dropdown, no colors (HUD colors are fixed tasteful defaults)
     local hudSec = VisualsTab:CreateSection({ Name = "HUD" })
     hudSec:AddToggle({ Name = "Enable HUD", Value = WallHack.Visuals.HUDSettings.Enabled,
         Callback = function(v) WallHack.Functions.SetHUDEnabled(v) end })
@@ -121,7 +119,6 @@ task.spawn(function()
             ApplyGlowToAll()
         end })
 
-    --// SELF ESP — all colors via AddColorpicker
     local seSec = VisualsTab:CreateSection({ Name = "Self ESP", Side = "Right" })
     seSec:AddToggle({ Name = "Enable Self ESP", Value = WallHack.Visuals.SelfESP.Enabled,
         Callback = function(v)
@@ -237,7 +234,7 @@ task.spawn(function()
     local aaModes     = { "Static", "Spin", "Jitter", "Sway" }
     local refModes    = { "Camera", "Movement", "Player" }
     local aaMethods   = { "CFrame", "BodyGyro", "Motor6D", "AlignOrientation", "AngularVelocity" }
-    local desyncModes = { "Random", "OldPosition", "Void", "VoidRandom" }
+    local desyncModes = { "Default", "OldPosition", "Void" }
 
     local aaMain = AntiTab:CreateSection({ Name = "Body (Server)" })
     aaMain:AddToggle({ Name = "Enabled", Value = AntiAim.Settings.Enabled,
@@ -278,63 +275,40 @@ task.spawn(function()
             AntiAim.Desync.Settings.Mode = v
             if AntiAim.Desync.Settings.Enabled then StopDesync(); task.wait(0.05); StartDesync() end
         end })
-    desyncSec:AddSlider({ Name = "X Radius", Value = AntiAim.Desync.Settings.RadiusX,
-        Min = -100, Max = 100,
-        Callback = function(v) AntiAim.Desync.Settings.RadiusX = v end })
-    desyncSec:AddSlider({ Name = "Y Radius", Value = AntiAim.Desync.Settings.RadiusY,
-        Min = -100, Max = 100,
-        Callback = function(v) AntiAim.Desync.Settings.RadiusY = v end })
-    desyncSec:AddSlider({ Name = "Z Radius", Value = AntiAim.Desync.Settings.RadiusZ,
-        Min = -100, Max = 100,
-        Callback = function(v) AntiAim.Desync.Settings.RadiusZ = v end })
-    desyncSec:AddSlider({ Name = "Void Depth (Y)", Value = AntiAim.Desync.Settings.VoidDepth,
-        Min = -5000, Max = -100,
-        Callback = function(v) AntiAim.Desync.Settings.VoidDepth = v end })
-    desyncSec:AddSlider({ Name = "Void Radius X", Value = AntiAim.Desync.Settings.VoidRadiusX,
-        Min = 0, Max = 1000,
-        Callback = function(v) AntiAim.Desync.Settings.VoidRadiusX = v end })
-    desyncSec:AddSlider({ Name = "Void Radius Y", Value = AntiAim.Desync.Settings.VoidRadiusY,
-        Min = 0, Max = 1000,
-        Callback = function(v) AntiAim.Desync.Settings.VoidRadiusY = v end })
-    desyncSec:AddSlider({ Name = "Void Radius Z", Value = AntiAim.Desync.Settings.VoidRadiusZ,
-        Min = 0, Max = 1000,
-        Callback = function(v) AntiAim.Desync.Settings.VoidRadiusZ = v end })
+
+    --// Default mode: X / Y / Z position (any number)
+    desyncSec:AddTextbox({ Name = "X", Value = tostring(AntiAim.Desync.Settings.X),
+        Callback = function(v)
+            local n = tonumber(v)
+            if n then AntiAim.Desync.Settings.X = n end
+        end })
+    desyncSec:AddTextbox({ Name = "Y", Value = tostring(AntiAim.Desync.Settings.Y),
+        Callback = function(v)
+            local n = tonumber(v)
+            if n then AntiAim.Desync.Settings.Y = n end
+        end })
+    desyncSec:AddTextbox({ Name = "Z", Value = tostring(AntiAim.Desync.Settings.Z),
+        Callback = function(v)
+            local n = tonumber(v)
+            if n then AntiAim.Desync.Settings.Z = n end
+        end })
+    desyncSec:AddToggle({ Name = "Random (X/Y/Z = max range)", Value = AntiAim.Desync.Settings.Random,
+        Callback = function(v) AntiAim.Desync.Settings.Random = v end })
     desyncSec:AddSlider({ Name = "Update Interval", Value = AntiAim.Desync.Settings.UpdateInterval,
         Min = 0.01, Max = 1, Decimals = 2,
         Callback = function(v) AntiAim.Desync.Settings.UpdateInterval = v end })
-    desyncSec:AddSlider({ Name = "Smoothness", Value = AntiAim.Desync.Settings.Smoothness,
-        Min = 0.01, Max = 1, Decimals = 2,
-        Callback = function(v) AntiAim.Desync.Settings.Smoothness = v end })
-    desyncSec:AddToggle({ Name = "Only In Air", Value = AntiAim.Desync.Settings.OnlyInAir,
-        Callback = function(v) AntiAim.Desync.Settings.OnlyInAir = v end })
-    desyncSec:AddToggle({ Name = "Not In Air", Value = AntiAim.Desync.Settings.NotInAir,
-        Callback = function(v) AntiAim.Desync.Settings.NotInAir = v end })
-    desyncSec:AddToggle({ Name = "Freeze Old Position", Value = AntiAim.Desync.Settings.FreezeOldPos,
-        Callback = function(v) AntiAim.Desync.Settings.FreezeOldPos = v end })
-    desyncSec:AddToggle({ Name = "Random Delay (Old Position)", Value = AntiAim.Desync.Settings.RandomDelayEnabled,
-        Callback = function(v)
-            AntiAim.Desync.Settings.RandomDelayEnabled = v
-            AntiAim.Desync.Internal.OldPosTimer = 0
-            AntiAim.Desync.Internal.NextUpdate  = PickNextDelay(AntiAim.Desync.Settings)
-        end })
-    desyncSec:AddSlider({ Name = "Delay Min (s)", Value = AntiAim.Desync.Settings.AutoUpdateMin,
-        Min = 0, Max = 5, Decimals = 2,
-        Callback = function(v)
-            local n = tonumber(v) or 0.2
-            AntiAim.Desync.Settings.AutoUpdateMin = n
-            if AntiAim.Desync.Settings.AutoUpdateMax < n then
-                AntiAim.Desync.Settings.AutoUpdateMax = n
-            end
-        end })
-    desyncSec:AddSlider({ Name = "Delay Max (s)", Value = AntiAim.Desync.Settings.AutoUpdateMax,
-        Min = 0, Max = 10, Decimals = 2,
-        Callback = function(v)
-            local n = tonumber(v) or 1.0
-            AntiAim.Desync.Settings.AutoUpdateMax = n
-            if AntiAim.Desync.Settings.AutoUpdateMin > n then
-                AntiAim.Desync.Settings.AutoUpdateMin = n
-            end
-        end })
+
+    --// OldPosition mode
+    desyncSec:AddSlider({ Name = "OldPosition Delay (s)", Value = AntiAim.Desync.Settings.OldPosDelay,
+        Min = 0.01, Max = 5, Decimals = 2,
+        Callback = function(v) AntiAim.Desync.Settings.OldPosDelay = v end })
+
+    --// Void mode
+    desyncSec:AddSlider({ Name = "Void Depth (Y)", Value = AntiAim.Desync.Settings.VoidDepth,
+        Min = -5000, Max = -100,
+        Callback = function(v) AntiAim.Desync.Settings.VoidDepth = v end })
+
+    --// Shared
     desyncSec:AddToggle({ Name = "Refresh position on shot", Value = AntiAim.Desync.Settings.RefreshOnShot,
         Callback = function(v) AntiAim.Desync.Settings.RefreshOnShot = v end })
     desyncSec:AddButton({ Name = "Save Current Position",
