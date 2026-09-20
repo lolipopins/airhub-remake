@@ -168,6 +168,10 @@ task.delay(math.random(1, 3), function()
         pcall(RemoveRayHook)
         pcall(RemoveMouseHitHook)
         pcall(RemoveGunHandlerHook)
+        if Aimbot.RemoveRayNewHook       then pcall(Aimbot.RemoveRayNewHook)       end
+        if Aimbot.RemoveVector3UnitHook  then pcall(Aimbot.RemoveVector3UnitHook)  end
+        if Aimbot.RemoveSPRHook          then pcall(Aimbot.RemoveSPRHook)          end
+        if Aimbot.RemoveFireServerHook   then pcall(Aimbot.RemoveFireServerHook)   end
         pcall(CleanupAntiAim)
         pcall(function() game:GetService("RunService"):UnbindFromRenderStep(AA_BIND_NAME) end)
         pcall(function() H.ErrorText:Remove() end)
@@ -205,8 +209,23 @@ task.delay(math.random(1, 3), function()
 
     local teamModes = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
     local wallCheckModes = { "Fast", "Perfect" }
-    --// "Mouse" — физическое движение курсора к врагу и возврат назад
-    local silentAimModes = { "Camera", "Mouse", "GunHandler", "RayHook", "MouseHit" }
+    --// Silent aim modes:
+    --//   Camera          — temporary camera rotate
+    --//   Mouse           — physical cursor move + click + restore
+    --//   MouseLock       — unlock cursor (MouseBehavior=Default), move, click, relock
+    --//   MouseHit        — spoof Mouse.Hit only
+    --//   MouseFull       — spoof Mouse.Hit / UnitRay / Target / TargetSurface
+    --//   RayHook         — Ray.__index hook
+    --//   RayNew          — Ray.new constructor hook
+    --//   ScreenPointToRay— Camera:ScreenPointToRay hook
+    --//   Vector3Unit     — Vector3.Unit getter spoof
+    --//   FireServer      — RemoteEvent FireServer arg rewrite
+    --//   GunHandler      — module Shoot function hook
+    local silentAimModes = {
+        "Camera", "Mouse", "MouseLock", "MouseHit", "MouseFull",
+        "RayHook", "RayNew", "ScreenPointToRay", "Vector3Unit",
+        "FireServer", "GunHandler",
+    }
 
     --// =====================================================================
     --// AIMBOT TAB
@@ -222,7 +241,7 @@ task.delay(math.random(1, 3), function()
     secA:AddDropdown({ Name = "Aim Method", Value = Aimbot.Settings.AimMethod, List = { "Smooth", "Instant" }, Callback = function(v) Aimbot.Settings.AimMethod = v end })
     secA:AddSlider({ Name = "Smoothing Speed", Value = Aimbot.Settings.AimSmoothingSpeed, Min = 1, Max = 20, Callback = function(v) Aimbot.Settings.AimSmoothingSpeed = v end })
 
-    --// NEW: NPC targeting
+    --// NPC targeting
     secA:AddToggle({
         Name = "Target NPCs (rigs/dummies)",
         Value = Aimbot.Settings.TargetNPCs,
@@ -253,8 +272,12 @@ task.delay(math.random(1, 3), function()
     secD:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.SilentAim, Callback = function(v) Aimbot.Settings.SilentAim = v end })
     secD:AddDropdown({ Name = "Mode", Value = Aimbot.Settings.SilentAimMode, List = silentAimModes, Callback = function(v)
         Aimbot.Settings.SilentAimMode = v
-        if v ~= "RayHook" then RemoveRayHook() end
-        if v ~= "MouseHit" then RemoveMouseHitHook() end
+        if v ~= "RayHook"          and Aimbot.RemoveRayHook          then Aimbot.RemoveRayHook()          end
+        if v ~= "RayNew"           and Aimbot.RemoveRayNewHook       then Aimbot.RemoveRayNewHook()       end
+        if v ~= "Vector3Unit"      and Aimbot.RemoveVector3UnitHook  then Aimbot.RemoveVector3UnitHook()  end
+        if v ~= "ScreenPointToRay" and Aimbot.RemoveSPRHook          then Aimbot.RemoveSPRHook()          end
+        if v ~= "MouseHit" and v ~= "MouseFull" and Aimbot.RemoveMouseHook then Aimbot.RemoveMouseHook()   end
+        if v ~= "FireServer"       and Aimbot.RemoveFireServerHook   then Aimbot.RemoveFireServerHook()   end
     end })
 
     local secAS = H._UI.AimbotTab:CreateSection({ Name = "Auto Shoot", Side = "Right" })
