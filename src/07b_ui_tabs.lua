@@ -19,30 +19,90 @@ task.spawn(function()
     local HttpService      = Util.HttpService
     local LocalPlayer      = Util.LocalPlayer
 
-    local Aimbot         = H.Aimbot
-    local WallHack       = H.WallHack
-    local AntiAim        = H.AntiAim
-    local ServerPosition = H.ServerPosition
-    local Fly            = H.Fly
-    local Bhop           = H.Bhop
-    local Speed          = H.Speed
-    local FastStop       = H.FastStop
-    local AutoStrafer    = H.AutoStrafer
-    local Noclip         = H.Noclip
+    --// ---- Defensive proxies (same idea as 07a) ----
+    local _missingLogged = {}
+    local function noop() end
+    local function orNoop(fn, label)
+        if type(fn) == "function" then return fn end
+        if label and not _missingLogged[label] then
+            _missingLogged[label] = true
+            warn("[AirHub] 07b: missing function → " .. tostring(label))
+        end
+        return noop
+    end
+    local function orTable(t, label)
+        if type(t) == "table" then return t end
+        if label and not _missingLogged[label] then
+            _missingLogged[label] = true
+            warn("[AirHub] 07b: missing module → " .. tostring(label))
+        end
+        return {}
+    end
 
-    local CancelLock          = Aimbot.CancelLock
-    local ApplyGlowToAll      = WallHack.ApplyGlowToAll
-    local StartServerPosition = ServerPosition.Start
-    local StopServerPosition  = ServerPosition.Stop
-    local Fly_ClearInstances  = Fly.ClearInstances
-    local StopDesync          = AntiAim.StopDesync
-    local StartDesync         = AntiAim.StartDesync
+    local Aimbot         = orTable(H.Aimbot,         "Aimbot")
+    local WallHack       = orTable(H.WallHack,       "WallHack")
+    local AntiAim        = orTable(H.AntiAim,        "AntiAim")
+    local ServerPosition = orTable(H.ServerPosition, "ServerPosition")
+    local Fly            = orTable(H.Fly,            "Fly")
+    local Bhop           = orTable(H.Bhop,           "Bhop")
+    local Speed          = orTable(H.Speed,          "Speed")
+    local FastStop       = orTable(H.FastStop,       "FastStop")
+    local AutoStrafer    = orTable(H.AutoStrafer,    "AutoStrafer")
+    local Noclip         = orTable(H.Noclip,         "Noclip")
+
+    local CancelLock           = orNoop(Aimbot.CancelLock,           "Aimbot.CancelLock")
+    local ApplyGlowToAll       = orNoop(WallHack.ApplyGlowToAll,     "WallHack.ApplyGlowToAll")
+    local StartServerPosition  = orNoop(ServerPosition.Start,        "ServerPosition.Start")
+    local StopServerPosition   = orNoop(ServerPosition.Stop,         "ServerPosition.Stop")
+    local Fly_ClearInstances   = orNoop(Fly.ClearInstances,          "Fly.ClearInstances")
+    local StopDesync           = orNoop(AntiAim.StopDesync,          "AntiAim.StopDesync")
+    local StartDesync          = orNoop(AntiAim.StartDesync,         "AntiAim.StartDesync")
+
+    --// ensure sub-tables exist so callbacks never touch nil
+    WallHack.Settings        = WallHack.Settings        or {}
+    WallHack.Visuals         = WallHack.Visuals         or {}
+    WallHack.Visuals.BoxSettings   = WallHack.Visuals.BoxSettings   or { Enabled = false, Type = 1, Color = Color3.fromRGB(255,255,255), TargetColor = Color3.fromRGB(255,0,0), Transparency = 0.7, Thickness = 1, Filled = false, Increase = 1 }
+    WallHack.Visuals.GlowSettings  = WallHack.Visuals.GlowSettings  or { Enabled = false, Color = Color3.fromRGB(0,255,255), Transparency = 0.5, Mode = "Outline" }
+    WallHack.Visuals.HUDSettings   = WallHack.Visuals.HUDSettings   or { Enabled = false, Position = "TopLeft", ShowPlayers = true, ShowFPS = true, ShowPing = true, ShowSession = true }
+    WallHack.Visuals.SelfESP       = WallHack.Visuals.SelfESP       or { Enabled = false, Chams = { Enabled = false, Mode = "Both", FillColor = Color3.fromRGB(90,140,255), FillTransparency = 0.4, OutlineColor = Color3.fromRGB(255,255,255), OutlineTransparency = 0, AlwaysOnTop = true }, ChinaHat = { Enabled = false, Color = Color3.fromRGB(255,60,60), Material = "Neon", Size = 4, OffsetY = 1.8, Transparency = 0, Rotation = 0 } }
+    WallHack.Functions       = WallHack.Functions       or {}
+    AntiAim.Settings         = AntiAim.Settings         or { Enabled = false, Mode = "Static", Method = "CFrame", Body = { Reference = "Camera", Yaw = 0, Amount = 15, Speed = 5, IgnoreMoving = false, MoveSpeedThreshold = 0.5 } }
+    AntiAim.Desync           = AntiAim.Desync           or { Settings = { Enabled = false, Mode = "Default", X = 5, Y = 5, Z = 5, Random = false, UpdateInterval = 0.05, OldPosDelayEnabled = true, OldPosDelay = 0.5, VoidDepth = -1000, InPlayerOffset = 2, RefreshOnShot = false, RandomRotate = false }, Internal = {} }
+    AntiAim.Desync.Settings  = AntiAim.Desync.Settings  or { Enabled = false }
+    AntiAim.Functions        = AntiAim.Functions        or {}
+    ServerPosition.Settings  = ServerPosition.Settings  or { Enabled = false, RGB = true, Strength = 1, MaxLimb = 6 }
+    Fly.Settings             = Fly.Settings             or { Enabled = false, ToggleKey = "F", Toggle = false, Method = "BodyVelocity", Speed = 30, UpSpeed = 20, Smoothness = 0.5, UseKeys = true }
+    Fly.Internal             = Fly.Internal             or { Active = false }
+    Fly.Functions            = Fly.Functions            or {}
+    Bhop.Settings            = Bhop.Settings            or { Enabled = false, AutoJumpKey = "Space", BypassJump = true, JumpCooldown = 0.1, Spider = { Enabled = false, Range = 2.5, RayCount = 8 } }
+    Bhop.Internal            = Bhop.Internal            or { KeyHeld = false, Active = false }
+    Bhop.Functions           = Bhop.Functions           or {}
+    Speed.Settings           = Speed.Settings           or { Enabled = false, Method = "WalkSpeed", GroundSpeed = 30, AirSpeed = 30, UseAirSpeed = false, InAirOnly = false }
+    Speed.Internal           = Speed.Internal           or { Active = false, OriginalWalkSpeed = 16 }
+    Speed.Functions          = Speed.Functions          or {}
+    FastStop.Settings        = FastStop.Settings        or { Enabled = false, StopY = false }
+    FastStop.Internal        = FastStop.Internal        or { LastActive = false }
+    FastStop.Functions       = FastStop.Functions       or {}
+    AutoStrafer.Settings     = AutoStrafer.Settings     or { Enabled = false, Mode = "Legit", Key = "Space", Toggle = false, Invert = false, SpamDelay = 0.05 }
+    AutoStrafer.Internal     = AutoStrafer.Internal     or { Active = false, KeyA = false, KeyD = false }
+    AutoStrafer.Functions    = AutoStrafer.Functions    or {}
+    Noclip.Settings          = Noclip.Settings          or { Enabled = false }
+    Noclip.Internal          = Noclip.Internal          or { Active = false, Saved = {} }
+    Noclip.Functions         = Noclip.Functions         or {}
+
+    --// HUD funcs might not exist if 04 didn't load
+    WallHack.Functions.StartHUD     = WallHack.Functions.StartHUD     or noop
+    WallHack.Functions.StopHUD      = WallHack.Functions.StopHUD      or noop
+    WallHack.Functions.SetHUDEnabled= WallHack.Functions.SetHUDEnabled or function() end
+    WallHack.Functions.StartSelfESP = WallHack.Functions.StartSelfESP or noop
+    WallHack.Functions.StopSelfESP  = WallHack.Functions.StopSelfESP  or noop
+    WallHack.Functions.RefreshSelfESP=WallHack.Functions.RefreshSelfESP or noop
 
     local Library          = H._UI.Library
-    local Config_Save      = H.Config.Save
-    local Config_Load      = H.Config.Load
-    local Config_Delete    = H.Config.Delete
-    local Config_ListFiles = H.Config.ListFiles
+    local Config_Save      = (H.Config and H.Config.Save)      or function() return false, "no config" end
+    local Config_Load      = (H.Config and H.Config.Load)      or function() return false, "no config" end
+    local Config_Delete    = (H.Config and H.Config.Delete)    or function() return false, "no config" end
+    local Config_ListFiles = (H.Config and H.Config.ListFiles) or function() return {} end
 
     local VisualsTab  = H._UI.VisualsTab
     local AntiTab     = H._UI.AntiTab
@@ -52,7 +112,7 @@ task.spawn(function()
     local glowModes = { "Outline", "Fill", "Both", "Pulse" }
 
     --// =====================================================================
-    --// VISUALS TAB
+    --// VISUALS
     --// =====================================================================
     local vis1 = VisualsTab:CreateSection({ Name = "WallHack" })
     vis1:AddToggle({ Name = "Enabled", Value = WallHack.Settings.Enabled,
@@ -87,17 +147,18 @@ task.spawn(function()
 
     local hudSec = VisualsTab:CreateSection({ Name = "HUD" })
     hudSec:AddToggle({ Name = "Enable HUD", Value = WallHack.Visuals.HUDSettings.Enabled,
-        Callback = function(v) WallHack.Functions.SetHUDEnabled(v) end })
-    hudSec:AddDropdown({ Name = "Position", Value = "TopLeft",
+        Callback = function(v) WallHack.Visuals.HUDSettings.Enabled = v
+            if v then WallHack.Functions.StartHUD() else WallHack.Functions.StopHUD() end end })
+    hudSec:AddDropdown({ Name = "Position", Value = WallHack.Visuals.HUDSettings.Position or "TopLeft",
         List = { "TopLeft", "TopRight", "BottomLeft", "BottomRight" },
         Callback = function(v) WallHack.Visuals.HUDSettings.Position = v end })
-    hudSec:AddToggle({ Name = "Show Players count", Value = WallHack.Visuals.HUDSettings.ShowPlayers,
+    hudSec:AddToggle({ Name = "Show Players count", Value = WallHack.Visuals.HUDSettings.ShowPlayers ~= false,
         Callback = function(v) WallHack.Visuals.HUDSettings.ShowPlayers = v end })
-    hudSec:AddToggle({ Name = "Show FPS", Value = WallHack.Visuals.HUDSettings.ShowFPS,
+    hudSec:AddToggle({ Name = "Show FPS", Value = WallHack.Visuals.HUDSettings.ShowFPS ~= false,
         Callback = function(v) WallHack.Visuals.HUDSettings.ShowFPS = v end })
-    hudSec:AddToggle({ Name = "Show Ping", Value = WallHack.Visuals.HUDSettings.ShowPing,
+    hudSec:AddToggle({ Name = "Show Ping", Value = WallHack.Visuals.HUDSettings.ShowPing ~= false,
         Callback = function(v) WallHack.Visuals.HUDSettings.ShowPing = v end })
-    hudSec:AddToggle({ Name = "Show Session time", Value = WallHack.Visuals.HUDSettings.ShowSession,
+    hudSec:AddToggle({ Name = "Show Session time", Value = WallHack.Visuals.HUDSettings.ShowSession ~= false,
         Callback = function(v) WallHack.Visuals.HUDSettings.ShowSession = v end })
 
     local glowSec = VisualsTab:CreateSection({ Name = "Glow", Side = "Right" })
@@ -112,7 +173,7 @@ task.spawn(function()
             if n then WallHack.Visuals.GlowSettings.Transparency = math.clamp(n, 0, 1) end
             ApplyGlowToAll()
         end })
-    glowSec:AddDropdown({ Name = "Mode", Value = WallHack.Visuals.GlowSettings.Mode,
+    glowSec:AddDropdown({ Name = "Mode", Value = WallHack.Visuals.GlowSettings.Mode or "Outline",
         List = glowModes,
         Callback = function(v)
             WallHack.Visuals.GlowSettings.Mode = type(v) == "string" and v or "Outline"
@@ -120,98 +181,48 @@ task.spawn(function()
         end })
 
     local seSec = VisualsTab:CreateSection({ Name = "Self ESP", Side = "Right" })
+    local function refreshSelfESP() if WallHack.Functions.RefreshSelfESP then WallHack.Functions.RefreshSelfESP() end end
     seSec:AddToggle({ Name = "Enable Self ESP", Value = WallHack.Visuals.SelfESP.Enabled,
         Callback = function(v)
             WallHack.Visuals.SelfESP.Enabled = v
             if v then WallHack.Functions.StartSelfESP() else WallHack.Functions.StopSelfESP() end
         end })
-
     seSec:AddToggle({ Name = "  Chams: Enabled", Value = WallHack.Visuals.SelfESP.Chams.Enabled,
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.Chams.Enabled = v
-            WallHack.Functions.RefreshSelfESP()
-        end })
-    seSec:AddDropdown({ Name = "  Chams: Mode", Value = "Both",
+        Callback = function(v) WallHack.Visuals.SelfESP.Chams.Enabled = v; refreshSelfESP() end })
+    seSec:AddDropdown({ Name = "  Chams: Mode", Value = WallHack.Visuals.SelfESP.Chams.Mode or "Both",
         List = { "Fill", "Outline", "Both" },
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.Chams.Mode = v
-            WallHack.Functions.RefreshSelfESP()
-        end })
-    seSec:AddColorpicker({ Name = "  Chams: Fill Color",
-        Value = WallHack.Visuals.SelfESP.Chams.FillColor,
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.Chams.FillColor = SanitizeColor(v)
-            WallHack.Functions.RefreshSelfESP()
-        end })
-    seSec:AddSlider({ Name = "  Chams: Fill Transparency",
-        Value = WallHack.Visuals.SelfESP.Chams.FillTransparency,
+        Callback = function(v) WallHack.Visuals.SelfESP.Chams.Mode = v; refreshSelfESP() end })
+    seSec:AddColorpicker({ Name = "  Chams: Fill Color", Value = WallHack.Visuals.SelfESP.Chams.FillColor,
+        Callback = function(v) WallHack.Visuals.SelfESP.Chams.FillColor = SanitizeColor(v); refreshSelfESP() end })
+    seSec:AddSlider({ Name = "  Chams: Fill Transparency", Value = WallHack.Visuals.SelfESP.Chams.FillTransparency,
         Min = 0, Max = 1, Decimals = 2,
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.Chams.FillTransparency = v
-            WallHack.Functions.RefreshSelfESP()
-        end })
-    seSec:AddColorpicker({ Name = "  Chams: Outline Color",
-        Value = WallHack.Visuals.SelfESP.Chams.OutlineColor,
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.Chams.OutlineColor = SanitizeColor(v)
-            WallHack.Functions.RefreshSelfESP()
-        end })
-    seSec:AddSlider({ Name = "  Chams: Outline Transparency",
-        Value = WallHack.Visuals.SelfESP.Chams.OutlineTransparency,
+        Callback = function(v) WallHack.Visuals.SelfESP.Chams.FillTransparency = v; refreshSelfESP() end })
+    seSec:AddColorpicker({ Name = "  Chams: Outline Color", Value = WallHack.Visuals.SelfESP.Chams.OutlineColor,
+        Callback = function(v) WallHack.Visuals.SelfESP.Chams.OutlineColor = SanitizeColor(v); refreshSelfESP() end })
+    seSec:AddSlider({ Name = "  Chams: Outline Transparency", Value = WallHack.Visuals.SelfESP.Chams.OutlineTransparency,
         Min = 0, Max = 1, Decimals = 2,
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.Chams.OutlineTransparency = v
-            WallHack.Functions.RefreshSelfESP()
-        end })
-    seSec:AddToggle({ Name = "  Chams: Always on top",
-        Value = WallHack.Visuals.SelfESP.Chams.AlwaysOnTop,
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.Chams.AlwaysOnTop = v
-            WallHack.Functions.RefreshSelfESP()
-        end })
-
+        Callback = function(v) WallHack.Visuals.SelfESP.Chams.OutlineTransparency = v; refreshSelfESP() end })
+    seSec:AddToggle({ Name = "  Chams: Always on top", Value = WallHack.Visuals.SelfESP.Chams.AlwaysOnTop ~= false,
+        Callback = function(v) WallHack.Visuals.SelfESP.Chams.AlwaysOnTop = v; refreshSelfESP() end })
     seSec:AddToggle({ Name = "  China Hat: Enabled", Value = WallHack.Visuals.SelfESP.ChinaHat.Enabled,
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.ChinaHat.Enabled = v
-            WallHack.Functions.RefreshSelfESP()
-        end })
-    seSec:AddColorpicker({ Name = "  China Hat: Color",
-        Value = WallHack.Visuals.SelfESP.ChinaHat.Color,
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.ChinaHat.Color = SanitizeColor(v)
-            WallHack.Functions.RefreshSelfESP()
-        end })
+        Callback = function(v) WallHack.Visuals.SelfESP.ChinaHat.Enabled = v; refreshSelfESP() end })
+    seSec:AddColorpicker({ Name = "  China Hat: Color", Value = WallHack.Visuals.SelfESP.ChinaHat.Color,
+        Callback = function(v) WallHack.Visuals.SelfESP.ChinaHat.Color = SanitizeColor(v); refreshSelfESP() end })
     seSec:AddSlider({ Name = "  China Hat: Size", Value = WallHack.Visuals.SelfESP.ChinaHat.Size,
         Min = 1, Max = 10, Decimals = 1,
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.ChinaHat.Size = v
-            WallHack.Functions.RefreshSelfESP()
-        end })
+        Callback = function(v) WallHack.Visuals.SelfESP.ChinaHat.Size = v; refreshSelfESP() end })
     seSec:AddSlider({ Name = "  China Hat: Offset Y", Value = WallHack.Visuals.SelfESP.ChinaHat.OffsetY,
         Min = 0, Max = 5, Decimals = 1,
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.ChinaHat.OffsetY = v
-            WallHack.Functions.RefreshSelfESP()
-        end })
-    seSec:AddSlider({ Name = "  China Hat: Rotation",
-        Value = WallHack.Visuals.SelfESP.ChinaHat.Rotation,
+        Callback = function(v) WallHack.Visuals.SelfESP.ChinaHat.OffsetY = v; refreshSelfESP() end })
+    seSec:AddSlider({ Name = "  China Hat: Rotation", Value = WallHack.Visuals.SelfESP.ChinaHat.Rotation,
         Min = 0, Max = 360,
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.ChinaHat.Rotation = v
-            WallHack.Functions.RefreshSelfESP()
-        end })
+        Callback = function(v) WallHack.Visuals.SelfESP.ChinaHat.Rotation = v; refreshSelfESP() end })
     seSec:AddSlider({ Name = "  China Hat: Transparency", Value = WallHack.Visuals.SelfESP.ChinaHat.Transparency,
         Min = 0, Max = 1, Decimals = 2,
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.ChinaHat.Transparency = v
-            WallHack.Functions.RefreshSelfESP()
-        end })
+        Callback = function(v) WallHack.Visuals.SelfESP.ChinaHat.Transparency = v; refreshSelfESP() end })
     seSec:AddDropdown({ Name = "  China Hat: Material", Value = "Neon",
         List = { "Neon", "ForceField", "Glass", "Plastic", "SmoothPlastic", "Metal" },
-        Callback = function(v)
-            WallHack.Visuals.SelfESP.ChinaHat.Material = v
-            WallHack.Functions.RefreshSelfESP()
-        end })
+        Callback = function(v) WallHack.Visuals.SelfESP.ChinaHat.Material = v; refreshSelfESP() end })
 
     local spSec = VisualsTab:CreateSection({ Name = "Server Position (Ghost)", Side = "Right" })
     spSec:AddToggle({ Name = "Enabled", Value = ServerPosition.Settings.Enabled,
@@ -229,14 +240,13 @@ task.spawn(function()
         Callback = function(v) ServerPosition.Settings.MaxLimb = v end })
 
     --// =====================================================================
-    --// ANTI-AIM TAB  (Body + Desync only)
+    --// ANTI-AIM
     --// =====================================================================
     local aaModes     = { "Static", "Spin", "Jitter", "Sway" }
     local refModes    = { "Camera", "Movement", "Player" }
     local aaMethods   = { "CFrame", "BodyGyro", "Motor6D", "AlignOrientation", "AngularVelocity" }
     local desyncModes = { "Default", "OldPosition", "Void", "InPlayer" }
 
-    --// LEFT: Body
     local aaMain = AntiTab:CreateSection({ Name = "Body (Server)" })
     aaMain:AddToggle({ Name = "Enabled", Value = AntiAim.Settings.Enabled,
         Callback = function(v) AntiAim.Settings.Enabled = v end })
@@ -264,61 +274,64 @@ task.spawn(function()
         Min = 0.1, Max = 5, Decimals = 2,
         Callback = function(v) AntiAim.Settings.Body.MoveSpeedThreshold = v end })
 
-    --// RIGHT: Desync
     local desyncSec = AntiTab:CreateSection({ Name = "Desync (Client)", Side = "Right" })
     desyncSec:AddToggle({ Name = "Enabled", Value = AntiAim.Desync.Settings.Enabled,
         Callback = function(v)
             AntiAim.Desync.Settings.Enabled = v
             if v then StartDesync() else StopDesync() end
         end })
-    desyncSec:AddDropdown({ Name = "Mode", Value = AntiAim.Desync.Settings.Mode, List = desyncModes,
+    desyncSec:AddDropdown({ Name = "Mode", Value = AntiAim.Desync.Settings.Mode or "Default", List = desyncModes,
         Callback = function(v)
             AntiAim.Desync.Settings.Mode = v
             if AntiAim.Desync.Settings.Enabled then StopDesync(); task.wait(0.05); StartDesync() end
         end })
-    desyncSec:AddToggle({ Name = "Random Rotate (pitch/yaw/roll)", Value = AntiAim.Desync.Settings.RandomRotate,
+    desyncSec:AddToggle({ Name = "Random Rotate (pitch/yaw/roll)", Value = AntiAim.Desync.Settings.RandomRotate or false,
         Callback = function(v) AntiAim.Desync.Settings.RandomRotate = v end })
-    desyncSec:AddTextbox({ Name = "X", Value = tostring(AntiAim.Desync.Settings.X),
+    desyncSec:AddTextbox({ Name = "X", Value = tostring(AntiAim.Desync.Settings.X or 5),
         Callback = function(v)
             local n = tonumber(v)
             if n then AntiAim.Desync.Settings.X = n end
         end })
-    desyncSec:AddTextbox({ Name = "Y", Value = tostring(AntiAim.Desync.Settings.Y),
+    desyncSec:AddTextbox({ Name = "Y", Value = tostring(AntiAim.Desync.Settings.Y or 5),
         Callback = function(v)
             local n = tonumber(v)
             if n then AntiAim.Desync.Settings.Y = n end
         end })
-    desyncSec:AddTextbox({ Name = "Z", Value = tostring(AntiAim.Desync.Settings.Z),
+    desyncSec:AddTextbox({ Name = "Z", Value = tostring(AntiAim.Desync.Settings.Z or 5),
         Callback = function(v)
             local n = tonumber(v)
             if n then AntiAim.Desync.Settings.Z = n end
         end })
-    desyncSec:AddToggle({ Name = "Random (X/Y/Z = max range)", Value = AntiAim.Desync.Settings.Random,
+    desyncSec:AddToggle({ Name = "Random (X/Y/Z = max range)", Value = AntiAim.Desync.Settings.Random or false,
         Callback = function(v) AntiAim.Desync.Settings.Random = v end })
-    desyncSec:AddSlider({ Name = "Update Interval", Value = AntiAim.Desync.Settings.UpdateInterval,
+    desyncSec:AddSlider({ Name = "Update Interval", Value = AntiAim.Desync.Settings.UpdateInterval or 0.05,
         Min = 0.01, Max = 1, Decimals = 2,
         Callback = function(v) AntiAim.Desync.Settings.UpdateInterval = v end })
-    desyncSec:AddToggle({ Name = "OldPosition Delay Enabled", Value = AntiAim.Desync.Settings.OldPosDelayEnabled,
+    desyncSec:AddToggle({ Name = "OldPosition Delay Enabled", Value = AntiAim.Desync.Settings.OldPosDelayEnabled ~= false,
         Callback = function(v) AntiAim.Desync.Settings.OldPosDelayEnabled = v end })
-    desyncSec:AddSlider({ Name = "OldPosition Delay (s)", Value = AntiAim.Desync.Settings.OldPosDelay,
+    desyncSec:AddSlider({ Name = "OldPosition Delay (s)", Value = AntiAim.Desync.Settings.OldPosDelay or 0.5,
         Min = 0.01, Max = 5, Decimals = 2,
         Callback = function(v) AntiAim.Desync.Settings.OldPosDelay = v end })
-    desyncSec:AddSlider({ Name = "Void Depth (Y)", Value = AntiAim.Desync.Settings.VoidDepth,
+    desyncSec:AddSlider({ Name = "Void Depth (Y)", Value = AntiAim.Desync.Settings.VoidDepth or -1000,
         Min = -5000, Max = -100,
         Callback = function(v) AntiAim.Desync.Settings.VoidDepth = v end })
-    desyncSec:AddSlider({ Name = "InPlayer Offset (studs)", Value = AntiAim.Desync.Settings.InPlayerOffset,
+    desyncSec:AddSlider({ Name = "InPlayer Offset (studs)", Value = AntiAim.Desync.Settings.InPlayerOffset or 2,
         Min = 0, Max = 20, Decimals = 1,
         Callback = function(v) AntiAim.Desync.Settings.InPlayerOffset = v end })
-    desyncSec:AddToggle({ Name = "Refresh position on shot", Value = AntiAim.Desync.Settings.RefreshOnShot,
+    desyncSec:AddToggle({ Name = "Refresh position on shot", Value = AntiAim.Desync.Settings.RefreshOnShot or false,
         Callback = function(v) AntiAim.Desync.Settings.RefreshOnShot = v end })
     desyncSec:AddButton({ Name = "Save Current Position",
         Callback = function()
-            local ok = AntiAim.Functions.SaveOldPosition()
-            if ok then ShowError("Old position saved") else ShowError("No character") end
+            if AntiAim.Functions and AntiAim.Functions.SaveOldPosition then
+                local ok = AntiAim.Functions.SaveOldPosition()
+                if ok then ShowError("Old position saved") else ShowError("No character") end
+            else
+                ShowError("AntiAim function not available")
+            end
         end })
 
     --// =====================================================================
-    --// MOVEMENT TAB
+    --// MOVEMENT
     --// =====================================================================
     local strafeModes  = { "Legit", "Spam" }
     local strafeKeys   = { "Space", "LeftShift", "LeftControl", "C", "X", "Z", "Q", "E" }
@@ -331,17 +344,17 @@ task.spawn(function()
     asSec:AddToggle({ Name = "Enabled", Value = AutoStrafer.Settings.Enabled,
         Callback = function(v)
             AutoStrafer.Settings.Enabled = v
-            if not v then AutoStrafer.Functions.Stop() end
+            if not v and AutoStrafer.Functions.Stop then AutoStrafer.Functions.Stop() end
         end })
-    asSec:AddDropdown({ Name = "Key", Value = AutoStrafer.Settings.Key, List = strafeKeys,
+    asSec:AddDropdown({ Name = "Key", Value = AutoStrafer.Settings.Key or "Space", List = strafeKeys,
         Callback = function(v) AutoStrafer.Settings.Key = v end })
-    asSec:AddToggle({ Name = "Toggle Mode", Value = AutoStrafer.Settings.Toggle,
+    asSec:AddToggle({ Name = "Toggle Mode", Value = AutoStrafer.Settings.Toggle or false,
         Callback = function(v) AutoStrafer.Settings.Toggle = v end })
-    asSec:AddDropdown({ Name = "Mode", Value = AutoStrafer.Settings.Mode, List = strafeModes,
+    asSec:AddDropdown({ Name = "Mode", Value = AutoStrafer.Settings.Mode or "Legit", List = strafeModes,
         Callback = function(v) AutoStrafer.Settings.Mode = v end })
-    asSec:AddToggle({ Name = "Invert", Value = AutoStrafer.Settings.Invert,
+    asSec:AddToggle({ Name = "Invert", Value = AutoStrafer.Settings.Invert or false,
         Callback = function(v) AutoStrafer.Settings.Invert = v end })
-    asSec:AddSlider({ Name = "Spam Delay (Spam mode)", Value = AutoStrafer.Settings.SpamDelay,
+    asSec:AddSlider({ Name = "Spam Delay (Spam mode)", Value = AutoStrafer.Settings.SpamDelay or 0.05,
         Min = 0.01, Max = 0.3, Decimals = 2,
         Callback = function(v) AutoStrafer.Settings.SpamDelay = v end })
 
@@ -359,20 +372,20 @@ task.spawn(function()
                 end
             end
         end })
-    flySec:AddDropdown({ Name = "Method", Value = Fly.Settings.Method, List = flyMethods,
+    flySec:AddDropdown({ Name = "Method", Value = Fly.Settings.Method or "BodyVelocity", List = flyMethods,
         Callback = function(v) Fly.Settings.Method = v; Fly_ClearInstances() end })
-    flySec:AddDropdown({ Name = "Key", Value = Fly.Settings.ToggleKey, List = flyKeys,
+    flySec:AddDropdown({ Name = "Key", Value = Fly.Settings.ToggleKey or "F", List = flyKeys,
         Callback = function(v) Fly.Settings.ToggleKey = v end })
-    flySec:AddToggle({ Name = "Toggle Mode", Value = Fly.Settings.Toggle,
+    flySec:AddToggle({ Name = "Toggle Mode", Value = Fly.Settings.Toggle or false,
         Callback = function(v) Fly.Settings.Toggle = v end })
-    flySec:AddSlider({ Name = "Speed", Value = Fly.Settings.Speed, Min = 1, Max = 200,
+    flySec:AddSlider({ Name = "Speed", Value = Fly.Settings.Speed or 30, Min = 1, Max = 200,
         Callback = function(v) Fly.Settings.Speed = v end })
-    flySec:AddSlider({ Name = "Up/Down Speed", Value = Fly.Settings.UpSpeed, Min = 1, Max = 200,
+    flySec:AddSlider({ Name = "Up/Down Speed", Value = Fly.Settings.UpSpeed or 20, Min = 1, Max = 200,
         Callback = function(v) Fly.Settings.UpSpeed = v end })
-    flySec:AddSlider({ Name = "Smoothness", Value = Fly.Settings.Smoothness,
+    flySec:AddSlider({ Name = "Smoothness", Value = Fly.Settings.Smoothness or 0.5,
         Min = 0.05, Max = 1, Decimals = 2,
         Callback = function(v) Fly.Settings.Smoothness = v end })
-    flySec:AddToggle({ Name = "Use WASD + Space/Ctrl", Value = Fly.Settings.UseKeys,
+    flySec:AddToggle({ Name = "Use WASD + Space/Ctrl", Value = Fly.Settings.UseKeys ~= false,
         Callback = function(v) Fly.Settings.UseKeys = v end })
 
     local bhopSec = MovementTab:CreateSection({ Name = "Bhop", Side = "Right" })
@@ -385,11 +398,11 @@ task.spawn(function()
                 Bhop.Internal.SpiderTouching = false
             end
         end })
-    bhopSec:AddDropdown({ Name = "Jump Key", Value = Bhop.Settings.AutoJumpKey, List = bhopKeys,
+    bhopSec:AddDropdown({ Name = "Jump Key", Value = Bhop.Settings.AutoJumpKey or "Space", List = bhopKeys,
         Callback = function(v) Bhop.Settings.AutoJumpKey = v end })
-    bhopSec:AddToggle({ Name = "Bypass Jump Restrictions", Value = Bhop.Settings.BypassJump,
+    bhopSec:AddToggle({ Name = "Bypass Jump Restrictions", Value = Bhop.Settings.BypassJump ~= false,
         Callback = function(v) Bhop.Settings.BypassJump = v end })
-    bhopSec:AddSlider({ Name = "Jump Cooldown", Value = Bhop.Settings.JumpCooldown,
+    bhopSec:AddSlider({ Name = "Jump Cooldown", Value = Bhop.Settings.JumpCooldown or 0.1,
         Min = 0.01, Max = 0.5, Decimals = 2,
         Callback = function(v) Bhop.Settings.JumpCooldown = v end })
 
@@ -406,21 +419,21 @@ task.spawn(function()
     local speedSec = MovementTab:CreateSection({ Name = "Speed", Side = "Right" })
     speedSec:AddToggle({ Name = "Enabled", Value = Speed.Settings.Enabled,
         Callback = function(v) Speed.Settings.Enabled = v end })
-    speedSec:AddDropdown({ Name = "Method", Value = Speed.Settings.Method, List = speedMethods,
+    speedSec:AddDropdown({ Name = "Method", Value = Speed.Settings.Method or "WalkSpeed", List = speedMethods,
         Callback = function(v) Speed.Settings.Method = v end })
-    speedSec:AddSlider({ Name = "Ground Speed", Value = Speed.Settings.GroundSpeed, Min = 1, Max = 500,
+    speedSec:AddSlider({ Name = "Ground Speed", Value = Speed.Settings.GroundSpeed or 30, Min = 1, Max = 500,
         Callback = function(v) Speed.Settings.GroundSpeed = v end })
-    speedSec:AddToggle({ Name = "Use Different Air Speed", Value = Speed.Settings.UseAirSpeed,
+    speedSec:AddToggle({ Name = "Use Different Air Speed", Value = Speed.Settings.UseAirSpeed or false,
         Callback = function(v) Speed.Settings.UseAirSpeed = v end })
-    speedSec:AddSlider({ Name = "Air Speed", Value = Speed.Settings.AirSpeed, Min = 1, Max = 500,
+    speedSec:AddSlider({ Name = "Air Speed", Value = Speed.Settings.AirSpeed or 30, Min = 1, Max = 500,
         Callback = function(v) Speed.Settings.AirSpeed = v end })
-    speedSec:AddToggle({ Name = "In Air Only", Value = Speed.Settings.InAirOnly,
+    speedSec:AddToggle({ Name = "In Air Only", Value = Speed.Settings.InAirOnly or false,
         Callback = function(v) Speed.Settings.InAirOnly = v end })
 
     local fsSec = MovementTab:CreateSection({ Name = "FastStop" })
     fsSec:AddToggle({ Name = "Enabled", Value = FastStop.Settings.Enabled,
         Callback = function(v) FastStop.Settings.Enabled = v end })
-    fsSec:AddToggle({ Name = "Also stop Y velocity (falling)", Value = FastStop.Settings.StopY,
+    fsSec:AddToggle({ Name = "Also stop Y velocity (falling)", Value = FastStop.Settings.StopY or false,
         Callback = function(v) FastStop.Settings.StopY = v end })
 
     local noclipSec = MovementTab:CreateSection({ Name = "Noclip", Side = "Right" })
@@ -428,8 +441,11 @@ task.spawn(function()
         Callback = function(v) Noclip.Settings.Enabled = v end })
 
     --// =====================================================================
-    --// SETTINGS TAB
+    --// SETTINGS
     --// =====================================================================
+    H.Logging = H.Logging or { Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18 }
+    H.Sound = H.Sound or { HitsoundEnabled = false, HitsoundID = 83717596220569, HitsoundVolume = 1, KillsoundEnabled = false, KillsoundID = 83717596220569, KillsoundVolume = 1 }
+
     local soundIDs = {
         gamesense  = 83717596220569,
         neverlose  = 139452805868562,
@@ -470,8 +486,7 @@ task.spawn(function()
     local cfgSec = SettingsTab:CreateSection({ Name = "Configs", Side = "Right" })
     local currentConfigName = "default"
     local cfgNameBox = cfgSec:AddTextbox({
-        Name = "Config Name",
-        Value = currentConfigName,
+        Name = "Config Name", Value = currentConfigName,
         Callback = function(v) currentConfigName = v end,
     })
     cfgSec:AddTextbox({ Name = "Select # to Load", Value = "",
@@ -572,56 +587,33 @@ task.spawn(function()
     local mainSec = SettingsTab:CreateSection({ Name = "Main" })
     mainSec:AddButton({ Name = "Reset All",
         Callback = function()
-            Aimbot.Settings = {
-                Enabled = false,
-                TeamCheck = { Enabled = true, Mode = "Enemies", TreatNeutralAsEnemy = true },
-                AliveCheck = true,
-                WallCheck = false,
-                FallbackToVisible = false,
-                WallCheckMode = "Perfect",
-                DelayShot = true,
-                AimSmoothingSpeed = 6,
-                TriggerKey = "MouseButton2",
-                Toggle = false,
-                LockPart = "Head",
-                AimMethod = "Smooth",
-                SilentAim = true,
-                SilentAimMode = "Camera",
-                IgnoreFOV = false,
-                CheckFromPlayerOnTP = true,
-                PredictionEnabled = false,
-                PredictionX = 0,
-                PredictionY = 0,
-                PredictionTime = 0.15,
-                TargetNPCs = false,
-                NPCNameFilter = "",
-                AutoShoot = {
-                    Enabled = false,
-                    ShootKey = "MouseButton1",
-                    FireRate = 0.05,
-                    OnlyWhenAiming = true,
-                    AutoStop = { Enabled = false, Time = 0.1 },
-                },
-            }
-            Aimbot.FOVSettings = { Enabled = true, Visible = true, Amount = 90 }
-            pcall(CancelLock)
-            WallHack.Functions.ResetSettings()
-            AntiAim.Functions.ResetSettings()
-            ServerPosition.Settings = { Enabled = false, RGB = true, Strength = 1, MaxLimb = 6 }
-            StopServerPosition()
-            Fly.Functions.ResetSettings()
-            Bhop.Functions.ResetSettings()
-            Speed.Functions.ResetSettings()
-            FastStop.Functions.ResetSettings()
-            AutoStrafer.Functions.ResetSettings()
-            Noclip.Functions.ResetSettings()
-            H.Logging = { Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18 }
-            H.Sound = {
-                HitsoundEnabled = false, HitsoundID = 83717596220569, HitsoundVolume = 1,
-                KillsoundEnabled = false, KillsoundID = 83717596220569, KillsoundVolume = 1,
-            }
+            if Aimbot.Settings then
+                Aimbot.Settings.Enabled = false
+                Aimbot.Settings.WallCheck = false
+                Aimbot.Settings.TeamCheck = Aimbot.Settings.TeamCheck or {}
+                Aimbot.Settings.TeamCheck.Enabled = true
+                Aimbot.Settings.AutoShoot = Aimbot.Settings.AutoShoot or {}
+                Aimbot.Settings.AutoShoot.Enabled = false
+            end
+            if Aimbot.FOVSettings then Aimbot.FOVSettings.Enabled = true end
+            if WallHack.Functions and WallHack.Functions.ResetSettings then
+                pcall(WallHack.Functions.ResetSettings)
+            end
+            if AntiAim.Functions and AntiAim.Functions.ResetSettings then
+                pcall(AntiAim.Functions.ResetSettings)
+            end
+            if ServerPosition.Settings then
+                ServerPosition.Settings.Enabled = false
+                pcall(StopServerPosition)
+            end
+            if Fly.Functions and Fly.Functions.ResetSettings then pcall(Fly.Functions.ResetSettings) end
+            if Bhop.Functions and Bhop.Functions.ResetSettings then pcall(Bhop.Functions.ResetSettings) end
+            if Speed.Functions and Speed.Functions.ResetSettings then pcall(Speed.Functions.ResetSettings) end
+            if FastStop.Functions and FastStop.Functions.ResetSettings then pcall(FastStop.Functions.ResetSettings) end
+            if AutoStrafer.Functions and AutoStrafer.Functions.ResetSettings then pcall(AutoStrafer.Functions.ResetSettings) end
+            if Noclip.Functions and Noclip.Functions.ResetSettings then pcall(Noclip.Functions.ResetSettings) end
             if Library and Library.ResetAll then pcall(function() Library.ResetAll() end) end
-            ApplyGlowToAll()
+            pcall(ApplyGlowToAll)
             ShowError("All settings reset")
         end })
     mainSec:AddButton({ Name = "Rejoin",
