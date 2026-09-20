@@ -67,6 +67,7 @@ H.WallHack = {
                 Size         = 4,
                 OffsetY      = 1.8,
                 Transparency = 0,
+                Rotation     = 0,
             },
         },
     },
@@ -85,7 +86,8 @@ H.WallHack = {
         SelfESP = {
             Highlight = nil,
             HatPart   = nil,
-            HatWeld   = nil,
+            HatHead   = nil,
+            HatConn   = nil,
             CharConn  = nil,
         },
     },
@@ -95,6 +97,26 @@ local WallHack = H.WallHack
 
 local WHConnections = {}
 local ReWrapRunning = false
+
+--// ===========================================================================
+--// Color helpers (kept as public API, but UI now uses colorpickers)
+--// ===========================================================================
+local function colorToHex(c)
+    return string.format("#%02X%02X%02X",
+        math.floor(c.R * 255 + 0.5),
+        math.floor(c.G * 255 + 0.5),
+        math.floor(c.B * 255 + 0.5))
+end
+
+local function parseHex(s)
+    s = tostring(s or ""):gsub("^#", "")
+    if #s ~= 6 then return nil end
+    local r = tonumber(s:sub(1, 2), 16)
+    local g = tonumber(s:sub(3, 4), 16)
+    local b = tonumber(s:sub(5, 6), 16)
+    if not r or not g or not b then return nil end
+    return Color3.fromRGB(r, g, b)
+end
 
 --// ===========================================================================
 --// HUD — helpers
@@ -265,23 +287,6 @@ end
 --// ===========================================================================
 --// Self ESP — Chams + China Hat
 --// ===========================================================================
-local function selfESPColorHex(c)
-    return string.format("#%02X%02X%02X",
-        math.floor(c.R * 255 + 0.5),
-        math.floor(c.G * 255 + 0.5),
-        math.floor(c.B * 255 + 0.5))
-end
-
-local function selfESPParseHex(s)
-    s = tostring(s or ""):gsub("^#", "")
-    if #s ~= 6 then return nil end
-    local r = tonumber(s:sub(1, 2), 16)
-    local g = tonumber(s:sub(3, 4), 16)
-    local b = tonumber(s:sub(5, 6), 16)
-    if not r or not g or not b then return nil end
-    return Color3.fromRGB(r, g, b)
-end
-
 local function applyChamsProps(hl)
     local C = WallHack.Visuals.SelfESP.Chams
     hl.FillColor    = C.FillColor
@@ -319,6 +324,41 @@ local function removeChams()
     end
 end
 
+--// --- China Hat ---
+--// Anchored part + RenderStepped CFrame update. Bulletproof vs weld physics.
+local function stopHatLoop()
+    local Se = WallHack.Internal.SelfESP
+    if Se.HatConn then
+        pcall(function() Se.HatConn:Disconnect() end)
+        Se.HatConn = nil
+    end
+end
+
+local function removeChinaHat()
+    stopHatLoop()
+    local Se = WallHack.Internal.SelfESP
+    if Se.HatPart then
+        pcall(function() Se.HatPart:Destroy() end)
+        Se.HatPart = nil
+    end
+    Se.HatHead = nil
+end
+
+local function startHatLoop()
+    local Se = WallHack.Internal.SelfESP
+    if Se.HatConn then return end
+    Se.HatConn = RunService.RenderStepped:Connect(function()
+        if H.ShuttingDown then return end
+        local hat  = Se.HatPart
+        local head = Se.HatHead
+        if not hat or not hat.Parent then return end
+        if not head or not head.Parent then return end
+        local C = WallHack.Visuals.SelfESP.ChinaHat
+        local rot = CFrame.Angles(0, math.rad(C.Rotation or 0), 0)
+        hat.CFrame = head.CFrame * CFrame.new(0, C.OffsetY, 0) * rot
+    end)
+end
+
 local function applyChinaHat()
     local char = LocalPlayer.Character
     if not char then return end
@@ -328,24 +368,30 @@ local function applyChinaHat()
     local Se = WallHack.Internal.SelfESP
     local C  = WallHack.Visuals.SelfESP.ChinaHat
 
+    --// Update existing hat
     if Se.HatPart and Se.HatPart.Parent then
         Se.HatPart.Color        = C.Color
         Se.HatPart.Transparency = C.Transparency
         Se.HatPart.Material     = Enum.Material[C.Material] or Enum.Material.Neon
         local mesh = Se.HatPart:FindFirstChildOfClass("SpecialMesh")
-        if mesh then mesh.Scale = Vector3.new(C.Size, C.Size * 0.7, C.Size) end
-        if Se.HatWeld then Se.HatWeld.C0 = CFrame.new(0, C.OffsetY, 0) end
+        if mesh then
+            mesh.Scale = Vector3.new(C.Size, C.Size * 0.7, C.Size)
+        end
+        Se.HatHead = head
+        startHatLoop()
         return
     end
 
+    --// Fresh creation
     local hat = Instance.new("Part")
     hat.Name        = "AirHubChinaHat"
     hat.Size        = Vector3.new(1, 1, 1)
+    hat.Anchored    = true       --// prevents physics from fighting us
     hat.CanCollide  = false
     hat.CanQuery    = false
     hat.CanTouch    = false
     hat.Massless    = true
-    hat.Anchored    = false
+    hat.CastShadow  = false
     hat.Color       = C.Color
     hat.Material    = Enum.Material[C.Material] or Enum.Material.Neon
     hat.Transparency = C.Transparency
@@ -358,24 +404,9 @@ local function applyChinaHat()
 
     hat.Parent = char
 
-    local weld = Instance.new("Weld")
-    weld.Name  = "AirHubChinaHatWeld"
-    weld.Part0 = head
-    weld.Part1 = hat
-    weld.C0    = CFrame.new(0, C.OffsetY, 0)
-    weld.Parent = hat
-
     Se.HatPart = hat
-    Se.HatWeld = weld
-end
-
-local function removeChinaHat()
-    local Se = WallHack.Internal.SelfESP
-    if Se.HatPart then
-        pcall(function() Se.HatPart:Destroy() end)
-        Se.HatPart = nil
-        Se.HatWeld = nil
-    end
+    Se.HatHead = head
+    startHatLoop()
 end
 
 local function refreshSelfESP()
@@ -410,7 +441,7 @@ local function StopSelfESP()
 end
 
 --// ===========================================================================
---// Original WallHack logic
+--// Original WallHack logic (boxes + glow)
 --// ===========================================================================
 local function GetPlayerTable(plr)
     if not plr then return nil end
@@ -434,7 +465,7 @@ local function ApplyGlowForPlayer(plr)
                 data.Glow = highlight
             end
             data.Glow.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-            local gs = WallHack.Visuals.GlowSettings
+            local gs        = WallHack.Visuals.GlowSettings
             local safeColor = SanitizeColor(gs.Color)
             local safeTrans = math.clamp(tonumber(gs.Transparency) or 0.5, 0, 1)
             local mode      = gs.Mode or "Outline"
@@ -489,10 +520,10 @@ local function AddBox(plr)
     local t = GetPlayerTable(plr)
     if not t then return end
     t.Box = {
-        Square         = Drawing.new("Square"),
-        TopLeftLine    = Drawing.new("Line"),
-        TopRightLine   = Drawing.new("Line"),
-        BottomLeftLine = Drawing.new("Line"),
+        Square          = Drawing.new("Square"),
+        TopLeftLine     = Drawing.new("Line"),
+        TopRightLine    = Drawing.new("Line"),
+        BottomLeftLine  = Drawing.new("Line"),
         BottomRightLine = Drawing.new("Line"),
     }
     t.Connections.Box = RunService.RenderStepped:Connect(function()
@@ -540,9 +571,9 @@ local function AddBox(plr)
                 t.Box[ln].Transparency = WallHack.Visuals.BoxSettings.Transparency
                 t.Box[ln].Color        = boxColor
             end
-            t.Box.TopLeftLine.From,    t.Box.TopLeftLine.To    = Vector2.new(posTL.X, posTL.Y), Vector2.new(posTR.X, posTR.Y)
-            t.Box.TopRightLine.From,   t.Box.TopRightLine.To   = Vector2.new(posTR.X, posTR.Y), Vector2.new(posBR.X, posBR.Y)
-            t.Box.BottomLeftLine.From, t.Box.BottomLeftLine.To = Vector2.new(posBL.X, posBL.Y), Vector2.new(posTL.X, posTL.Y)
+            t.Box.TopLeftLine.From,     t.Box.TopLeftLine.To     = Vector2.new(posTL.X, posTL.Y), Vector2.new(posTR.X, posTR.Y)
+            t.Box.TopRightLine.From,    t.Box.TopRightLine.To    = Vector2.new(posTR.X, posTR.Y), Vector2.new(posBR.X, posBR.Y)
+            t.Box.BottomLeftLine.From,  t.Box.BottomLeftLine.To  = Vector2.new(posBL.X, posBL.Y), Vector2.new(posTL.X, posTL.Y)
             t.Box.BottomRightLine.From, t.Box.BottomRightLine.To = Vector2.new(posBR.X, posBR.Y), Vector2.new(posBL.X, posBL.Y)
         end
     end)
@@ -651,7 +682,6 @@ WallHack.Functions = {
         for _, v in pairs(Players:GetPlayers()) do
             if v ~= LocalPlayer then UnWrap(v) end
         end
-        --// NEW: clean up HUD + Self ESP
         StopHUD()
         StopSelfESP()
     end,
@@ -691,7 +721,7 @@ WallHack.Functions = {
             },
             ChinaHat = {
                 Enabled = false, Color = Color3.fromRGB(255, 60, 60),
-                Material = "Neon", Size = 4, OffsetY = 1.8, Transparency = 0,
+                Material = "Neon", Size = 4, OffsetY = 1.8, Transparency = 0, Rotation = 0,
             },
         }
         ApplyGlowToAll()
@@ -699,7 +729,6 @@ WallHack.Functions = {
         StopSelfESP()
     end,
 
-    --// HUD
     StartHUD = StartHUD,
     StopHUD  = StopHUD,
     SetHUDEnabled = function(v)
@@ -707,12 +736,13 @@ WallHack.Functions = {
         if v then StartHUD() else StopHUD() end
     end,
 
-    --// Self ESP
-    StartSelfESP        = StartSelfESP,
-    StopSelfESP         = StopSelfESP,
-    RefreshSelfESP      = refreshSelfESP,
-    ParseHex            = selfESPParseHex,
-    ColorToHex          = selfESPColorHex,
+    StartSelfESP   = StartSelfESP,
+    StopSelfESP    = StopSelfESP,
+    RefreshSelfESP = refreshSelfESP,
+
+    --// Hex helpers (kept as public API even though UI uses colorpickers now)
+    ParseHex   = parseHex,
+    ColorToHex = colorToHex,
 }
 
 WallHack.ApplyGlowToAll     = ApplyGlowToAll
