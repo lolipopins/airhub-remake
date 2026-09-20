@@ -1,5 +1,5 @@
 --// AirHub - 07a_ui_core.lua
---// UI library load, window, tabs, Aimbot tab.
+--// UI library load, window, tabs (Aimbot + World + Exploits placeholders), Aimbot tab.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
@@ -174,6 +174,19 @@ task.delay(math.random(1, 3), function()
         if Aimbot.RemoveFireServerHook   then pcall(Aimbot.RemoveFireServerHook)   end
         pcall(CleanupAntiAim)
         pcall(function() game:GetService("RunService"):UnbindFromRenderStep(AA_BIND_NAME) end)
+        --// World module cleanup
+        pcall(function()
+            if H.World and H.World.Functions and H.World.Functions.Restore then
+                H.World.Functions.Restore()
+            end
+        end)
+        --// Exploits module cleanup
+        pcall(function()
+            if H.Exploits and H.Exploits.Functions then
+                local E = H.Exploits
+                if E.Functions.StopAll then E.Functions.StopAll() end
+            end
+        end)
         pcall(function() H.ErrorText:Remove() end)
         pcall(function() for _, log in ipairs(H.ActiveLogs) do log.text:Remove() end end)
         H.ActiveLogs = {}
@@ -201,26 +214,16 @@ task.delay(math.random(1, 3), function()
         },
     })
     H._UI.MainFrame = MainFrame
-    H._UI.AimbotTab = MainFrame:CreateTab({ Name = "Aimbot" })
-    H._UI.VisualsTab = MainFrame:CreateTab({ Name = "Visuals" })
-    H._UI.AntiTab = MainFrame:CreateTab({ Name = "Anti-Aim" })
-    H._UI.MovementTab = MainFrame:CreateTab({ Name = "Movement" })
-    H._UI.SettingsTab = MainFrame:CreateTab({ Name = "Settings" })
+    H._UI.AimbotTab    = MainFrame:CreateTab({ Name = "Aimbot" })
+    H._UI.VisualsTab   = MainFrame:CreateTab({ Name = "Visuals" })
+    H._UI.AntiTab      = MainFrame:CreateTab({ Name = "Anti-Aim" })
+    H._UI.MovementTab  = MainFrame:CreateTab({ Name = "Movement" })
+    H._UI.WorldTab     = MainFrame:CreateTab({ Name = "World" })       -- NEW
+    H._UI.ExploitsTab  = MainFrame:CreateTab({ Name = "Exploits" })    -- NEW
+    H._UI.SettingsTab  = MainFrame:CreateTab({ Name = "Settings" })
 
     local teamModes = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
     local wallCheckModes = { "Fast", "Perfect" }
-    --// Silent aim modes:
-    --//   Camera          — temporary camera rotate
-    --//   Mouse           — physical cursor move + click + restore
-    --//   MouseLock       — unlock cursor (MouseBehavior=Default), move, click, relock
-    --//   MouseHit        — spoof Mouse.Hit only
-    --//   MouseFull       — spoof Mouse.Hit / UnitRay / Target / TargetSurface
-    --//   RayHook         — Ray.__index hook
-    --//   RayNew          — Ray.new constructor hook
-    --//   ScreenPointToRay— Camera:ScreenPointToRay hook
-    --//   Vector3Unit     — Vector3.Unit getter spoof
-    --//   FireServer      — RemoteEvent FireServer arg rewrite
-    --//   GunHandler      — module Shoot function hook
     local silentAimModes = {
         "Camera", "Mouse", "MouseLock", "MouseHit", "MouseFull",
         "RayHook", "RayNew", "ScreenPointToRay", "Vector3Unit",
@@ -240,18 +243,8 @@ task.delay(math.random(1, 3), function()
     secA:AddTextbox({ Name = "Aim Key (MouseButton1/2 or KeyCode)", Value = Aimbot.Settings.TriggerKey, Callback = function(v) Aimbot.Settings.TriggerKey = v end })
     secA:AddDropdown({ Name = "Aim Method", Value = Aimbot.Settings.AimMethod, List = { "Smooth", "Instant" }, Callback = function(v) Aimbot.Settings.AimMethod = v end })
     secA:AddSlider({ Name = "Smoothing Speed", Value = Aimbot.Settings.AimSmoothingSpeed, Min = 1, Max = 20, Callback = function(v) Aimbot.Settings.AimSmoothingSpeed = v end })
-
-    --// NPC targeting
-    secA:AddToggle({
-        Name = "Target NPCs (rigs/dummies)",
-        Value = Aimbot.Settings.TargetNPCs,
-        Callback = function(v) Aimbot.Settings.TargetNPCs = v end,
-    })
-    secA:AddTextbox({
-        Name = "NPC name filter (optional, substring)",
-        Value = Aimbot.Settings.NPCNameFilter or "",
-        Callback = function(v) Aimbot.Settings.NPCNameFilter = v end,
-    })
+    secA:AddToggle({ Name = "Target NPCs (rigs/dummies)", Value = Aimbot.Settings.TargetNPCs, Callback = function(v) Aimbot.Settings.TargetNPCs = v end })
+    secA:AddTextbox({ Name = "NPC name filter (optional, substring)", Value = Aimbot.Settings.NPCNameFilter or "", Callback = function(v) Aimbot.Settings.NPCNameFilter = v end })
 
     local predSec = H._UI.AimbotTab:CreateSection({ Name = "Prediction" })
     predSec:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.PredictionEnabled, Callback = function(v) Aimbot.Settings.PredictionEnabled = v end })
