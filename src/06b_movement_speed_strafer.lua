@@ -317,7 +317,16 @@ AutoStrafer.Functions = {
 }
 AutoStrafer.ReleaseAll = AS_ReleaseAll
 
-H.Noclip = { Settings = { Enabled = false }, Internal = { Active = false } }
+--// ---------------------------------------------------------------------------
+--// Noclip
+--// FIXED: now snapshots each part's original CanCollide value and restores
+--// it correctly (previously all parts were blindly set to CanCollide = true,
+--// which broke accessories/decor that were intentionally non-collidable).
+--// ---------------------------------------------------------------------------
+H.Noclip = {
+    Settings = { Enabled = false },
+    Internal = { Active = false, Saved = {} },
+}
 local Noclip = H.Noclip
 
 task.spawn(function()
@@ -325,12 +334,12 @@ task.spawn(function()
         if not Noclip.Settings.Enabled then
             if Noclip.Internal.Active then
                 Noclip.Internal.Active = false
-                local char = LocalPlayer.Character
-                if char then
-                    for _, part in ipairs(char:GetDescendants()) do
-                        if part:IsA("BasePart") then part.CanCollide = true end
+                for part, orig in pairs(Noclip.Internal.Saved) do
+                    if part and part.Parent then
+                        pcall(function() part.CanCollide = orig end)
                     end
                 end
+                Noclip.Internal.Saved = {}
             end
             continue
         end
@@ -338,21 +347,30 @@ task.spawn(function()
         local char = LocalPlayer.Character
         if char then
             for _, part in ipairs(char:GetDescendants()) do
-                if part:IsA("BasePart") then part.CanCollide = false end
+                if part:IsA("BasePart") then
+                    if Noclip.Internal.Saved[part] == nil then
+                        Noclip.Internal.Saved[part] = part.CanCollide
+                    end
+                    if part.CanCollide then part.CanCollide = false end
+                end
             end
         end
     end
 end)
 
+Track(LocalPlayer.CharacterAdded:Connect(function()
+    Noclip.Internal.Saved = {}
+    Noclip.Internal.Active = false
+end))
+
 Noclip.Functions = {
     ResetSettings = function()
-        Noclip.Settings = { Enabled = false }
-        Noclip.Internal = { Active = false }
-        local char = LocalPlayer.Character
-        if char then
-            for _, part in ipairs(char:GetDescendants()) do
-                if part:IsA("BasePart") then part.CanCollide = true end
+        for part, orig in pairs(Noclip.Internal.Saved) do
+            if part and part.Parent then
+                pcall(function() part.CanCollide = orig end)
             end
         end
+        Noclip.Settings = { Enabled = false }
+        Noclip.Internal = { Active = false, Saved = {} }
     end,
 }
