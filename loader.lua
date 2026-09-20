@@ -28,6 +28,7 @@ local AIRHUB_VERSIONS = {
             "07b_ui_tabs.lua",
             "08_world.lua",
             "09_exploits.lua",
+            "10_hud.lua",
         },
     },
     lite = {
