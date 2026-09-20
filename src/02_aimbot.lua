@@ -45,6 +45,11 @@ H.Aimbot = {
         PredictionX = 0,
         PredictionY = 0,
         PredictionTime = 0.15,
+
+        --// NEW: NPC / rig targeting
+        TargetNPCs     = false,   -- aim at models with Humanoid that aren't players
+        NPCNameFilter  = "",      -- optional substring whitelist (case-insensitive); "" = all
+
         AutoShoot = {
             Enabled = false,
             ShootKey = "MouseButton1",
@@ -55,7 +60,7 @@ H.Aimbot = {
     },
     FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
     FOVCircle   = Drawing.new("Circle"),
-    Locked      = nil,
+    Locked      = nil,  -- Player instance OR character Model (NPC)
     LockPartInstance = nil,
     Internal    = {},
 }
@@ -125,6 +130,62 @@ local function GetCheckOrigin()
         if hrp then return hrp.Position end
     end
     return workspace.CurrentCamera.CFrame.Position
+end
+
+--// ---------------------------------------------------------------------------
+--// NEW: NPC discovery
+--// ---------------------------------------------------------------------------
+local function NPCNameMatches(name)
+    local filter = Aimbot.Settings.NPCNameFilter
+    if not filter or filter == "" then return true end
+    return string.find(string.lower(name), string.lower(filter), 1, true) ~= nil
+end
+
+-- Scans workspace top-level Models and one level deep into Folders.
+-- Returns an array of character Models that look like NPCs/rigs.
+local function GetNPCCharacters()
+    local out = {}
+    local seen = {}
+    local localChar = LocalPlayer.Character
+
+    local function tryAdd(obj)
+        if not obj or seen[obj] then return end
+        if not obj:IsA("Model") then return end
+        if obj == localChar then return end
+        if Players:GetPlayerFromCharacter(obj) then return end
+
+        local hum = obj:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+        if Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
+
+        local hrp = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
+        if not hrp then return end
+
+        if not NPCNameMatches(obj.Name) then return end
+
+        seen[obj] = true
+        table.insert(out, obj)
+    end
+
+    for _, obj in ipairs(workspace:GetChildren()) do
+        if obj:IsA("Model") then
+            tryAdd(obj)
+        elseif obj:IsA("Folder") then
+            for _, child in ipairs(obj:GetChildren()) do
+                tryAdd(child)
+            end
+        end
+    end
+    return out
+end
+
+-- Resolves Aimbot.Locked into the target's character Model (Player or NPC).
+local function GetLockedCharacter()
+    local L = Aimbot.Locked
+    if not L then return nil end
+    if typeof(L) == "Instance" and L:IsA("Player") then return L.Character end
+    if typeof(L) == "Instance" and L:IsA("Model") then return L end
+    return nil
 end
 
 --// ---------------------------------------------------------------------------
@@ -212,8 +273,8 @@ local function GetVisiblePointOnPart(origin, part)
     return GetVisiblePoint_Fast(origin, part)
 end
 
-local function FindNearestPartToMouse(player, origin)
-    local char = player.Character
+--// CHANGED: now takes a character Model directly (Player or NPC)
+local function FindNearestPartToMouse(char, origin)
     if not char then return nil end
     local mousePos = GetMousePos()
     local bestPart, bestDist = nil, math.huge
@@ -233,8 +294,8 @@ local function FindNearestPartToMouse(player, origin)
     return bestPart
 end
 
-local function FindVisiblePart(player, origin, preferredParts)
-    local char = player.Character
+--// CHANGED: now takes a character Model directly (Player or NPC)
+local function FindVisiblePart(char, origin, preferredParts)
     if not char then return nil end
     if preferredParts then
         for _, name in ipairs(preferredParts) do
@@ -253,16 +314,23 @@ local function FindVisiblePart(player, origin, preferredParts)
     return nil
 end
 
-local function IsTargetValid(targetPlayer)
-    if targetPlayer == LocalPlayer then return false end
-    local char = targetPlayer.Character
-    if not char then return false end
-    local hum = char:FindFirstChildOfClass("Humanoid")
+--// CHANGED: signature now (character, playerOrNil)
+local function IsTargetValid(character, player)
+    if not character then return false end
+    if character == LocalPlayer.Character then return false end
+
+    local hum = character:FindFirstChildOfClass("Humanoid")
     if Aimbot.Settings.AliveCheck and (not hum or hum.Health <= 0) then return false end
 
+    -- NPC branch
+    if not player then
+        return Aimbot.Settings.TargetNPCs == true
+    end
+
+    -- Player branch: existing team-check logic
     local tc = Aimbot.Settings.TeamCheck
     if not tc.Enabled then return true end
-    local lt, tt = LocalPlayer.Team, targetPlayer.Team
+    local lt, tt = LocalPlayer.Team, player.Team
     local mode = tc.Mode or "Enemies"
     if mode == "All" then return true end
     if mode == "Enemies" then
@@ -284,24 +352,27 @@ local function CancelLock()
     Aimbot.FOVCircle.Color = Color3.fromRGB(255, 255, 255)
 end
 
+--// CHANGED: iterates both Players and NPCs
 local function GetClosestPlayer()
+    --// Keep current lock if still valid
     if Aimbot.Locked then
-        local target = Aimbot.Locked
-        if not target or not target.Character then CancelLock() return end
-        if not IsTargetValid(target) then CancelLock() return end
+        local targetChar = GetLockedCharacter()
+        if not targetChar then CancelLock() return end
+        local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
+        if not IsTargetValid(targetChar, targetPlayer) then CancelLock() return end
 
         local origin = GetCheckOrigin()
         local lockPart = Aimbot.Settings.LockPart
         local part
         if lockPart == "Nearest" then
-            part = FindNearestPartToMouse(target, origin)
+            part = FindNearestPartToMouse(targetChar, origin)
         else
             local preferred = GetActualPartName(lockPart)
             if Aimbot.Settings.FallbackToVisible then
-                part = FindVisiblePart(target, origin, preferred)
+                part = FindVisiblePart(targetChar, origin, preferred)
             else
                 for _, name in ipairs(preferred) do
-                    local p = target.Character:FindFirstChild(name)
+                    local p = targetChar:FindFirstChild(name)
                     if p and p:IsA("BasePart") and GetVisiblePointOnPart(origin, p) then
                         part = p; break
                     end
@@ -312,6 +383,19 @@ local function GetClosestPlayer()
         return
     end
 
+    --// Build candidate list
+    local candidates = {}
+    for _, v in ipairs(Players:GetPlayers()) do
+        if v.Character and v ~= LocalPlayer then
+            table.insert(candidates, { character = v.Character, player = v })
+        end
+    end
+    if Aimbot.Settings.TargetNPCs then
+        for _, npc in ipairs(GetNPCCharacters()) do
+            table.insert(candidates, { character = npc, player = nil })
+        end
+    end
+
     local ignoreFOV = Aimbot.Settings.IgnoreFOV
     local fovEnabled = Aimbot.FOVSettings.Enabled and not ignoreFOV
     local required = fovEnabled and Aimbot.FOVSettings.Amount or 999999
@@ -319,39 +403,39 @@ local function GetClosestPlayer()
     local mousePos = GetMousePos()
     local origin = GetCheckOrigin()
 
-    for _, v in pairs(Players:GetPlayers()) do
-        if IsTargetValid(v) then
-            local charTarget = v.Character
-            if charTarget then
-                local lockPart = Aimbot.Settings.LockPart
-                local targetPart = nil
-                if lockPart == "Nearest" then
-                    targetPart = FindNearestPartToMouse(v, origin)
+    for _, cand in ipairs(candidates) do
+        if IsTargetValid(cand.character, cand.player) then
+            local charTarget = cand.character
+            local lockPart = Aimbot.Settings.LockPart
+            local targetPart = nil
+            if lockPart == "Nearest" then
+                targetPart = FindNearestPartToMouse(charTarget, origin)
+            else
+                local preferred = GetActualPartName(lockPart)
+                if Aimbot.Settings.FallbackToVisible then
+                    targetPart = FindVisiblePart(charTarget, origin, preferred)
                 else
-                    local preferred = GetActualPartName(lockPart)
-                    if Aimbot.Settings.FallbackToVisible then
-                        targetPart = FindVisiblePart(v, origin, preferred)
-                    else
-                        for _, name in ipairs(preferred) do
-                            local p = charTarget:FindFirstChild(name)
-                            if p and p:IsA("BasePart") and GetVisiblePointOnPart(origin, p) then
-                                targetPart = p; break
-                            end
+                    for _, name in ipairs(preferred) do
+                        local p = charTarget:FindFirstChild(name)
+                        if p and p:IsA("BasePart") and GetVisiblePointOnPart(origin, p) then
+                            targetPart = p; break
                         end
                     end
                 end
-                if targetPart then
-                    local point = GetVisiblePointOnPart(origin, targetPart) or PredictPartPosition(targetPart)
-                    local vec, on = workspace.CurrentCamera:WorldToViewportPoint(point)
-                    local dist
-                    if ignoreFOV then
-                        dist = (point - origin).Magnitude
-                    else
-                        dist = on and (mousePos - Vector2.new(vec.X, vec.Y)).Magnitude or math.huge
-                    end
-                    if dist < bestDist and (ignoreFOV or dist < required) then
-                        bestDist, bestTarget, bestPart = dist, v, targetPart
-                    end
+            end
+            if targetPart then
+                local point = GetVisiblePointOnPart(origin, targetPart) or PredictPartPosition(targetPart)
+                local vec, on = workspace.CurrentCamera:WorldToViewportPoint(point)
+                local dist
+                if ignoreFOV then
+                    dist = (point - origin).Magnitude
+                else
+                    dist = on and (mousePos - Vector2.new(vec.X, vec.Y)).Magnitude or math.huge
+                end
+                if dist < bestDist and (ignoreFOV or dist < required) then
+                    bestDist  = dist
+                    bestTarget = cand.player or charTarget   -- Player OR Model
+                    bestPart   = targetPart
                 end
             end
         end
@@ -365,11 +449,10 @@ local function GetClosestPlayer()
     end
 end
 
-local function LogShot(targetPlayer, startHealth, hitPartName, wasVisible)
-    if not targetPlayer then return end
-    local char = targetPlayer.Character
-    if not char then return end
-    local hum = char:FindFirstChildOfClass("Humanoid")
+--// CHANGED: takes character + display name (works for Player or NPC)
+local function LogShot(targetChar, targetName, startHealth, hitPartName, wasVisible)
+    if not targetChar then return end
+    local hum = targetChar:FindFirstChildOfClass("Humanoid")
     if not hum then return end
     local endHealth = hum.Health
     local hit = endHealth < startHealth
@@ -382,20 +465,21 @@ local function LogShot(targetPlayer, startHealth, hitPartName, wasVisible)
     if hit and not H.Logging.ShowHit then return end
     if not hit and not H.Logging.ShowMiss then return end
 
+    local displayName = targetName or targetChar.Name
     local msg, color
     if hit then
         if hum.Health <= 0 then
-            msg = "💀 Killed " .. targetPlayer.Name .. " (" .. hitPartName .. ")"
+            msg = "💀 Killed " .. displayName .. " (" .. hitPartName .. ")"
             color = Color3.fromRGB(255, 255, 0)
         else
-            msg = "✅ Hit " .. targetPlayer.Name .. " (" .. hitPartName .. " - " .. math.floor(startHealth - endHealth) .. " dmg)"
+            msg = "✅ Hit " .. displayName .. " (" .. hitPartName .. " - " .. math.floor(startHealth - endHealth) .. " dmg)"
             color = Color3.fromRGB(0, 255, 0)
         end
     else
         if not wasVisible then
-            msg = "❌ Missed (wall) " .. targetPlayer.Name
+            msg = "❌ Missed (wall) " .. displayName
         else
-            msg = "❌ Missed " .. targetPlayer.Name
+            msg = "❌ Missed " .. displayName
         end
         color = Color3.fromRGB(255, 80, 80)
     end
@@ -435,7 +519,7 @@ local function RefreshOldPositionIfNeeded()
 end
 
 --// ---------------------------------------------------------------------------
---// Delay Shot — auto-wait for guaranteed shot point
+--// Delay Shot
 --// ---------------------------------------------------------------------------
 local function WaitForShotPoint(targetPart)
     if not targetPart then return nil, false end
@@ -456,31 +540,24 @@ local function WaitForShotPoint(targetPart)
 end
 
 --// ---------------------------------------------------------------------------
---// Mouse-move helper for "Mouse" silent aim mode
+--// Mouse-move helpers for "Mouse" silent aim mode
 --// ---------------------------------------------------------------------------
---// Converts a world position into VirtualInputManager mouse coordinates
---// (viewport -> VIM space, topbar offset +36 on Y).
 local function WorldToMouseVIM(worldPos)
     local screenPos, onScreen = workspace.CurrentCamera:WorldToViewportPoint(worldPos)
     if not onScreen then return nil end
     return math.floor(screenPos.X), math.floor(screenPos.Y + 36)
 end
 
---// Tries several methods to move the physical cursor to (x, y).
---// Returns true if any method succeeded.
 local function MoveMouseAbs(x, y)
-    -- 1) executor helper (most reliable on Synapse/KRNL/etc.)
     if type(mousemoveabs) == "function" then
         if pcall(mousemoveabs, x, y) then return true end
     end
     if type(mousemoverel) == "function" then
-        -- fall back: compute delta from current location and use relative move
         local cur = UserInputService:GetMouseLocation()
         local dx = x - math.floor(cur.X)
         local dy = y - math.floor(cur.Y)
         if pcall(mousemoverel, dx, dy) then return true end
     end
-    -- 2) VirtualInputManager
     local vimOk = pcall(function()
         VirtualInputManager:SendMouseMoveEvent(x, y, game)
     end)
@@ -495,8 +572,9 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if not targetPart then return end
 
     local targetChar = targetPart.Parent
-    local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
-    if not targetPlayer then return end
+    if not targetChar then return end
+    local targetPlayer = Players:GetPlayerFromCharacter(targetChar)  -- nil for NPCs
+    local displayName  = targetPlayer and targetPlayer.Name or targetChar.Name
 
     local hum = targetChar:FindFirstChildOfClass("Humanoid")
     if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
@@ -509,7 +587,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if nowVisible ~= nil then wasVisible = nowVisible end
 
     --// =====================================================================
-    --// NEW: "Mouse" silent aim — physically move cursor, click, restore
+    --// "Mouse" mode — physical cursor move + click + restore
     --// =====================================================================
     if Aimbot.Settings.SilentAimMode == "Mouse" then
         local visiblePoint = checkPoint
@@ -522,15 +600,13 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         local targetX, targetY = WorldToMouseVIM(visiblePoint)
         if not targetX then return end
 
-        -- Save current mouse position in VIM space
         local curMouse = UserInputService:GetMouseLocation()
         local oldX = math.floor(curMouse.X)
         local oldY = math.floor(curMouse.Y)
 
-        -- Move -> click down -> click up -> move back
         local ok = pcall(function()
             MoveMouseAbs(targetX, targetY)
-            task.wait()  -- one frame for the move to register
+            task.wait()
             VirtualInputManager:SendMouseButtonEvent(targetX, targetY, btn, true,  game, 1)
             VirtualInputManager:SendMouseButtonEvent(targetX, targetY, btn, false, game, 1)
             MoveMouseAbs(oldX, oldY)
@@ -538,14 +614,13 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         if not ok then HandleError("Mouse silent shot failed") end
 
         task.delay(0.15, function()
-            LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible)
+            LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
         end)
         return
     end
 
     --// =====================================================================
-    --// Hook-based modes (GunHandler / RayHook / MouseHit) — just trigger
-    --// the click; the hook will redirect the raycast/Origin.
+    --// Hook-based modes
     --// =====================================================================
     if Aimbot.Settings.SilentAimMode == "GunHandler"
         or Aimbot.Settings.SilentAimMode == "RayHook"
@@ -555,13 +630,13 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         task.wait(0.001)
         VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
         task.delay(0.15, function()
-            LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible)
+            LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
         end)
         return
     end
 
     --// =====================================================================
-    --// Default: "Camera" mode — temporarily rotate camera, click, restore
+    --// Default "Camera" mode
     --// =====================================================================
     local origin = workspace.CurrentCamera.CFrame.Position
     local visiblePoint = checkPoint or GetVisiblePointOnPart(origin, targetPart)
@@ -580,7 +655,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if not ok then HandleError("Silent shot input failed") end
 
     task.delay(0.15, function()
-        LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible)
+        LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
     end)
 end
 
@@ -653,6 +728,8 @@ local oldRayIndex = nil
 local function GetClosestTargetRay()
     local target, dist = nil, math.huge
     local mousePos = GetMousePos()
+
+    local candidates = {}
     for _, player in next, Players:GetPlayers() do
         if player ~= LocalPlayer and player.Character then
             local sameTeam
@@ -662,16 +739,25 @@ local function GetClosestTargetRay()
                 sameTeam = (LocalPlayer:GetAttribute('Team') == player:GetAttribute('Team'))
             end
             if not sameTeam then
-                local head = player.Character:FindFirstChild('Head')
-                local hum = player.Character:FindFirstChildOfClass('Humanoid')
-                if head and hum and hum.Health > 0 then
-                    local screenPos, onScreen = workspace.CurrentCamera:WorldToViewportPoint(head.Position)
-                    if onScreen then
-                        local headPos = Vector2.new(screenPos.X, screenPos.Y)
-                        local mag = (mousePos - headPos).magnitude
-                        if mag < dist then dist = mag; target = head end
-                    end
-                end
+                table.insert(candidates, player.Character)
+            end
+        end
+    end
+    if Aimbot.Settings.TargetNPCs then
+        for _, npc in ipairs(GetNPCCharacters()) do
+            table.insert(candidates, npc)
+        end
+    end
+
+    for _, char in ipairs(candidates) do
+        local head = char:FindFirstChild('Head')
+        local hum  = char:FindFirstChildOfClass('Humanoid')
+        if head and hum and hum.Health > 0 then
+            local screenPos, onScreen = workspace.CurrentCamera:WorldToViewportPoint(head.Position)
+            if onScreen then
+                local headPos = Vector2.new(screenPos.X, screenPos.Y)
+                local mag = (mousePos - headPos).magnitude
+                if mag < dist then dist = mag; target = head end
             end
         end
     end
@@ -781,7 +867,6 @@ local function LoadAimbot()
         local dt = math.min(0.033, now - lastDelta)
         lastDelta = now
 
-        -- FOV circle visible only when Aimbot itself is enabled
         if Aimbot.Settings.Enabled and Aimbot.FOVSettings.Enabled and not Aimbot.Settings.IgnoreFOV then
             Aimbot.FOVCircle.Radius = Aimbot.FOVSettings.Amount
             Aimbot.FOVCircle.Thickness = 1
@@ -912,8 +997,8 @@ local function LoadAimbot()
                 local targetPart = Aimbot.LockPartInstance
                 if not targetPart then return end
                 local targetChar = targetPart.Parent
-                local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
-                if not targetPlayer then return end
+                if not targetChar then return end
+
                 local hum = targetChar:FindFirstChildOfClass("Humanoid")
                 if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then CancelLock() return end
                 local startHealth = hum and hum.Health or 0
@@ -965,3 +1050,5 @@ Aimbot.GetMousePos         = GetMousePos
 Aimbot.PredictPartPosition = PredictPartPosition
 Aimbot.MoveMouseAbs        = MoveMouseAbs
 Aimbot.WorldToMouseVIM     = WorldToMouseVIM
+Aimbot.GetNPCCharacters    = GetNPCCharacters
+Aimbot.GetLockedCharacter  = GetLockedCharacter
