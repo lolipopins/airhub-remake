@@ -205,9 +205,12 @@ task.delay(math.random(1, 3), function()
 
     local teamModes = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
     local wallCheckModes = { "Fast", "Perfect" }
-    --// Добавлен режим "Mouse" — физическое движение курсора к врагу и возврат назад
+    --// "Mouse" — физическое движение курсора к врагу и возврат назад
     local silentAimModes = { "Camera", "Mouse", "GunHandler", "RayHook", "MouseHit" }
 
+    --// =====================================================================
+    --// AIMBOT TAB
+    --// =====================================================================
     local secA = H._UI.AimbotTab:CreateSection({ Name = "Main" })
     secA:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.Enabled, Callback = function(v) Aimbot.Settings.Enabled = v end })
     secA:AddToggle({ Name = "Toggle", Value = Aimbot.Settings.Toggle, Callback = function(v) Aimbot.Settings.Toggle = v end })
@@ -218,6 +221,18 @@ task.delay(math.random(1, 3), function()
     secA:AddTextbox({ Name = "Aim Key (MouseButton1/2 or KeyCode)", Value = Aimbot.Settings.TriggerKey, Callback = function(v) Aimbot.Settings.TriggerKey = v end })
     secA:AddDropdown({ Name = "Aim Method", Value = Aimbot.Settings.AimMethod, List = { "Smooth", "Instant" }, Callback = function(v) Aimbot.Settings.AimMethod = v end })
     secA:AddSlider({ Name = "Smoothing Speed", Value = Aimbot.Settings.AimSmoothingSpeed, Min = 1, Max = 20, Callback = function(v) Aimbot.Settings.AimSmoothingSpeed = v end })
+
+    --// NEW: NPC targeting
+    secA:AddToggle({
+        Name = "Target NPCs (rigs/dummies)",
+        Value = Aimbot.Settings.TargetNPCs,
+        Callback = function(v) Aimbot.Settings.TargetNPCs = v end,
+    })
+    secA:AddTextbox({
+        Name = "NPC name filter (optional, substring)",
+        Value = Aimbot.Settings.NPCNameFilter or "",
+        Callback = function(v) Aimbot.Settings.NPCNameFilter = v end,
+    })
 
     local predSec = H._UI.AimbotTab:CreateSection({ Name = "Prediction" })
     predSec:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.PredictionEnabled, Callback = function(v) Aimbot.Settings.PredictionEnabled = v end })
