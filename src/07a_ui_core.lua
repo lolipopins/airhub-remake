@@ -4,92 +4,137 @@
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
 
-local Util = H.Util
+local Util             = H.Util
 local UserInputService = Util.UserInputService
-local LocalPlayer = Util.LocalPlayer
-local Track = Util.Track
-local UntrackAll = Util.UntrackAll
-local ShowError = Util.ShowError
+local LocalPlayer      = Util.LocalPlayer
+local Track            = Util.Track
+local UntrackAll       = Util.UntrackAll
+local ShowError        = Util.ShowError
 
-local Aimbot = H.Aimbot
-local WallHack = H.WallHack
-local AntiAim = H.AntiAim
+local Aimbot         = H.Aimbot
+local WallHack       = H.WallHack
+local AntiAim        = H.AntiAim
 local ServerPosition = H.ServerPosition
-local Fly = H.Fly
-local Bhop = H.Bhop
-local Speed = H.Speed
-local FastStop = H.FastStop
-local AutoStrafer = H.AutoStrafer
-local Noclip = H.Noclip
+local Fly            = H.Fly
+local Bhop           = H.Bhop
+local Speed          = H.Speed
+local FastStop       = H.FastStop
+local AutoStrafer    = H.AutoStrafer
+local Noclip         = H.Noclip
 
-local CancelLock = Aimbot.CancelLock
-local RemoveRayHook = Aimbot.RemoveRayHook
-local RemoveMouseHitHook = Aimbot.RemoveMouseHitHook
-local RemoveGunHandlerHook = Aimbot.RemoveGunHandlerHook
-local ApplyGlowToAll = WallHack.ApplyGlowToAll
-local StartServerPosition = ServerPosition.Start
-local StopServerPosition = ServerPosition.Stop
-local Fly_ClearInstances = Fly.ClearInstances
-local AS_ReleaseAll = AutoStrafer.ReleaseAll
-local StopDesync = AntiAim.StopDesync
-local StartDesync = AntiAim.StartDesync
-local CleanupAntiAim = AntiAim.CleanupAntiAim
-local AA_BIND_NAME = AntiAim.AA_BIND_NAME
+--// ---------------------------------------------------------------------------
+--// Defensive proxies — any missing module/function becomes a no-op instead of
+--// crashing the whole UI module. Logs once so it's visible in the console.
+--// ---------------------------------------------------------------------------
+local _missingLogged = {}
+local function noop() end
+local function orNoop(fn, label)
+    if type(fn) == "function" then return fn end
+    if label and not _missingLogged[label] then
+        _missingLogged[label] = true
+        warn("[AirHub] 07a: missing function → " .. tostring(label))
+    end
+    return noop
+end
+local function orTable(t, label)
+    if type(t) == "table" then return t end
+    if label and not _missingLogged[label] then
+        _missingLogged[label] = true
+        warn("[AirHub] 07a: missing module → " .. tostring(label))
+    end
+    return {}
+end
 
+Aimbot         = orTable(Aimbot,         "Aimbot")
+WallHack       = orTable(WallHack,       "WallHack")
+AntiAim        = orTable(AntiAim,        "AntiAim")
+ServerPosition = orTable(ServerPosition, "ServerPosition")
+Fly            = orTable(Fly,            "Fly")
+Bhop           = orTable(Bhop,           "Bhop")
+Speed          = orTable(Speed,          "Speed")
+FastStop       = orTable(FastStop,       "FastStop")
+AutoStrafer    = orTable(AutoStrafer,    "AutoStrafer")
+Noclip         = orTable(Noclip,         "Noclip")
+
+local CancelLock           = orNoop(Aimbot.CancelLock,                "Aimbot.CancelLock")
+local RemoveRayHook        = orNoop(Aimbot.RemoveRayHook,             "Aimbot.RemoveRayHook")
+local RemoveMouseHitHook   = orNoop(Aimbot.RemoveMouseHitHook,        "Aimbot.RemoveMouseHitHook")
+local RemoveGunHandlerHook = orNoop(Aimbot.RemoveGunHandlerHook,      "Aimbot.RemoveGunHandlerHook")
+local ApplyGlowToAll       = orNoop(WallHack.ApplyGlowToAll,          "WallHack.ApplyGlowToAll")
+local StartServerPosition  = orNoop(ServerPosition.Start,             "ServerPosition.Start")
+local StopServerPosition   = orNoop(ServerPosition.Stop,              "ServerPosition.Stop")
+local Fly_ClearInstances   = orNoop(Fly.ClearInstances,               "Fly.ClearInstances")
+local AS_ReleaseAll        = orNoop(AutoStrafer.ReleaseAll,           "AutoStrafer.ReleaseAll")
+local StopDesync           = orNoop(AntiAim.StopDesync,               "AntiAim.StopDesync")
+local StartDesync          = orNoop(AntiAim.StartDesync,              "AntiAim.StartDesync")
+local CleanupAntiAim       = orNoop(AntiAim.CleanupAntiAim,           "AntiAim.CleanupAntiAim")
+local AA_BIND_NAME         = AntiAim.AA_BIND_NAME or "AirHubAntiAim"
+
+--// ---------------------------------------------------------------------------
+--// ApplyAllEnabledStates
+--// ---------------------------------------------------------------------------
 local function ApplyAllEnabledStates()
     local Hg = getgenv().AirHub
     if not Hg then return end
-    if WallHack.Settings.Enabled then ApplyGlowToAll() end
-    if Hg.AntiAim and Hg.AntiAim.Desync.Settings.Enabled then
+
+    if WallHack.Settings and WallHack.Settings.Enabled then ApplyGlowToAll() end
+
+    if Hg.AntiAim and Hg.AntiAim.Desync and Hg.AntiAim.Desync.Settings
+       and Hg.AntiAim.Desync.Settings.Enabled then
         StopDesync()
         task.defer(function()
-            if getgenv().AirHub and getgenv().AirHub.AntiAim.Desync.Settings.Enabled then
+            if getgenv().AirHub and getgenv().AirHub.AntiAim
+               and getgenv().AirHub.AntiAim.Desync.Settings.Enabled then
                 StartDesync()
             end
         end)
     else
         StopDesync()
     end
-    if Hg.ServerPosition and Hg.ServerPosition.Settings.Enabled then
+
+    if Hg.ServerPosition and Hg.ServerPosition.Settings
+       and Hg.ServerPosition.Settings.Enabled then
         StopServerPosition()
         task.defer(function()
-            if getgenv().AirHub and getgenv().AirHub.ServerPosition.Settings.Enabled then
+            if getgenv().AirHub and getgenv().AirHub.ServerPosition
+               and getgenv().AirHub.ServerPosition.Settings.Enabled then
                 StartServerPosition()
             end
         end)
     else
         StopServerPosition()
     end
-    if Hg.Fly then
+
+    if Hg.Fly and Hg.Fly.Settings and Hg.Fly.Internal then
         Fly_ClearInstances()
         Hg.Fly.Internal.Active = Hg.Fly.Settings.Enabled and Hg.Fly.Settings.Toggle or false
     end
-    if Hg.Bhop then
+    if Hg.Bhop and Hg.Bhop.Internal then
         Hg.Bhop.Internal.KeyHeld = false
         Hg.Bhop.Internal.Active = false
         Hg.Bhop.Internal.SpiderTouching = false
     end
-    if Hg.Speed then Hg.Speed.Internal.Active = false end
-    if Hg.Noclip then Hg.Noclip.Internal.Active = false end
-    if Hg.AutoStrafer then
-        AutoStrafer.Internal.Active = false
+    if Hg.Speed and Hg.Speed.Internal then Hg.Speed.Internal.Active = false end
+    if Hg.Noclip and Hg.Noclip.Internal then Hg.Noclip.Internal.Active = false end
+    if Hg.AutoStrafer and Hg.AutoStrafer.Internal then
+        Hg.AutoStrafer.Internal.Active = false
         AS_ReleaseAll()
     end
-    if Hg.FastStop then FastStop.Internal.LastActive = false end
+    if Hg.FastStop and Hg.FastStop.Internal then Hg.FastStop.Internal.LastActive = false end
 
     if WallHack and WallHack.Functions then
         if WallHack.Visuals and WallHack.Visuals.HUDSettings then
             if WallHack.Visuals.HUDSettings.Enabled then
-                WallHack.Functions.StartHUD()
+                if WallHack.Functions.StartHUD then WallHack.Functions.StartHUD() end
             else
-                WallHack.Functions.StopHUD()
+                if WallHack.Functions.StopHUD then WallHack.Functions.StopHUD() end
             end
         end
         if WallHack.Visuals and WallHack.Visuals.SelfESP then
             if WallHack.Visuals.SelfESP.Enabled then
-                WallHack.Functions.StartSelfESP()
+                if WallHack.Functions.StartSelfESP then WallHack.Functions.StartSelfESP() end
             else
-                WallHack.Functions.StopSelfESP()
+                if WallHack.Functions.StopSelfESP then WallHack.Functions.StopSelfESP() end
             end
         end
     end
@@ -98,6 +143,9 @@ end
 H._UI = H._UI or {}
 H._UI.ApplyAllEnabledStates = ApplyAllEnabledStates
 
+--// ---------------------------------------------------------------------------
+--// UI bootstrap
+--// ---------------------------------------------------------------------------
 task.delay(math.random(1, 3), function()
     if H.ShuttingDown then return end
     local Library
@@ -124,8 +172,8 @@ task.delay(math.random(1, 3), function()
         if type(Library.Unload) == "function" then pcall(function() Library:Unload() end) return end
         if type(Library.Destroy) == "function" then pcall(function() Library:Destroy() end) return end
     end
-    H._UI.SafeShow = SafeShow
-    H._UI.SafeHide = SafeHide
+    H._UI.SafeShow   = SafeShow
+    H._UI.SafeHide   = SafeHide
     H._UI.SafeUnload = SafeUnload
 
     H._UI.MenuVisible = true
@@ -139,36 +187,53 @@ task.delay(math.random(1, 3), function()
 
     Library.UnloadCallback = function()
         H.ShuttingDown = true
-        Aimbot.Settings.Enabled = false
-        Aimbot.Settings.AutoShoot.Enabled = false
-        Aimbot.FOVSettings.Enabled = false
-        WallHack.Settings.Enabled = false
-        WallHack.Visuals.BoxSettings.Enabled = false
-        WallHack.Visuals.GlowSettings.Enabled = false
-        if WallHack.Visuals.HUDSettings then WallHack.Visuals.HUDSettings.Enabled = false end
-        if WallHack.Visuals.SelfESP    then WallHack.Visuals.SelfESP.Enabled    = false end
-        AntiAim.Settings.Enabled = false
-        AntiAim.Desync.Settings.Enabled = false
-        ServerPosition.Settings.Enabled = false
-        Fly.Settings.Enabled = false
-        Bhop.Settings.Enabled = false
-        Speed.Settings.Enabled = false
-        FastStop.Settings.Enabled = false
-        AutoStrafer.Settings.Enabled = false
-        Noclip.Settings.Enabled = false
-        Fly.Internal.Active = false
-        Bhop.Internal.KeyHeld = false
-        Bhop.Internal.Active = false
-        AutoStrafer.Internal.Active = false
-        Speed.Internal.Active = false
-        Noclip.Internal.Active = false
-        FastStop.Internal.LastActive = false
+
+        if Aimbot.Settings then
+            Aimbot.Settings.Enabled = false
+            if Aimbot.Settings.AutoShoot then Aimbot.Settings.AutoShoot.Enabled = false end
+        end
+        if Aimbot.FOVSettings then Aimbot.FOVSettings.Enabled = false end
+
+        if WallHack.Settings then WallHack.Settings.Enabled = false end
+        if WallHack.Visuals then
+            if WallHack.Visuals.BoxSettings then WallHack.Visuals.BoxSettings.Enabled = false end
+            if WallHack.Visuals.GlowSettings then WallHack.Visuals.GlowSettings.Enabled = false end
+            if WallHack.Visuals.HUDSettings then WallHack.Visuals.HUDSettings.Enabled = false end
+            if WallHack.Visuals.SelfESP then WallHack.Visuals.SelfESP.Enabled = false end
+        end
+
+        if AntiAim.Settings then AntiAim.Settings.Enabled = false end
+        if AntiAim.Desync and AntiAim.Desync.Settings then
+            AntiAim.Desync.Settings.Enabled = false
+        end
+
+        if ServerPosition.Settings then ServerPosition.Settings.Enabled = false end
+        if Fly.Settings then Fly.Settings.Enabled = false end
+        if Bhop.Settings then Bhop.Settings.Enabled = false end
+        if Speed.Settings then Speed.Settings.Enabled = false end
+        if FastStop.Settings then FastStop.Settings.Enabled = false end
+        if AutoStrafer.Settings then AutoStrafer.Settings.Enabled = false end
+        if Noclip.Settings then Noclip.Settings.Enabled = false end
+
+        if Fly.Internal then Fly.Internal.Active = false end
+        if Bhop.Internal then
+            Bhop.Internal.KeyHeld = false
+            Bhop.Internal.Active = false
+        end
+        if AutoStrafer.Internal then AutoStrafer.Internal.Active = false end
+        if Speed.Internal then Speed.Internal.Active = false end
+        if Noclip.Internal then Noclip.Internal.Active = false end
+        if FastStop.Internal then FastStop.Internal.LastActive = false end
+
         pcall(function() CancelLock() end)
-        pcall(function() Aimbot.FOVCircle:Remove() end)
-        pcall(function() WallHack.Functions.Exit() end)
-        pcall(StopServerPosition)
-        pcall(StopDesync)
-        pcall(Fly_ClearInstances)
+        pcall(function() if Aimbot.FOVCircle then Aimbot.FOVCircle:Remove() end end)
+        pcall(function()
+            if WallHack.Functions and WallHack.Functions.Exit then WallHack.Functions.Exit() end
+        end)
+        pcall(function() StopServerPosition() end)
+        pcall(function() StopDesync() end)
+        pcall(function() Fly_ClearInstances() end)
+
         pcall(function()
             local char = LocalPlayer.Character
             if char then
@@ -182,17 +247,19 @@ task.delay(math.random(1, 3), function()
                 end
             end
         end)
-        pcall(function() if AutoStrafer.Internal.KeyA or AutoStrafer.Internal.KeyD then AS_ReleaseAll() end end)
-        pcall(RemoveRayHook)
-        pcall(RemoveMouseHitHook)
-        pcall(RemoveGunHandlerHook)
+
+        pcall(function() AS_ReleaseAll() end)
+        pcall(function() RemoveRayHook() end)
+        pcall(function() RemoveMouseHitHook() end)
+        pcall(function() RemoveGunHandlerHook() end)
         if Aimbot.RemoveRayNewHook      then pcall(Aimbot.RemoveRayNewHook)      end
         if Aimbot.RemoveVector3UnitHook then pcall(Aimbot.RemoveVector3UnitHook) end
         if Aimbot.RemoveSPRHook         then pcall(Aimbot.RemoveSPRHook)         end
         if Aimbot.RemoveFireServerHook  then pcall(Aimbot.RemoveFireServerHook)  end
         if Aimbot.RemoveMouseHook       then pcall(Aimbot.RemoveMouseHook)       end
-        pcall(CleanupAntiAim)
+        pcall(function() CleanupAntiAim() end)
         pcall(function() game:GetService("RunService"):UnbindFromRenderStep(AA_BIND_NAME) end)
+
         pcall(function()
             if H.World and H.World.Functions and H.World.Functions.Restore then
                 H.World.Functions.Restore()
@@ -203,19 +270,26 @@ task.delay(math.random(1, 3), function()
                 H.Exploits.Functions.StopAll()
             end
         end)
-        pcall(function() H.ErrorText:Remove() end)
-        pcall(function() for _, log in ipairs(H.ActiveLogs) do log.text:Remove() end end)
+
+        pcall(function() if H.ErrorText then H.ErrorText:Remove() end end)
+        pcall(function()
+            if H.ActiveLogs then
+                for _, log in ipairs(H.ActiveLogs) do
+                    if log.text then log.text:Remove() end
+                end
+            end
+        end)
         H.ActiveLogs = {}
-        pcall(function() if H.Sounds.Hitsound then H.Sounds.Hitsound:Destroy() end end)
-        pcall(function() if H.Sounds.Killsound then H.Sounds.Killsound:Destroy() end end)
+        pcall(function() if H.Sounds and H.Sounds.Hitsound then H.Sounds.Hitsound:Destroy() end end)
+        pcall(function() if H.Sounds and H.Sounds.Killsound then H.Sounds.Killsound:Destroy() end end)
         pcall(UntrackAll)
         getgenv().AirHub = nil
         pcall(function()
             local t = Drawing.new("Text")
-            t.Text = "AirHub unloaded"
-            t.Size = 20
-            t.Color = Color3.fromRGB(255, 80, 80)
-            t.Center = true
+            t.Text    = "AirHub unloaded"
+            t.Size    = 20
+            t.Color   = Color3.fromRGB(255, 80, 80)
+            t.Center  = true
             t.Outline = true
             t.Position = workspace.CurrentCamera.ViewportSize / 2
             task.delay(2, function() t:Remove() end)
@@ -229,14 +303,14 @@ task.delay(math.random(1, 3), function()
             Info = "Strafe Helper | Silent Aim | Ghost | Fly | Configs", Credit = false,
         },
     })
-    H._UI.MainFrame    = MainFrame
-    H._UI.AimbotTab    = MainFrame:CreateTab({ Name = "Aimbot" })
-    H._UI.VisualsTab   = MainFrame:CreateTab({ Name = "Visuals" })
-    H._UI.AntiTab      = MainFrame:CreateTab({ Name = "Anti-Aim" })
-    H._UI.MovementTab  = MainFrame:CreateTab({ Name = "Movement" })
-    H._UI.WorldTab     = MainFrame:CreateTab({ Name = "World" })
-    H._UI.ExploitsTab  = MainFrame:CreateTab({ Name = "Exploits" })
-    H._UI.SettingsTab  = MainFrame:CreateTab({ Name = "Settings" })
+    H._UI.MainFrame   = MainFrame
+    H._UI.AimbotTab   = MainFrame:CreateTab({ Name = "Aimbot" })
+    H._UI.VisualsTab  = MainFrame:CreateTab({ Name = "Visuals" })
+    H._UI.AntiTab     = MainFrame:CreateTab({ Name = "Anti-Aim" })
+    H._UI.MovementTab = MainFrame:CreateTab({ Name = "Movement" })
+    H._UI.WorldTab    = MainFrame:CreateTab({ Name = "World" })
+    H._UI.ExploitsTab = MainFrame:CreateTab({ Name = "Exploits" })
+    H._UI.SettingsTab = MainFrame:CreateTab({ Name = "Settings" })
 
     local teamModes      = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
     local wallCheckModes = { "Fast", "Perfect" }
@@ -246,112 +320,141 @@ task.delay(math.random(1, 3), function()
         "FireServer", "GunHandler",
     }
 
-    --// =====================================================================
-    --// AIMBOT TAB
-    --// =====================================================================
-    local secA = H._UI.AimbotTab:CreateSection({ Name = "Main" })
-    secA:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.Enabled,
-        Callback = function(v) Aimbot.Settings.Enabled = v end })
-    secA:AddToggle({ Name = "Toggle", Value = Aimbot.Settings.Toggle,
-        Callback = function(v) Aimbot.Settings.Toggle = v end })
-    secA:AddToggle({ Name = "360 Ignore FOV", Value = Aimbot.Settings.IgnoreFOV,
-        Callback = function(v) Aimbot.Settings.IgnoreFOV = v end })
-    secA:AddToggle({ Name = "Check visibility from player on TP", Value = Aimbot.Settings.CheckFromPlayerOnTP,
-        Callback = function(v) Aimbot.Settings.CheckFromPlayerOnTP = v end })
-    secA:AddDropdown({ Name = "Lock Part", Value = Aimbot.Settings.LockPart,
-        List = { "Head", "Torso", "Nearest" },
-        Callback = function(v) Aimbot.Settings.LockPart = v end })
-    secA:AddToggle({ Name = "Fallback to visible parts", Value = Aimbot.Settings.FallbackToVisible,
-        Callback = function(v) Aimbot.Settings.FallbackToVisible = v end })
-    secA:AddTextbox({ Name = "Aim Key (MouseButton1/2 or KeyCode)", Value = Aimbot.Settings.TriggerKey,
-        Callback = function(v) Aimbot.Settings.TriggerKey = v end })
-    secA:AddDropdown({ Name = "Aim Method", Value = Aimbot.Settings.AimMethod,
-        List = { "Smooth", "Instant" },
-        Callback = function(v) Aimbot.Settings.AimMethod = v end })
-    secA:AddSlider({ Name = "Smoothing Speed", Value = Aimbot.Settings.AimSmoothingSpeed,
-        Min = 1, Max = 20,
-        Callback = function(v) Aimbot.Settings.AimSmoothingSpeed = v end })
+    --// -----------------------------------------------------------------
+    --// Aimbot tab
+    --// -----------------------------------------------------------------
+    local AS = (Aimbot and Aimbot.Settings) or {}
+    local function aSet(key, val) if Aimbot.Settings then Aimbot.Settings[key] = val end end
+    local function aSetTeam(key, val)
+        if Aimbot.Settings and Aimbot.Settings.TeamCheck then
+            Aimbot.Settings.TeamCheck[key] = val
+        end
+    end
+    local function aSetAS(key, val)
+        if Aimbot.Settings and Aimbot.Settings.AutoShoot then
+            Aimbot.Settings.AutoShoot[key] = val
+        end
+    end
+    local function aSetFov(key, val)
+        if Aimbot.FOVSettings then Aimbot.FOVSettings[key] = val end
+    end
 
-    secA:AddToggle({ Name = "Target NPCs (rigs/dummies)", Value = Aimbot.Settings.TargetNPCs,
-        Callback = function(v) Aimbot.Settings.TargetNPCs = v end })
-    secA:AddTextbox({ Name = "NPC name filter (optional, substring)", Value = Aimbot.Settings.NPCNameFilter or "",
-        Callback = function(v) Aimbot.Settings.NPCNameFilter = v end })
+    local secA = H._UI.AimbotTab:CreateSection({ Name = "Main" })
+    secA:AddToggle({ Name = "Enabled", Value = AS.Enabled or false,
+        Callback = function(v) aSet("Enabled", v) end })
+    secA:AddToggle({ Name = "Toggle", Value = AS.Toggle or false,
+        Callback = function(v) aSet("Toggle", v) end })
+    secA:AddToggle({ Name = "360 Ignore FOV", Value = AS.IgnoreFOV or false,
+        Callback = function(v) aSet("IgnoreFOV", v) end })
+    secA:AddToggle({ Name = "Check visibility from player on TP", Value = AS.CheckFromPlayerOnTP ~= false,
+        Callback = function(v) aSet("CheckFromPlayerOnTP", v) end })
+    secA:AddDropdown({ Name = "Lock Part", Value = AS.LockPart or "Head",
+        List = { "Head", "Torso", "Nearest" },
+        Callback = function(v) aSet("LockPart", v) end })
+    secA:AddToggle({ Name = "Fallback to visible parts", Value = AS.FallbackToVisible or false,
+        Callback = function(v) aSet("FallbackToVisible", v) end })
+    secA:AddTextbox({ Name = "Aim Key (MouseButton1/2 or KeyCode)", Value = AS.TriggerKey or "MouseButton2",
+        Callback = function(v) aSet("TriggerKey", v) end })
+    secA:AddDropdown({ Name = "Aim Method", Value = AS.AimMethod or "Smooth",
+        List = { "Smooth", "Instant" },
+        Callback = function(v) aSet("AimMethod", v) end })
+    secA:AddSlider({ Name = "Smoothing Speed", Value = AS.AimSmoothingSpeed or 6,
+        Min = 1, Max = 20,
+        Callback = function(v) aSet("AimSmoothingSpeed", v) end })
+    secA:AddToggle({ Name = "Target NPCs (rigs/dummies)", Value = AS.TargetNPCs or false,
+        Callback = function(v) aSet("TargetNPCs", v) end })
+    secA:AddTextbox({ Name = "NPC name filter (optional, substring)", Value = AS.NPCNameFilter or "",
+        Callback = function(v) aSet("NPCNameFilter", v) end })
 
     local predSec = H._UI.AimbotTab:CreateSection({ Name = "Prediction" })
-    predSec:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.PredictionEnabled,
-        Callback = function(v) Aimbot.Settings.PredictionEnabled = v end })
-    predSec:AddSlider({ Name = "Prediction X (%)", Value = Aimbot.Settings.PredictionX,
+    predSec:AddToggle({ Name = "Enabled", Value = AS.PredictionEnabled or false,
+        Callback = function(v) aSet("PredictionEnabled", v) end })
+    predSec:AddSlider({ Name = "Prediction X (%)", Value = AS.PredictionX or 0,
         Min = -100, Max = 100,
-        Callback = function(v) Aimbot.Settings.PredictionX = v end })
-    predSec:AddSlider({ Name = "Prediction Y (%)", Value = Aimbot.Settings.PredictionY,
+        Callback = function(v) aSet("PredictionX", v) end })
+    predSec:AddSlider({ Name = "Prediction Y (%)", Value = AS.PredictionY or 0,
         Min = -100, Max = 100,
-        Callback = function(v) Aimbot.Settings.PredictionY = v end })
-    predSec:AddSlider({ Name = "Base Time (s)", Value = Aimbot.Settings.PredictionTime,
+        Callback = function(v) aSet("PredictionY", v) end })
+    predSec:AddSlider({ Name = "Base Time (s)", Value = AS.PredictionTime or 0.15,
         Min = 0.01, Max = 0.5, Decimals = 2,
-        Callback = function(v) Aimbot.Settings.PredictionTime = v end })
+        Callback = function(v) aSet("PredictionTime", v) end })
 
     local secW = H._UI.AimbotTab:CreateSection({ Name = "Visibility", Side = "Right" })
-    secW:AddToggle({ Name = "WallCheck", Value = Aimbot.Settings.WallCheck,
-        Callback = function(v) Aimbot.Settings.WallCheck = v end })
-    secW:AddDropdown({ Name = "WallCheck Mode", Value = Aimbot.Settings.WallCheckMode,
+    secW:AddToggle({ Name = "WallCheck", Value = AS.WallCheck or false,
+        Callback = function(v) aSet("WallCheck", v) end })
+    secW:AddDropdown({ Name = "WallCheck Mode", Value = AS.WallCheckMode or "Perfect",
         List = wallCheckModes,
-        Callback = function(v) Aimbot.Settings.WallCheckMode = v end })
-    secW:AddToggle({ Name = "Delay Shot", Value = Aimbot.Settings.DelayShot,
-        Callback = function(v) Aimbot.Settings.DelayShot = v end })
-    secW:AddToggle({ Name = "Alive Check", Value = Aimbot.Settings.AliveCheck,
-        Callback = function(v) Aimbot.Settings.AliveCheck = v end })
-    secW:AddToggle({ Name = "Team Check", Value = Aimbot.Settings.TeamCheck.Enabled,
-        Callback = function(v) Aimbot.Settings.TeamCheck.Enabled = v end })
-    secW:AddDropdown({ Name = "Team Mode", Value = Aimbot.Settings.TeamCheck.Mode,
+        Callback = function(v) aSet("WallCheckMode", v) end })
+    secW:AddToggle({ Name = "Delay Shot", Value = AS.DelayShot ~= false,
+        Callback = function(v) aSet("DelayShot", v) end })
+    secW:AddToggle({ Name = "Alive Check", Value = AS.AliveCheck ~= false,
+        Callback = function(v) aSet("AliveCheck", v) end })
+    secW:AddToggle({ Name = "Team Check",
+        Value = (AS.TeamCheck and AS.TeamCheck.Enabled) ~= false,
+        Callback = function(v) aSetTeam("Enabled", v) end })
+    secW:AddDropdown({ Name = "Team Mode",
+        Value = (AS.TeamCheck and AS.TeamCheck.Mode) or "Enemies",
         List = teamModes,
-        Callback = function(v) Aimbot.Settings.TeamCheck.Mode = v end })
-    secW:AddToggle({ Name = "Treat Neutrals as Enemies", Value = Aimbot.Settings.TeamCheck.TreatNeutralAsEnemy,
-        Callback = function(v) Aimbot.Settings.TeamCheck.TreatNeutralAsEnemy = v end })
+        Callback = function(v) aSetTeam("Mode", v) end })
+    secW:AddToggle({ Name = "Treat Neutrals as Enemies",
+        Value = (AS.TeamCheck and AS.TeamCheck.TreatNeutralAsEnemy) ~= false,
+        Callback = function(v) aSetTeam("TreatNeutralAsEnemy", v) end })
 
     local secD = H._UI.AimbotTab:CreateSection({ Name = "Silent Aim", Side = "Right" })
-    secD:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.SilentAim,
-        Callback = function(v) Aimbot.Settings.SilentAim = v end })
-    secD:AddDropdown({ Name = "Mode", Value = Aimbot.Settings.SilentAimMode,
+    secD:AddToggle({ Name = "Enabled", Value = AS.SilentAim ~= false,
+        Callback = function(v) aSet("SilentAim", v) end })
+    secD:AddDropdown({ Name = "Mode", Value = AS.SilentAimMode or "Camera",
         List = silentAimModes,
         Callback = function(v)
-            Aimbot.Settings.SilentAimMode = v
-            if v ~= "RayHook"          and Aimbot.RemoveRayHook         then Aimbot.RemoveRayHook()         end
-            if v ~= "RayNew"           and Aimbot.RemoveRayNewHook      then Aimbot.RemoveRayNewHook()      end
-            if v ~= "Vector3Unit"      and Aimbot.RemoveVector3UnitHook then Aimbot.RemoveVector3UnitHook() end
-            if v ~= "ScreenPointToRay" and Aimbot.RemoveSPRHook         then Aimbot.RemoveSPRHook()         end
-            if v ~= "MouseHit" and v ~= "MouseFull" and Aimbot.RemoveMouseHook then Aimbot.RemoveMouseHook()   end
-            if v ~= "FireServer"       and Aimbot.RemoveFireServerHook  then Aimbot.RemoveFireServerHook()  end
+            aSet("SilentAimMode", v)
+            if v ~= "RayHook"          and Aimbot.RemoveRayHook         then pcall(Aimbot.RemoveRayHook)         end
+            if v ~= "RayNew"           and Aimbot.RemoveRayNewHook      then pcall(Aimbot.RemoveRayNewHook)      end
+            if v ~= "Vector3Unit"      and Aimbot.RemoveVector3UnitHook then pcall(Aimbot.RemoveVector3UnitHook) end
+            if v ~= "ScreenPointToRay" and Aimbot.RemoveSPRHook         then pcall(Aimbot.RemoveSPRHook)         end
+            if v ~= "MouseHit" and v ~= "MouseFull" and Aimbot.RemoveMouseHook then pcall(Aimbot.RemoveMouseHook)   end
+            if v ~= "FireServer"       and Aimbot.RemoveFireServerHook  then pcall(Aimbot.RemoveFireServerHook)  end
         end })
 
     local secAS = H._UI.AimbotTab:CreateSection({ Name = "Auto Shoot", Side = "Right" })
-    secAS:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.AutoShoot.Enabled,
-        Callback = function(v) Aimbot.Settings.AutoShoot.Enabled = v end })
-    secAS:AddToggle({ Name = "Only when aiming", Value = Aimbot.Settings.AutoShoot.OnlyWhenAiming,
-        Callback = function(v) Aimbot.Settings.AutoShoot.OnlyWhenAiming = v end })
-    secAS:AddTextbox({ Name = "Manual delay (s)", Value = tostring(Aimbot.Settings.AutoShoot.FireRate),
+    secAS:AddToggle({ Name = "Enabled", Value = (AS.AutoShoot and AS.AutoShoot.Enabled) or false,
+        Callback = function(v) aSetAS("Enabled", v) end })
+    secAS:AddToggle({ Name = "Only when aiming", Value = (AS.AutoShoot and AS.AutoShoot.OnlyWhenAiming) ~= false,
+        Callback = function(v) aSetAS("OnlyWhenAiming", v) end })
+    secAS:AddTextbox({ Name = "Manual delay (s)",
+        Value = tostring((AS.AutoShoot and AS.AutoShoot.FireRate) or 0.05),
         Callback = function(v)
             local n = tonumber(v)
-            if n then Aimbot.Settings.AutoShoot.FireRate = math.clamp(n, 0.001, 1) end
+            if n then aSetAS("FireRate", math.clamp(n, 0.001, 1)) end
         end })
     secAS:AddDropdown({ Name = "Shoot Key", Value = "Left Click",
         List = { "Left Click", "Right Click" },
         Callback = function(v)
-            Aimbot.Settings.AutoShoot.ShootKey = (v == "Left Click") and "MouseButton1" or "MouseButton2"
+            aSetAS("ShootKey", (v == "Left Click") and "MouseButton1" or "MouseButton2")
         end })
-    secAS:AddToggle({ Name = "AutoStop", Value = Aimbot.Settings.AutoShoot.AutoStop.Enabled,
-        Callback = function(v) Aimbot.Settings.AutoShoot.AutoStop.Enabled = v end })
-    secAS:AddSlider({ Name = "Stop time (s)", Value = Aimbot.Settings.AutoShoot.AutoStop.Time,
+    secAS:AddToggle({ Name = "AutoStop",
+        Value = (AS.AutoShoot and AS.AutoShoot.AutoStop and AS.AutoShoot.AutoStop.Enabled) or false,
+        Callback = function(v)
+            if Aimbot.Settings and Aimbot.Settings.AutoShoot and Aimbot.Settings.AutoShoot.AutoStop then
+                Aimbot.Settings.AutoShoot.AutoStop.Enabled = v
+            end
+        end })
+    secAS:AddSlider({ Name = "Stop time (s)",
+        Value = (AS.AutoShoot and AS.AutoShoot.AutoStop and AS.AutoShoot.AutoStop.Time) or 0.1,
         Min = 0.01, Max = 0.5, Decimals = 2,
-        Callback = function(v) Aimbot.Settings.AutoShoot.AutoStop.Time = v end })
+        Callback = function(v)
+            if Aimbot.Settings and Aimbot.Settings.AutoShoot and Aimbot.Settings.AutoShoot.AutoStop then
+                Aimbot.Settings.AutoShoot.AutoStop.Time = v
+            end
+        end })
 
     local secE = H._UI.AimbotTab:CreateSection({ Name = "FOV" })
-    secE:AddToggle({ Name = "Enabled", Value = Aimbot.FOVSettings.Enabled,
-        Callback = function(v) Aimbot.FOVSettings.Enabled = v end })
-    secE:AddToggle({ Name = "Visible", Value = Aimbot.FOVSettings.Visible,
-        Callback = function(v) Aimbot.FOVSettings.Visible = v end })
-    secE:AddSlider({ Name = "Radius", Value = Aimbot.FOVSettings.Amount,
+    secE:AddToggle({ Name = "Enabled", Value = (Aimbot.FOVSettings and Aimbot.FOVSettings.Enabled) ~= false,
+        Callback = function(v) aSetFov("Enabled", v) end })
+    secE:AddToggle({ Name = "Visible", Value = (Aimbot.FOVSettings and Aimbot.FOVSettings.Visible) ~= false,
+        Callback = function(v) aSetFov("Visible", v) end })
+    secE:AddSlider({ Name = "Radius", Value = (Aimbot.FOVSettings and Aimbot.FOVSettings.Amount) or 90,
         Min = 10, Max = 300,
-        Callback = function(v) Aimbot.FOVSettings.Amount = v end })
+        Callback = function(v) aSetFov("Amount", v) end })
 
     ShowError("AirHub UI core loaded")
 end)
