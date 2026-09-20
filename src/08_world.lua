@@ -42,7 +42,6 @@ local function safeSet(obj, prop, value)
     pcall(function() obj[prop] = value end)
 end
 
---// Lighting
 local function ApplyFullbright()
     safeSet(Lighting, "Brightness", 3)
     safeSet(Lighting, "ClockTime", 14)
@@ -74,7 +73,6 @@ local function RemoveNoShadows()
     safeSet(Lighting, "GlobalShadows", World.Internal.Original.GlobalShadows)
 end
 
---// Textures / Decals
 local function stripTextures(obj)
     if obj:IsA("BasePart") then
         for _, d in ipairs(obj:GetChildren()) do
@@ -102,12 +100,17 @@ local function ApplyRemoveTextures()
         end)
     end
 end
+--// FIXED: mutate table via collected key list, not directly inside `pairs`.
 local function RemoveRemoveTextures()
+    local toRemove = {}
     for obj, data in pairs(World.Internal.Saved) do
         if data.kind == "decal" then
             safeSet(obj, "Transparency", data.value)
-            World.Internal.Saved[obj] = nil
+            table.insert(toRemove, obj)
         end
+    end
+    for _, obj in ipairs(toRemove) do
+        World.Internal.Saved[obj] = nil
     end
     if World.Internal.Conns.tex then
         World.Internal.Conns.tex:Disconnect()
@@ -115,7 +118,6 @@ local function RemoveRemoveTextures()
     end
 end
 
---// Particles
 local PARTICLE_CLASSES = { "ParticleEmitter", "Trail", "Beam", "Fire", "Smoke", "Sparkles" }
 local function isParticle(obj)
     for _, c in ipairs(PARTICLE_CLASSES) do
@@ -133,16 +135,20 @@ local function ApplyRemoveParticles()
         end
     end
 end
+--// FIXED: same pairs-mutation fix.
 local function RemoveRemoveParticles()
+    local toRemove = {}
     for obj, data in pairs(World.Internal.Saved) do
         if data.kind == "particle" then
             safeSet(obj, "Enabled", data.value)
-            World.Internal.Saved[obj] = nil
+            table.insert(toRemove, obj)
         end
+    end
+    for _, obj in ipairs(toRemove) do
+        World.Internal.Saved[obj] = nil
     end
 end
 
---// Grass
 local function ApplyRemoveGrass()
     local terrain = workspace:FindFirstChildOfClass("Terrain")
     if terrain then safeSet(terrain, "Decoration", false) end
@@ -152,7 +158,6 @@ local function RemoveRemoveGrass()
     if terrain then safeSet(terrain, "Decoration", true) end
 end
 
---// Sky
 local function ApplyRemoveSky()
     local sky = Lighting:FindFirstChildOfClass("Sky")
     if sky then
@@ -177,7 +182,6 @@ World.Functions.Restore = function()
     RemoveRemoveSky()
 end
 
---// UI
 local function FillUI()
     local tab = H._UI and H._UI.WorldTab
     if not tab then return false end
