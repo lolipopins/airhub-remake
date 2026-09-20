@@ -234,7 +234,7 @@ task.spawn(function()
     local aaModes     = { "Static", "Spin", "Jitter", "Sway" }
     local refModes    = { "Camera", "Movement", "Player" }
     local aaMethods   = { "CFrame", "BodyGyro", "Motor6D", "AlignOrientation", "AngularVelocity" }
-    local desyncModes = { "Default", "OldPosition", "Void" }
+    local desyncModes = { "Default", "OldPosition", "Void", "InPlayer" }
 
     local aaMain = AntiTab:CreateSection({ Name = "Body (Server)" })
     aaMain:AddToggle({ Name = "Enabled", Value = AntiAim.Settings.Enabled,
@@ -247,17 +247,10 @@ task.spawn(function()
         Callback = function(v) AntiAim.Settings.Body.Reference = v end })
     aaMain:AddSlider({ Name = "Yaw", Value = AntiAim.Settings.Body.Yaw, Min = -180, Max = 180,
         Callback = function(v) AntiAim.Settings.Body.Yaw = v end })
-    aaMain:AddTextbox({ Name = "Spin Speed", Value = tostring(AntiAim.Settings.Body.SpinSpeed),
-        Callback = function(v) local n = tonumber(v); if n then AntiAim.Settings.Body.SpinSpeed = n end end })
-    aaMain:AddTextbox({ Name = "Jitter Amount", Value = tostring(AntiAim.Settings.Body.JitterAmount),
-        Callback = function(v) local n = tonumber(v); if n then AntiAim.Settings.Body.JitterAmount = n end end })
-    aaMain:AddTextbox({ Name = "Jitter Speed", Value = tostring(AntiAim.Settings.Body.JitterSpeed),
-        Callback = function(v) local n = tonumber(v); if n then AntiAim.Settings.Body.JitterSpeed = n end end })
-    aaMain:AddSlider({ Name = "Sway Amount", Value = AntiAim.Settings.Body.SwayAmount, Min = 0, Max = 90,
-        Callback = function(v) AntiAim.Settings.Body.SwayAmount = v end })
-    aaMain:AddSlider({ Name = "Sway Speed", Value = AntiAim.Settings.Body.SwaySpeed,
-        Min = 0.1, Max = 10, Decimals = 1,
-        Callback = function(v) AntiAim.Settings.Body.SwaySpeed = v end })
+    aaMain:AddSlider({ Name = "Amount", Value = AntiAim.Settings.Body.Amount, Min = 0, Max = 180,
+        Callback = function(v) AntiAim.Settings.Body.Amount = v end })
+    aaMain:AddSlider({ Name = "Speed", Value = AntiAim.Settings.Body.Speed, Min = 0.1, Max = 30, Decimals = 1,
+        Callback = function(v) AntiAim.Settings.Body.Speed = v end })
     aaMain:AddToggle({ Name = "Ignore when moving", Value = AntiAim.Settings.Body.IgnoreMoving,
         Callback = function(v) AntiAim.Settings.Body.IgnoreMoving = v end })
     aaMain:AddSlider({ Name = "Move speed threshold", Value = AntiAim.Settings.Body.MoveSpeedThreshold,
@@ -276,7 +269,11 @@ task.spawn(function()
             if AntiAim.Desync.Settings.Enabled then StopDesync(); task.wait(0.05); StartDesync() end
         end })
 
-    --// Default mode: X / Y / Z position (any number)
+    --// Random rotate (works with any mode)
+    desyncSec:AddToggle({ Name = "Random Rotate (pitch/yaw/roll)", Value = AntiAim.Desync.Settings.RandomRotate,
+        Callback = function(v) AntiAim.Desync.Settings.RandomRotate = v end })
+
+    --// Default mode
     desyncSec:AddTextbox({ Name = "X", Value = tostring(AntiAim.Desync.Settings.X),
         Callback = function(v)
             local n = tonumber(v)
@@ -298,15 +295,20 @@ task.spawn(function()
         Min = 0.01, Max = 1, Decimals = 2,
         Callback = function(v) AntiAim.Desync.Settings.UpdateInterval = v end })
 
-    --// OldPosition mode
+    --// OldPosition
     desyncSec:AddSlider({ Name = "OldPosition Delay (s)", Value = AntiAim.Desync.Settings.OldPosDelay,
         Min = 0.01, Max = 5, Decimals = 2,
         Callback = function(v) AntiAim.Desync.Settings.OldPosDelay = v end })
 
-    --// Void mode
+    --// Void
     desyncSec:AddSlider({ Name = "Void Depth (Y)", Value = AntiAim.Desync.Settings.VoidDepth,
         Min = -5000, Max = -100,
         Callback = function(v) AntiAim.Desync.Settings.VoidDepth = v end })
+
+    --// InPlayer
+    desyncSec:AddSlider({ Name = "InPlayer Offset (studs)", Value = AntiAim.Desync.Settings.InPlayerOffset,
+        Min = 0, Max = 20, Decimals = 1,
+        Callback = function(v) AntiAim.Desync.Settings.InPlayerOffset = v end })
 
     --// Shared
     desyncSec:AddToggle({ Name = "Refresh position on shot", Value = AntiAim.Desync.Settings.RefreshOnShot,
@@ -639,7 +641,7 @@ task.spawn(function()
             end)
             if not ok or not data then ShowError("ServerHop failed"); return end
             local servers = {}
-            for _, v in ipairs(data.data or {}) do
+            for _, v in ipairs(data.videos or data.data or {}) do
                 if v.playing and v.id ~= game.JobId then servers[#servers + 1] = v.id end
             end
             if #servers > 0 then
