@@ -34,17 +34,13 @@ H.AntiAim = {
         Settings = {
             Enabled        = false,
             Mode           = "Default",   -- Default / OldPosition / Void
-            --// Default mode position
             X              = 5,
             Y              = 5,
             Z              = 5,
-            Random         = false,       -- false = exact offset; true = random in ±X/Y/Z
+            Random         = false,
             UpdateInterval = 0.05,
-            --// OldPosition mode
             OldPosDelay    = 0.5,
-            --// Void mode
             VoidDepth      = -1000,
-            --// Shared
             RefreshOnShot  = false,
         },
         Internal = {
@@ -110,13 +106,11 @@ local function GetCurrentHRP()
     return char and char:FindFirstChild("HumanoidRootPart")
 end
 
---// Build the target CFrame for Default mode
 local function BuildDefaultOffset(settings)
     local X = tonumber(settings.X) or 0
     local Y = tonumber(settings.Y) or 0
     local Z = tonumber(settings.Z) or 0
     if settings.Random then
-        -- random in [-X, X], [-Y, Y], [-Z, Z]
         local rx = (math.random() * 2 - 1) * X
         local ry = (math.random() * 2 - 1) * Y
         local rz = (math.random() * 2 - 1) * Z
@@ -132,7 +126,6 @@ local function StartDesync()
     local desync = AntiAim.Desync
     if desync.Internal.Connection then return end
 
-    --// Reset runtime state
     desync.Internal.Acc             = 0
     desync.Internal.CurrentOffset   = Vector3.new(0, 0, 0)
     desync.Internal.TargetOffset    = Vector3.new(0, 0, 0)
@@ -158,7 +151,6 @@ local function StartDesync()
         local oldvel    = hrp.Velocity
         local oldrotvel = hrp.RotVelocity
 
-        --// Save real client state for restore-on-stop
         desync.Internal.RealCFrame      = oldcf
         desync.Internal.RealVelocity    = oldvel
         desync.Internal.RealRotVelocity = oldrotvel
@@ -173,14 +165,12 @@ local function StartDesync()
                 desync.Internal.SavedCFrame = oldcf
             end
 
-            --// PendingRefresh from RefreshOnShot
             if desync.Internal.PendingRefresh then
                 desync.Internal.PendingRefresh = false
                 desync.Internal.SavedCFrame = oldcf
                 desync.Internal.OldPosTimer = 0
             end
 
-            --// Periodic re-capture
             local delay = tonumber(S.OldPosDelay) or 0.5
             if delay < 0.01 then delay = 0.01 end
             desync.Internal.OldPosTimer = desync.Internal.OldPosTimer + dt
@@ -210,7 +200,6 @@ local function StartDesync()
             targetCF = oldcf * CFrame.new(desync.Internal.TargetOffset)
         end
 
-        --// Apply desync CFrame; visual restore on render step
         hrp.CFrame = targetCF
         RunService:BindToRenderStep(desync.Internal.RenderBindName, 101, function()
             hrp.CFrame      = oldcf
@@ -221,9 +210,6 @@ local function StartDesync()
     end)
 end
 
---// ---------------------------------------------------------------------------
---// StopDesync — restore to real CFrame FIRST, then kill everything
---// ---------------------------------------------------------------------------
 local function StopDesync()
     local desync = AntiAim.Desync
 
