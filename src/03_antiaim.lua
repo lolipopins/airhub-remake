@@ -34,7 +34,7 @@ H.AntiAim = {
     Desync = {
         Settings = {
             Enabled            = false,
-            Mode               = "Random",   -- Random / OldPosition / Void / VoidRandom
+            Mode               = "Random",
             RadiusX            = 5,
             RadiusY            = 5,
             RadiusZ            = 5,
@@ -47,9 +47,7 @@ H.AntiAim = {
             AutoUpdateMin      = 0.2,
             AutoUpdateMax      = 1.0,
             RefreshOnShot      = false,
-            --// NEW: Void mode
-            VoidDepth          = -1000,   -- Y coordinate for Void mode
-            --// NEW: VoidRandom mode
+            VoidDepth          = -1000,
             VoidRadiusX        = 300,
             VoidRadiusY        = 300,
             VoidRadiusZ        = 300,
@@ -61,7 +59,11 @@ H.AntiAim = {
             CurrentOffset  = Vector3.new(0, 0, 0),
             TargetOffset   = Vector3.new(0, 0, 0),
             SavedCFrame    = nil,
-            OriginalPos    = nil,   -- NEW: pre-desync CFrame for Void / VoidRandom
+            OriginalPos    = nil,
+            --// NEW: real client state captured before we override
+            RealCFrame       = nil,
+            RealVelocity     = nil,
+            RealRotVelocity  = nil,
             OldPosTimer    = 0,
             NextUpdate     = 0,
             PendingRefresh = false,
@@ -125,35 +127,27 @@ local function PickNextDelay(settings)
     return minV + math.random() * (maxV - minV)
 end
 
---// ---------------------------------------------------------------------------
---// Desync
---// ---------------------------------------------------------------------------
 local function GetCurrentHRP()
     local char = LocalPlayer.Character
     return char and char:FindFirstChild("HumanoidRootPart")
 end
 
---// Restore helper — used by StopDesync to put player back before disabling
-local function RestorePlayerCFrame()
-    local hrp = GetCurrentHRP()
-    if not hrp then return end
-    local d = AntiAim.Desync
-    local restore = d.Internal.SavedCFrame or d.Internal.OriginalPos
-    if restore then
-        pcall(function() hrp.CFrame = restore end)
-    end
-end
-
+--// ---------------------------------------------------------------------------
+--// Desync
+--// ---------------------------------------------------------------------------
 local function StartDesync()
     local desync = AntiAim.Desync
     if desync.Internal.Connection then return end
 
     --// Reset runtime state
-    desync.Internal.Acc           = 0
-    desync.Internal.CurrentOffset = Vector3.new(0, 0, 0)
-    desync.Internal.TargetOffset  = Vector3.new(0, 0, 0)
-    desync.Internal.OriginalPos   = nil
-    desync.Internal.PendingRefresh = false
+    desync.Internal.Acc             = 0
+    desync.Internal.CurrentOffset   = Vector3.new(0, 0, 0)
+    desync.Internal.TargetOffset    = Vector3.new(0, 0, 0)
+    desync.Internal.OriginalPos     = nil
+    desync.Internal.PendingRefresh  = false
+    desync.Internal.RealCFrame      = nil
+    desync.Internal.RealVelocity    = nil
+    desync.Internal.RealRotVelocity = nil
 
     if desync.Settings.Mode == "OldPosition" then
         local hrp = GetCurrentHRP()
@@ -177,9 +171,14 @@ local function StartDesync()
         local oldcf     = hrp.CFrame
         local oldvel    = hrp.Velocity
         local oldrotvel = hrp.RotVelocity
+
+        --// Save the REAL client state — used to restore on StopDesync
+        desync.Internal.RealCFrame      = oldcf
+        desync.Internal.RealVelocity    = oldvel
+        desync.Internal.RealRotVelocity = oldrotvel
+
         local targetCF
 
-        --// ======================= OldPosition =========================
         if desync.Settings.Mode == "OldPosition" then
             if not desync.Internal.SavedCFrame then desync.Internal.SavedCFrame = oldcf end
             local canRefresh = true
@@ -216,9 +215,6 @@ local function StartDesync()
 
             targetCF = desync.Internal.SavedCFrame
 
-        --// ======================= Void =================================
-        --// Server sees player teleported deep into the void at constant Y.
-        --// Visual stays normal (render step restores CFrame).
         elseif desync.Settings.Mode == "Void" then
             if not desync.Internal.OriginalPos then
                 desync.Internal.OriginalPos = oldcf
@@ -226,8 +222,6 @@ local function StartDesync()
             local voidY = tonumber(desync.Settings.VoidDepth) or -1000
             targetCF = CFrame.new(oldcf.X, voidY, oldcf.Z)
 
-        --// ======================= VoidRandom ===========================
-        --// Random teleports around a base position (usually up in the sky / void).
         elseif desync.Settings.Mode == "VoidRandom" then
             if not desync.Internal.OriginalPos then
                 desync.Internal.OriginalPos = oldcf
@@ -246,8 +240,7 @@ local function StartDesync()
             local base = desync.Internal.OriginalPos.Position
             targetCF = CFrame.new(base + desync.Internal.CurrentOffset)
 
-        --// ======================= Random (default) =====================
-        else
+        else -- Random
             desync.Internal.Acc = desync.Internal.Acc + dt
             if desync.Internal.Acc >= desync.Settings.UpdateInterval then
                 desync.Internal.Acc = 0
@@ -262,11 +255,10 @@ local function StartDesync()
             targetCF = oldcf * CFrame.new(desync.Internal.CurrentOffset)
         end
 
-        --// Apply desync CFrame (physics), visual restores to oldcf next render step
         hrp.CFrame = targetCF
         RunService:BindToRenderStep(desync.Internal.RenderBindName, 101, function()
-            hrp.CFrame     = oldcf
-            hrp.Velocity   = oldvel
+            hrp.CFrame      = oldcf
+            hrp.Velocity    = oldvel
             hrp.RotVelocity = oldrotvel
             RunService:UnbindFromRenderStep(desync.Internal.RenderBindName)
         end)
@@ -274,32 +266,49 @@ local function StartDesync()
 end
 
 --// ---------------------------------------------------------------------------
---// StopDesync — CFrame restored FIRST, then connections killed
+--// StopDesync
+--//   1. Restore HRP to real client CFrame (+ velocity)
+--//   2. Disconnect heartbeat
+--//   3. Kill pending render step
+--//   4. Reset state
 --// ---------------------------------------------------------------------------
 local function StopDesync()
     local desync = AntiAim.Desync
 
-    --// STEP 1 — return player to their proper CFrame BEFORE disabling
-    RestorePlayerCFrame()
+    --// STEP 1: restore to last captured real CFrame
+    local hrp = GetCurrentHRP()
+    if hrp then
+        local realCF = desync.Internal.RealCFrame
+        if realCF then
+            pcall(function()
+                hrp.CFrame = realCF
+                if desync.Internal.RealVelocity    then hrp.Velocity    = desync.Internal.RealVelocity    end
+                if desync.Internal.RealRotVelocity then hrp.RotVelocity = desync.Internal.RealRotVelocity end
+            end)
+        end
+    end
 
-    --// STEP 2 — disconnect the update loop
+    --// STEP 2: disconnect heartbeat
     if desync.Internal.Connection then
         pcall(function() desync.Internal.Connection:Disconnect() end)
         desync.Internal.Connection = nil
     end
 
-    --// STEP 3 — remove any pending render restore
+    --// STEP 3: kill pending render step
     pcall(function() RunService:UnbindFromRenderStep(desync.Internal.RenderBindName) end)
 
-    --// STEP 4 — reset state
-    desync.Internal.SavedCFrame    = nil
-    desync.Internal.OriginalPos    = nil
-    desync.Internal.OldPosTimer    = 0
-    desync.Internal.NextUpdate     = 0
-    desync.Internal.PendingRefresh = false
-    desync.Internal.Acc            = 0
-    desync.Internal.CurrentOffset  = Vector3.new(0, 0, 0)
-    desync.Internal.TargetOffset   = Vector3.new(0, 0, 0)
+    --// STEP 4: reset state
+    desync.Internal.SavedCFrame      = nil
+    desync.Internal.OriginalPos      = nil
+    desync.Internal.RealCFrame       = nil
+    desync.Internal.RealVelocity     = nil
+    desync.Internal.RealRotVelocity  = nil
+    desync.Internal.OldPosTimer      = 0
+    desync.Internal.NextUpdate       = 0
+    desync.Internal.PendingRefresh   = false
+    desync.Internal.Acc              = 0
+    desync.Internal.CurrentOffset    = Vector3.new(0, 0, 0)
+    desync.Internal.TargetOffset     = Vector3.new(0, 0, 0)
 end
 
 --// ---------------------------------------------------------------------------
@@ -506,11 +515,14 @@ AntiAim.Functions = {
             Attachment = nil, AngularVelocity = nil,
             CurrentMotor = nil, OriginalC0 = nil,
         }
-        AntiAim.Desync.Internal.SavedCFrame    = nil
-        AntiAim.Desync.Internal.OriginalPos    = nil
-        AntiAim.Desync.Internal.OldPosTimer    = 0
-        AntiAim.Desync.Internal.NextUpdate     = 0
-        AntiAim.Desync.Internal.PendingRefresh = false
+        AntiAim.Desync.Internal.SavedCFrame     = nil
+        AntiAim.Desync.Internal.OriginalPos     = nil
+        AntiAim.Desync.Internal.RealCFrame      = nil
+        AntiAim.Desync.Internal.RealVelocity    = nil
+        AntiAim.Desync.Internal.RealRotVelocity = nil
+        AntiAim.Desync.Internal.OldPosTimer     = 0
+        AntiAim.Desync.Internal.NextUpdate      = 0
+        AntiAim.Desync.Internal.PendingRefresh  = false
         CleanupAntiAim()
         StopDesync()
     end,
@@ -527,8 +539,13 @@ AntiAim.Functions = {
         return false
     end,
 
-    --// Explicit user-facing helper for "return to player"
-    RestorePlayer = RestorePlayerCFrame,
+    RestorePlayer = function()
+        local hrp = GetCurrentHRP()
+        local realCF = AntiAim.Desync.Internal.RealCFrame
+        if hrp and realCF then
+            pcall(function() hrp.CFrame = realCF end)
+        end
+    end,
 }
 
 AntiAim.StartDesync    = StartDesync
