@@ -1,8 +1,7 @@
 --// ============================================================================
 --// AirHub — 03_antiaim.lua
 --// Anti-Aim (body) + Desync (client-side).
---// Requires: 01_core.lua
---// Modes: Random / OldPosition / Void / VoidRandom
+--// Modes: Default / OldPosition / Void
 --// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 03_antiaim: core not loaded") return end
@@ -33,40 +32,33 @@ H.AntiAim = {
     },
     Desync = {
         Settings = {
-            Enabled            = false,
-            Mode               = "Random",
-            RadiusX            = 5,
-            RadiusY            = 5,
-            RadiusZ            = 5,
-            UpdateInterval     = 0.05,
-            Smoothness         = 0.2,
-            OnlyInAir          = false,
-            NotInAir           = false,
-            FreezeOldPos       = true,
-            RandomDelayEnabled = false,
-            AutoUpdateMin      = 0.2,
-            AutoUpdateMax      = 1.0,
-            RefreshOnShot      = false,
-            VoidDepth          = -1000,
-            VoidRadiusX        = 300,
-            VoidRadiusY        = 300,
-            VoidRadiusZ        = 300,
+            Enabled        = false,
+            Mode           = "Default",   -- Default / OldPosition / Void
+            --// Default mode position
+            X              = 5,
+            Y              = 5,
+            Z              = 5,
+            Random         = false,       -- false = exact offset; true = random in ±X/Y/Z
+            UpdateInterval = 0.05,
+            --// OldPosition mode
+            OldPosDelay    = 0.5,
+            --// Void mode
+            VoidDepth      = -1000,
+            --// Shared
+            RefreshOnShot  = false,
         },
         Internal = {
-            Connection     = nil,
-            RenderBindName = "AirHubDesyncRestore",
-            Acc            = 0,
-            CurrentOffset  = Vector3.new(0, 0, 0),
-            TargetOffset   = Vector3.new(0, 0, 0),
-            SavedCFrame    = nil,
-            OriginalPos    = nil,
-            --// NEW: real client state captured before we override
+            Connection       = nil,
+            RenderBindName   = "AirHubDesyncRestore",
+            Acc              = 0,
+            CurrentOffset    = Vector3.new(0, 0, 0),
+            TargetOffset     = Vector3.new(0, 0, 0),
+            SavedCFrame      = nil,
             RealCFrame       = nil,
             RealVelocity     = nil,
             RealRotVelocity  = nil,
-            OldPosTimer    = 0,
-            NextUpdate     = 0,
-            PendingRefresh = false,
+            OldPosTimer      = 0,
+            PendingRefresh   = false,
         },
     },
     Internal = {
@@ -113,23 +105,24 @@ local function GetBaseYaw(reference, char)
     return 0
 end
 
-local function RandomOffset(radius)
-    if radius == 0 then return 0 end
-    if radius > 0 then return math.random(1, radius) else return -math.random(1, -radius) end
-end
-
-local function PickNextDelay(settings)
-    local minV = tonumber(settings.AutoUpdateMin) or 0.2
-    local maxV = tonumber(settings.AutoUpdateMax) or 1.0
-    if minV < 0 then minV = 0 end
-    if maxV < minV then maxV = minV end
-    if maxV - minV < 0.001 then return minV end
-    return minV + math.random() * (maxV - minV)
-end
-
 local function GetCurrentHRP()
     local char = LocalPlayer.Character
     return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+--// Build the target CFrame for Default mode
+local function BuildDefaultOffset(settings)
+    local X = tonumber(settings.X) or 0
+    local Y = tonumber(settings.Y) or 0
+    local Z = tonumber(settings.Z) or 0
+    if settings.Random then
+        -- random in [-X, X], [-Y, Y], [-Z, Z]
+        local rx = (math.random() * 2 - 1) * X
+        local ry = (math.random() * 2 - 1) * Y
+        local rz = (math.random() * 2 - 1) * Z
+        return Vector3.new(rx, ry, rz)
+    end
+    return Vector3.new(X, Y, Z)
 end
 
 --// ---------------------------------------------------------------------------
@@ -143,7 +136,6 @@ local function StartDesync()
     desync.Internal.Acc             = 0
     desync.Internal.CurrentOffset   = Vector3.new(0, 0, 0)
     desync.Internal.TargetOffset    = Vector3.new(0, 0, 0)
-    desync.Internal.OriginalPos     = nil
     desync.Internal.PendingRefresh  = false
     desync.Internal.RealCFrame      = nil
     desync.Internal.RealVelocity    = nil
@@ -153,7 +145,6 @@ local function StartDesync()
         local hrp = GetCurrentHRP()
         if hrp then desync.Internal.SavedCFrame = hrp.CFrame end
         desync.Internal.OldPosTimer = 0
-        desync.Internal.NextUpdate  = PickNextDelay(desync.Settings)
     end
 
     desync.Internal.Connection = RunService.Heartbeat:Connect(function(dt)
@@ -162,99 +153,64 @@ local function StartDesync()
         if not char then return end
         local hrp = char:FindFirstChild("HumanoidRootPart")
         if not hrp then return end
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        local inAir = hum and hum.FloorMaterial == Enum.Material.Air
-
-        if desync.Settings.OnlyInAir and not inAir then return end
-        if desync.Settings.NotInAir and inAir and desync.Settings.Mode ~= "OldPosition" then return end
 
         local oldcf     = hrp.CFrame
         local oldvel    = hrp.Velocity
         local oldrotvel = hrp.RotVelocity
 
-        --// Save the REAL client state — used to restore on StopDesync
+        --// Save real client state for restore-on-stop
         desync.Internal.RealCFrame      = oldcf
         desync.Internal.RealVelocity    = oldvel
         desync.Internal.RealRotVelocity = oldrotvel
 
+        local S = desync.Settings
+        local mode = S.Mode
         local targetCF
 
-        if desync.Settings.Mode == "OldPosition" then
-            if not desync.Internal.SavedCFrame then desync.Internal.SavedCFrame = oldcf end
-            local canRefresh = true
-            if desync.Settings.NotInAir and inAir then canRefresh = false end
+        --// ===================== OldPosition =========================
+        if mode == "OldPosition" then
+            if not desync.Internal.SavedCFrame then
+                desync.Internal.SavedCFrame = oldcf
+            end
 
-            if canRefresh and desync.Internal.PendingRefresh then
+            --// PendingRefresh from RefreshOnShot
+            if desync.Internal.PendingRefresh then
                 desync.Internal.PendingRefresh = false
                 desync.Internal.SavedCFrame = oldcf
                 desync.Internal.OldPosTimer = 0
-                desync.Internal.NextUpdate  = PickNextDelay(desync.Settings)
             end
 
-            if canRefresh and desync.Settings.RandomDelayEnabled and not desync.Settings.FreezeOldPos then
-                desync.Internal.OldPosTimer = (desync.Internal.OldPosTimer or 0) + dt
-                if desync.Internal.OldPosTimer >= (desync.Internal.NextUpdate or 0) then
-                    desync.Internal.SavedCFrame = oldcf
-                    desync.Internal.OldPosTimer = 0
-                    desync.Internal.NextUpdate  = PickNextDelay(desync.Settings)
-                end
-            elseif not canRefresh then
-                if desync.Settings.RandomDelayEnabled and not desync.Settings.FreezeOldPos then
-                    desync.Internal.OldPosTimer = (desync.Internal.OldPosTimer or 0) + dt
-                    if desync.Internal.OldPosTimer >= (desync.Internal.NextUpdate or 0) then
-                        desync.Internal.PendingRefresh = true
-                    end
-                elseif not desync.Settings.FreezeOldPos and not desync.Settings.RandomDelayEnabled then
-                    desync.Internal.PendingRefresh = true
-                end
-            end
-
-            if canRefresh and not desync.Settings.FreezeOldPos and not desync.Settings.RandomDelayEnabled then
+            --// Periodic re-capture
+            local delay = tonumber(S.OldPosDelay) or 0.5
+            if delay < 0.01 then delay = 0.01 end
+            desync.Internal.OldPosTimer = desync.Internal.OldPosTimer + dt
+            if desync.Internal.OldPosTimer >= delay then
                 desync.Internal.SavedCFrame = oldcf
+                desync.Internal.OldPosTimer = 0
             end
 
             targetCF = desync.Internal.SavedCFrame
 
-        elseif desync.Settings.Mode == "Void" then
-            if not desync.Internal.OriginalPos then
-                desync.Internal.OriginalPos = oldcf
-            end
-            local voidY = tonumber(desync.Settings.VoidDepth) or -1000
+        --// ===================== Void ================================
+        elseif mode == "Void" then
+            local voidY = tonumber(S.VoidDepth) or -1000
             targetCF = CFrame.new(oldcf.X, voidY, oldcf.Z)
 
-        elseif desync.Settings.Mode == "VoidRandom" then
-            if not desync.Internal.OriginalPos then
-                desync.Internal.OriginalPos = oldcf
-            end
+        --// ===================== Default =============================
+        else
             desync.Internal.Acc = desync.Internal.Acc + dt
-            if desync.Internal.Acc >= desync.Settings.UpdateInterval then
-                desync.Internal.Acc = 0
-                desync.Internal.TargetOffset = Vector3.new(
-                    RandomOffset(desync.Settings.VoidRadiusX or 300),
-                    RandomOffset(desync.Settings.VoidRadiusY or 300),
-                    RandomOffset(desync.Settings.VoidRadiusZ or 300)
-                )
-            end
-            local lerpFactor = math.clamp(dt / desync.Settings.Smoothness, 0, 1)
-            desync.Internal.CurrentOffset = desync.Internal.CurrentOffset:Lerp(desync.Internal.TargetOffset, lerpFactor)
-            local base = desync.Internal.OriginalPos.Position
-            targetCF = CFrame.new(base + desync.Internal.CurrentOffset)
+            local interval = tonumber(S.UpdateInterval) or 0.05
+            if interval < 0.01 then interval = 0.01 end
 
-        else -- Random
-            desync.Internal.Acc = desync.Internal.Acc + dt
-            if desync.Internal.Acc >= desync.Settings.UpdateInterval then
+            if desync.Internal.Acc >= interval then
                 desync.Internal.Acc = 0
-                desync.Internal.TargetOffset = Vector3.new(
-                    RandomOffset(desync.Settings.RadiusX),
-                    RandomOffset(desync.Settings.RadiusY),
-                    RandomOffset(desync.Settings.RadiusZ)
-                )
+                desync.Internal.TargetOffset = BuildDefaultOffset(S)
             end
-            local lerpFactor = math.clamp(dt / desync.Settings.Smoothness, 0, 1)
-            desync.Internal.CurrentOffset = desync.Internal.CurrentOffset:Lerp(desync.Internal.TargetOffset, lerpFactor)
-            targetCF = oldcf * CFrame.new(desync.Internal.CurrentOffset)
+
+            targetCF = oldcf * CFrame.new(desync.Internal.TargetOffset)
         end
 
+        --// Apply desync CFrame; visual restore on render step
         hrp.CFrame = targetCF
         RunService:BindToRenderStep(desync.Internal.RenderBindName, 101, function()
             hrp.CFrame      = oldcf
@@ -266,16 +222,12 @@ local function StartDesync()
 end
 
 --// ---------------------------------------------------------------------------
---// StopDesync
---//   1. Restore HRP to real client CFrame (+ velocity)
---//   2. Disconnect heartbeat
---//   3. Kill pending render step
---//   4. Reset state
+--// StopDesync — restore to real CFrame FIRST, then kill everything
 --// ---------------------------------------------------------------------------
 local function StopDesync()
     local desync = AntiAim.Desync
 
-    --// STEP 1: restore to last captured real CFrame
+    --// STEP 1: restore real client CFrame
     local hrp = GetCurrentHRP()
     if hrp then
         local realCF = desync.Internal.RealCFrame
@@ -299,12 +251,10 @@ local function StopDesync()
 
     --// STEP 4: reset state
     desync.Internal.SavedCFrame      = nil
-    desync.Internal.OriginalPos      = nil
     desync.Internal.RealCFrame       = nil
     desync.Internal.RealVelocity     = nil
     desync.Internal.RealRotVelocity  = nil
     desync.Internal.OldPosTimer      = 0
-    desync.Internal.NextUpdate       = 0
     desync.Internal.PendingRefresh   = false
     desync.Internal.Acc              = 0
     desync.Internal.CurrentOffset    = Vector3.new(0, 0, 0)
@@ -498,16 +448,14 @@ AntiAim.Functions = {
             },
         }
         AntiAim.Desync.Settings = {
-            Enabled = false, Mode = "Random",
-            RadiusX = 5, RadiusY = 5, RadiusZ = 5,
-            UpdateInterval = 0.05, Smoothness = 0.2,
-            OnlyInAir = false, NotInAir = false,
-            FreezeOldPos = true,
-            RandomDelayEnabled = false,
-            AutoUpdateMin = 0.2, AutoUpdateMax = 1.0,
-            RefreshOnShot = false,
+            Enabled = false,
+            Mode = "Default",
+            X = 5, Y = 5, Z = 5,
+            Random = false,
+            UpdateInterval = 0.05,
+            OldPosDelay = 0.5,
             VoidDepth = -1000,
-            VoidRadiusX = 300, VoidRadiusY = 300, VoidRadiusZ = 300,
+            RefreshOnShot = false,
         }
         AntiAim.Internal = {
             BodyLastUpdate = 0, BodyJitterTime = 0, BodyJitterOffset = 0,
@@ -516,12 +464,10 @@ AntiAim.Functions = {
             CurrentMotor = nil, OriginalC0 = nil,
         }
         AntiAim.Desync.Internal.SavedCFrame     = nil
-        AntiAim.Desync.Internal.OriginalPos     = nil
         AntiAim.Desync.Internal.RealCFrame      = nil
         AntiAim.Desync.Internal.RealVelocity    = nil
         AntiAim.Desync.Internal.RealRotVelocity = nil
         AntiAim.Desync.Internal.OldPosTimer     = 0
-        AntiAim.Desync.Internal.NextUpdate      = 0
         AntiAim.Desync.Internal.PendingRefresh  = false
         CleanupAntiAim()
         StopDesync()
@@ -532,7 +478,6 @@ AntiAim.Functions = {
         if hrp then
             AntiAim.Desync.Internal.SavedCFrame    = hrp.CFrame
             AntiAim.Desync.Internal.OldPosTimer    = 0
-            AntiAim.Desync.Internal.NextUpdate     = PickNextDelay(AntiAim.Desync.Settings)
             AntiAim.Desync.Internal.PendingRefresh = false
             return true
         end
@@ -551,4 +496,3 @@ AntiAim.Functions = {
 AntiAim.StartDesync    = StartDesync
 AntiAim.StopDesync     = StopDesync
 AntiAim.CleanupAntiAim = CleanupAntiAim
-AntiAim.PickNextDelay  = PickNextDelay
