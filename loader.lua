@@ -1,6 +1,6 @@
 --// Features:
 --//   • Supports FIVE AirHub versions:
---//         - Full     (lolipopins modular, 11 files from /src/)
+--//         - Full     (lolipopins modular, 12 files from /src/)
 --//         - Lite     (lolipopins single-file)
 --//         - Legacy   (lolipopins single-file, archived)
 --//         - Original V2 (Exunys official V2, single-file)
@@ -13,7 +13,7 @@ local AIRHUB_VERSIONS = {
     full = {
         id          = "full",
         label       = "Full",
-        description = "Modular build (11 modules from /src/)",
+        description = "Modular build (12 modules from /src/)",
         type        = "modules",
         repo        = "https://raw.githubusercontent.com/lolipopins/airhub-remake/main/src/",
         files       = {
@@ -28,6 +28,7 @@ local AIRHUB_VERSIONS = {
             "07b_ui_tabs.lua",
             "08_world.lua",
             "09_exploits.lua",
+            "10_hud.lua",
         },
     },
     lite = {
@@ -635,10 +636,13 @@ Steps.namecall = function()
     return ok and "hook installed" or "hookmetamethod unavailable"
 end
 
+--// FIXED: previously this step blocked GetFullName/IsDescendantOf/GetPropertyChangedSignal
+--// for ANY non-executor call, which broke engine-internal code every frame.
+--// Now it only blocks calls targeting the LocalPlayer instance.
 Steps.namecall_inst = function()
     if not NM_Ensure() then return "hookmetamethod unavailable" end
-    local getmt = getExec("getrawmetatable")
-    local checkC = getExec("checkcaller")
+    local getmt   = getExec("getrawmetatable")
+    local checkC  = getExec("checkcaller")
 
     NM_Register("GetDebugId", function(self)
         if type(self) == "Instance" then return "block" end
@@ -646,8 +650,10 @@ Steps.namecall_inst = function()
 
     for _, m in ipairs({ "GetFullName", "IsDescendantOf", "GetPropertyChangedSignal" }) do
         NM_Register(m, function(self)
-            if type(self) ~= "Instance" then return nil end
-            if checkC and not checkC() then return "block" end
+            if type(self) == "Instance" and self == LP
+               and checkC and not checkC() then
+                return "block"
+            end
         end)
     end
 
@@ -661,20 +667,23 @@ Steps.namecall_inst = function()
         end)
     end
 
-    return string.format("mt %s, 3 methods guarded",
+    return string.format("mt %s, 3 methods guarded (LocalPlayer scope)",
         mtVerified and "verified" or "unverified")
 end
 
+--// FIXED: previously this step installed a rate-limiter that blocked
+--// FindFirstChild/IsDescendantOf/GetFullName after 50 calls/sec, which broke
+--// the entire engine. The probe has been removed.
 Steps.anti_detect = function()
     if not NM.hooked then return "hook not installed - skip" end
     local shields = 0
     local checkC = getExec("checkcaller")
-    local getmt = getExec("getrawmetatable")
-    local ggc = getExec("getgc")
-    local guv = getExec("getupvalues")
-    local suv = getExec("setupvalue")
-    local hookf = getExec("hookfunction")
-    local newc = getExec("newcclosure")
+    local getmt  = getExec("getrawmetatable")
+    local ggc    = getExec("getgc")
+    local guv    = getExec("getupvalues")
+    local suv    = getExec("setupvalue")
+    local hookf  = getExec("hookfunction")
+    local newc   = getExec("newcclosure")
 
     if hookf and getmt and checkC and NM.original then
         safe(function()
@@ -726,24 +735,6 @@ Steps.anti_detect = function()
             end
         end)
     end
-
-    local guard, WINDOW, LIMIT = {}, 1.0, 50
-    local function probe(self)
-        if not checkC or checkC() then return nil end
-        local now = tick and os.clock() or 0
-        local key = (type(self) == "Instance") and self.ClassName or "?"
-        local g = guard[key]
-        if not g or (now - g.t) > WINDOW then
-            guard[key] = { t = now, n = 1 }
-            return nil
-        end
-        g.n += 1
-        if g.n > LIMIT then return "block" end
-    end
-    for _, m in ipairs({ "GetFullName", "IsDescendantOf", "FindFirstChild" }) do
-        NM_Register(m, probe)
-    end
-    shields += 1
 
     return shields .. " shields"
 end
@@ -797,6 +788,7 @@ Steps.thread_detect = function()
     return scanned .. " connections"
 end
 
+--// FIXED: previously returned `nil` instead of "block", so the bypass was a no-op.
 Steps.rate_limit = function()
     local remotes = {}
     safe(function()
@@ -808,7 +800,9 @@ Steps.rate_limit = function()
     for _, r in ipairs(remotes) do set[r] = true end
     local p = 0
     if #remotes > 0 and NM_Ensure() then
-        NM_Register("FireServer", function(self) if set[self] then return end end)
+        NM_Register("FireServer", function(self)
+            if set[self] then return "block" end
+        end)
         p = #remotes
     end
     return p .. " remotes wrapped"
@@ -889,7 +883,6 @@ local function buildMenu(onInject, onCancel)
         if pg then pcall(function() gui.Parent = pg end) end
     end
 
-    --// Main frame
     local frame = Instance.new("Frame", gui)
     frame.Size = UDim2.new(0, 480, 0, 740)
     frame.Position = UDim2.new(0.5, -240, 0.5, -370)
@@ -901,7 +894,6 @@ local function buildMenu(onInject, onCancel)
     stroke.Thickness = 1
     stroke.Color = Color3.fromRGB(60, 60, 70)
 
-    --// Title
     local title = Instance.new("TextLabel", frame)
     title.Size = UDim2.new(1, -24, 0, 40)
     title.Position = UDim2.new(0, 12, 0, 8)
@@ -922,7 +914,6 @@ local function buildMenu(onInject, onCancel)
     sub.TextXAlignment = Enum.TextXAlignment.Left
     sub.Text = "Select bypasses and version, then click \"Inject AirHub\""
 
-    --// --- Version picker ---
     local versionLabel = Instance.new("TextLabel", frame)
     versionLabel.Size = UDim2.new(1, -24, 0, 18)
     versionLabel.Position = UDim2.new(0, 12, 0, 72)
@@ -933,7 +924,6 @@ local function buildMenu(onInject, onCancel)
     versionLabel.TextXAlignment = Enum.TextXAlignment.Left
     versionLabel.Text = "AirHub version:"
 
-    --// Version buttons container (wraps into multiple rows)
     local versionRow = Instance.new("Frame", frame)
     versionRow.Size = UDim2.new(1, -24, 0, 76)
     versionRow.Position = UDim2.new(0, 12, 0, 92)
@@ -972,7 +962,6 @@ local function buildMenu(onInject, onCancel)
         versionButtons[vid] = btn
     end
 
-    --// Version description
     local versionDesc = Instance.new("TextLabel", frame)
     versionDesc.Size = UDim2.new(1, -24, 0, 16)
     versionDesc.Position = UDim2.new(0, 12, 0, 172)
@@ -983,14 +972,12 @@ local function buildMenu(onInject, onCancel)
     versionDesc.TextXAlignment = Enum.TextXAlignment.Left
     versionDesc.Text = AIRHUB_VERSIONS[MenuState.version].description
 
-    -- Update description on version change
     for vid, btn in pairs(versionButtons) do
         btn.MouseButton1Click:Connect(function()
             versionDesc.Text = AIRHUB_VERSIONS[vid].description
         end)
     end
 
-    --// Bypass scroll
     local scroll = Instance.new("ScrollingFrame", frame)
     scroll.Size = UDim2.new(1, -24, 1, -310)
     scroll.Position = UDim2.new(0, 12, 0, 194)
@@ -1054,7 +1041,6 @@ local function buildMenu(onInject, onCancel)
         end)
     end
 
-    --// Select / Deselect all
     local btnAll = Instance.new("TextButton", frame)
     btnAll.Size = UDim2.new(0, 90, 0, 26)
     btnAll.Position = UDim2.new(0, 12, 1, -70)
@@ -1087,7 +1073,6 @@ local function buildMenu(onInject, onCancel)
     btnAll.MouseButton1Click:Connect(function() setAll(true) end)
     btnNone.MouseButton1Click:Connect(function() setAll(false) end)
 
-    --// Inject button
     local btnInject = Instance.new("TextButton", frame)
     btnInject.Size = UDim2.new(0, 180, 0, 34)
     btnInject.Position = UDim2.new(1, -192, 1, -74)
@@ -1099,7 +1084,6 @@ local function buildMenu(onInject, onCancel)
     btnInject.Text = "Inject AirHub"
     Instance.new("UICorner", btnInject).CornerRadius = UDim.new(0, 8)
 
-    --// Cancel button
     local btnCancel = Instance.new("TextButton", frame)
     btnCancel.Size = UDim2.new(0, 40, 0, 34)
     btnCancel.Position = UDim2.new(1, -42, 1, -74)
@@ -1172,8 +1156,6 @@ end
 --// ============================================================================
 --// AIRHUB LOADERS
 --// ============================================================================
-
---// Load a single .lua file by URL, compile & execute
 local function loadSingleFile(url, name)
     local src = httpGet(url)
     if not src then return false, "download failed" end
@@ -1184,7 +1166,6 @@ local function loadSingleFile(url, name)
     return true
 end
 
---// Load modular AirHub (11 files from /src/)
 local function loadModularVersion(version)
     local loaded, failed = 0, 0
     for _, file in ipairs(version.files) do
@@ -1206,7 +1187,6 @@ local function loadModularVersion(version)
     return loaded, failed
 end
 
---// Universal AirHub loader — dispatches by version type
 local function loadAirHub(versionId)
     local v = AIRHUB_VERSIONS[versionId]
     if not v then
@@ -1237,15 +1217,12 @@ local function startFlow()
         local versionId = cfg._version or "full"
         say(string.format("[AirHub] user config applied | version = %s", versionId))
 
-        -- 1) Bypasses
         runSelectedBypasses(cfg)
 
-        -- 2) Kick logger
         if cfg.kick_logger then
             installAllKickHooks()
         end
 
-        -- 3) Load selected AirHub version
         tick()
         loadAirHub(versionId)
     end, function()
