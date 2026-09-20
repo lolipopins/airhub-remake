@@ -15,8 +15,9 @@ local AIRHUB_VERSIONS = {
             "06b_movement_speed_strafer.lua",
             "07a_ui_core.lua",
             "07b_ui_tabs.lua",
+            "08_world.lua",       -- NEW
+            "09_exploits.lua",    -- NEW
         },
-    },
     lite = {
         id          = "lite",
         label       = "Lite",
