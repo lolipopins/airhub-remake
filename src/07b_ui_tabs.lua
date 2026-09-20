@@ -19,7 +19,6 @@ task.spawn(function()
     local HttpService      = Util.HttpService
     local LocalPlayer      = Util.LocalPlayer
 
-    --// ---- Defensive proxies (same idea as 07a) ----
     local _missingLogged = {}
     local function noop() end
     local function orNoop(fn, label)
@@ -58,7 +57,6 @@ task.spawn(function()
     local StopDesync           = orNoop(AntiAim.StopDesync,          "AntiAim.StopDesync")
     local StartDesync          = orNoop(AntiAim.StartDesync,         "AntiAim.StartDesync")
 
-    --// ensure sub-tables exist so callbacks never touch nil
     WallHack.Settings        = WallHack.Settings        or {}
     WallHack.Visuals         = WallHack.Visuals         or {}
     WallHack.Visuals.BoxSettings   = WallHack.Visuals.BoxSettings   or { Enabled = false, Type = 1, Color = Color3.fromRGB(255,255,255), TargetColor = Color3.fromRGB(255,0,0), Transparency = 0.7, Thickness = 1, Filled = false, Increase = 1 }
@@ -90,13 +88,12 @@ task.spawn(function()
     Noclip.Internal          = Noclip.Internal          or { Active = false, Saved = {} }
     Noclip.Functions         = Noclip.Functions         or {}
 
-    --// HUD funcs might not exist if 04 didn't load
-    WallHack.Functions.StartHUD     = WallHack.Functions.StartHUD     or noop
-    WallHack.Functions.StopHUD      = WallHack.Functions.StopHUD      or noop
-    WallHack.Functions.SetHUDEnabled= WallHack.Functions.SetHUDEnabled or function() end
-    WallHack.Functions.StartSelfESP = WallHack.Functions.StartSelfESP or noop
-    WallHack.Functions.StopSelfESP  = WallHack.Functions.StopSelfESP  or noop
-    WallHack.Functions.RefreshSelfESP=WallHack.Functions.RefreshSelfESP or noop
+    WallHack.Functions.StartHUD      = WallHack.Functions.StartHUD      or noop
+    WallHack.Functions.StopHUD       = WallHack.Functions.StopHUD       or noop
+    WallHack.Functions.SetHUDEnabled = WallHack.Functions.SetHUDEnabled or function() end
+    WallHack.Functions.StartSelfESP  = WallHack.Functions.StartSelfESP  or noop
+    WallHack.Functions.StopSelfESP   = WallHack.Functions.StopSelfESP   or noop
+    WallHack.Functions.RefreshSelfESP= WallHack.Functions.RefreshSelfESP or noop
 
     local Library          = H._UI.Library
     local Config_Save      = (H.Config and H.Config.Save)      or function() return false, "no config" end
@@ -111,9 +108,7 @@ task.spawn(function()
 
     local glowModes = { "Outline", "Fill", "Both", "Pulse" }
 
-    --// =====================================================================
     --// VISUALS
-    --// =====================================================================
     local vis1 = VisualsTab:CreateSection({ Name = "WallHack" })
     vis1:AddToggle({ Name = "Enabled", Value = WallHack.Settings.Enabled,
         Callback = function(v) WallHack.Settings.Enabled = v; ApplyGlowToAll() end })
@@ -181,7 +176,7 @@ task.spawn(function()
         end })
 
     local seSec = VisualsTab:CreateSection({ Name = "Self ESP", Side = "Right" })
-    local function refreshSelfESP() if WallHack.Functions.RefreshSelfESP then WallHack.Functions.RefreshSelfESP() end end
+    local function refreshSelfESP() WallHack.Functions.RefreshSelfESP() end
     seSec:AddToggle({ Name = "Enable Self ESP", Value = WallHack.Visuals.SelfESP.Enabled,
         Callback = function(v)
             WallHack.Visuals.SelfESP.Enabled = v
@@ -239,9 +234,7 @@ task.spawn(function()
         Min = 1, Max = 20,
         Callback = function(v) ServerPosition.Settings.MaxLimb = v end })
 
-    --// =====================================================================
     --// ANTI-AIM
-    --// =====================================================================
     local aaModes     = { "Static", "Spin", "Jitter", "Sway" }
     local refModes    = { "Camera", "Movement", "Player" }
     local aaMethods   = { "CFrame", "BodyGyro", "Motor6D", "AlignOrientation", "AngularVelocity" }
@@ -330,9 +323,7 @@ task.spawn(function()
             end
         end })
 
-    --// =====================================================================
     --// MOVEMENT
-    --// =====================================================================
     local strafeModes  = { "Legit", "Spam" }
     local strafeKeys   = { "Space", "LeftShift", "LeftControl", "C", "X", "Z", "Q", "E" }
     local flyMethods   = { "BodyVelocity", "LinearVelocity", "Velocity", "CFrame" }
@@ -440,9 +431,7 @@ task.spawn(function()
     noclipSec:AddToggle({ Name = "Enabled", Value = Noclip.Settings.Enabled,
         Callback = function(v) Noclip.Settings.Enabled = v end })
 
-    --// =====================================================================
     --// SETTINGS
-    --// =====================================================================
     H.Logging = H.Logging or { Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18 }
     H.Sound = H.Sound or { HitsoundEnabled = false, HitsoundID = 83717596220569, HitsoundVolume = 1, KillsoundEnabled = false, KillsoundID = 83717596220569, KillsoundVolume = 1 }
 
