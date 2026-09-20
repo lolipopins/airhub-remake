@@ -69,7 +69,7 @@ local function Fly_EnsureInstance(hrp)
         if not Fly.Internal.LinearVelocity or not Fly.Internal.LinearVelocity.Parent then
             local lv = Instance.new("LinearVelocity")
             lv.MaxForce = 9e9
-            lv.VectorVectorVelocity = Vector3.new(0, 0, 0)
+            --// FIXED: removed invalid `lv.VectorVectorVelocity` assignment
             lv.VectorVelocity = Vector3.new(0, 0, 0)
             lv.Attachment0 = Fly.Internal.Attachment
             lv.Parent = hrp
