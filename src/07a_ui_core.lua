@@ -31,7 +31,6 @@ local StartServerPosition = ServerPosition.Start
 local StopServerPosition = ServerPosition.Stop
 local Fly_ClearInstances = Fly.ClearInstances
 local AS_ReleaseAll = AutoStrafer.ReleaseAll
-local PickNextDelay = AntiAim.PickNextDelay
 local StopDesync = AntiAim.StopDesync
 local StartDesync = AntiAim.StartDesync
 local CleanupAntiAim = AntiAim.CleanupAntiAim
@@ -78,7 +77,6 @@ local function ApplyAllEnabledStates()
     end
     if Hg.FastStop then FastStop.Internal.LastActive = false end
 
-    --// HUD / Self ESP restore on config load
     if WallHack and WallHack.Functions then
         if WallHack.Visuals and WallHack.Visuals.HUDSettings then
             if WallHack.Visuals.HUDSettings.Enabled then
@@ -93,6 +91,15 @@ local function ApplyAllEnabledStates()
             else
                 WallHack.Functions.StopSelfESP()
             end
+        end
+    end
+
+    --// Spoof Anim restore
+    if Hg.AntiAim and Hg.AntiAim.SpoofAnim and Hg.AntiAim.SpoofAnim.Functions then
+        if Hg.AntiAim.SpoofAnim.Settings.Enabled then
+            Hg.AntiAim.SpoofAnim.Functions.Start()
+        else
+            Hg.AntiAim.SpoofAnim.Functions.Stop()
         end
     end
 end
@@ -151,6 +158,9 @@ task.delay(math.random(1, 3), function()
         if WallHack.Visuals.SelfESP    then WallHack.Visuals.SelfESP.Enabled    = false end
         AntiAim.Settings.Enabled = false
         AntiAim.Desync.Settings.Enabled = false
+        if AntiAim.SpoofAnim and AntiAim.SpoofAnim.Settings then
+            AntiAim.SpoofAnim.Settings.Enabled = false
+        end
         ServerPosition.Settings.Enabled = false
         Fly.Settings.Enabled = false
         Bhop.Settings.Enabled = false
@@ -171,6 +181,11 @@ task.delay(math.random(1, 3), function()
         pcall(StopServerPosition)
         pcall(StopDesync)
         pcall(Fly_ClearInstances)
+        pcall(function()
+            if AntiAim.SpoofAnim and AntiAim.SpoofAnim.Functions and AntiAim.SpoofAnim.Functions.Stop then
+                AntiAim.SpoofAnim.Functions.Stop()
+            end
+        end)
         pcall(function()
             local char = LocalPlayer.Character
             if char then
@@ -235,6 +250,7 @@ task.delay(math.random(1, 3), function()
     H._UI.AimbotTab    = MainFrame:CreateTab({ Name = "Aimbot" })
     H._UI.VisualsTab   = MainFrame:CreateTab({ Name = "Visuals" })
     H._UI.AntiTab      = MainFrame:CreateTab({ Name = "Anti-Aim" })
+    H._UI.SpoofAnimTab = MainFrame:CreateTab({ Name = "Spoof Anims" })
     H._UI.MovementTab  = MainFrame:CreateTab({ Name = "Movement" })
     H._UI.WorldTab     = MainFrame:CreateTab({ Name = "World" })
     H._UI.ExploitsTab  = MainFrame:CreateTab({ Name = "Exploits" })
@@ -274,7 +290,6 @@ task.delay(math.random(1, 3), function()
         Min = 1, Max = 20,
         Callback = function(v) Aimbot.Settings.AimSmoothingSpeed = v end })
 
-    --// NPC targeting
     secA:AddToggle({ Name = "Target NPCs (rigs/dummies)", Value = Aimbot.Settings.TargetNPCs,
         Callback = function(v) Aimbot.Settings.TargetNPCs = v end })
     secA:AddTextbox({ Name = "NPC name filter (optional, substring)", Value = Aimbot.Settings.NPCNameFilter or "",
