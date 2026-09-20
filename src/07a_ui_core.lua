@@ -205,7 +205,8 @@ task.delay(math.random(1, 3), function()
 
     local teamModes = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
     local wallCheckModes = { "Fast", "Perfect" }
-    local silentAimModes = { "Camera", "GunHandler", "RayHook", "MouseHit" }
+    --// Добавлен режим "Mouse" — физическое движение курсора к врагу и возврат назад
+    local silentAimModes = { "Camera", "Mouse", "GunHandler", "RayHook", "MouseHit" }
 
     local secA = H._UI.AimbotTab:CreateSection({ Name = "Main" })
     secA:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.Enabled, Callback = function(v) Aimbot.Settings.Enabled = v end })
