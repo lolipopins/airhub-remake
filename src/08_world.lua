@@ -1,5 +1,5 @@
 --// AirHub - 08_world.lua
---// World tab: Lighting / Sky / Environment / Map tweaks.
+--// World tab: Lighting / Sky / Environment / Map tweaks (visuals only).
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 08_world: core not loaded"); return end
@@ -18,7 +18,6 @@ H.World = {
         RemoveParticles = false,
         RemoveGrass     = false,
         RemoveSky       = false,
-        SeeThroughWalls = false,
     },
     Internal = {
         Original = {
@@ -32,7 +31,7 @@ H.World = {
             ExposureCompensation = Lighting.ExposureCompensation,
             Sky                  = Lighting:FindFirstChildOfClass("Sky"),
         },
-        Saved = {},  -- [instance] = { kind = "...", ...original props }
+        Saved = {},
         Conns = {},
     },
     Functions = {},
@@ -43,9 +42,7 @@ local function safeSet(obj, prop, value)
     pcall(function() obj[prop] = value end)
 end
 
---// ---------------------------------------------------------------------------
 --// Lighting
---// ---------------------------------------------------------------------------
 local function ApplyFullbright()
     safeSet(Lighting, "Brightness", 3)
     safeSet(Lighting, "ClockTime", 14)
@@ -72,16 +69,12 @@ local function RemoveNoFog()
     safeSet(Lighting, "FogStart", O.FogStart)
 end
 
-local function ApplyNoShadows()
-    safeSet(Lighting, "GlobalShadows", false)
-end
+local function ApplyNoShadows() safeSet(Lighting, "GlobalShadows", false) end
 local function RemoveNoShadows()
     safeSet(Lighting, "GlobalShadows", World.Internal.Original.GlobalShadows)
 end
 
---// ---------------------------------------------------------------------------
 --// Textures / Decals
---// ---------------------------------------------------------------------------
 local function stripTextures(obj)
     if obj:IsA("BasePart") then
         for _, d in ipairs(obj:GetChildren()) do
@@ -99,7 +92,6 @@ local function stripTextures(obj)
         safeSet(obj, "Transparency", 1)
     end
 end
-
 local function ApplyRemoveTextures()
     for _, obj in ipairs(workspace:GetDescendants()) do
         stripTextures(obj)
@@ -123,19 +115,14 @@ local function RemoveRemoveTextures()
     end
 end
 
---// ---------------------------------------------------------------------------
 --// Particles
---// ---------------------------------------------------------------------------
-local PARTICLE_CLASSES = {
-    "ParticleEmitter", "Trail", "Beam", "Fire", "Smoke", "Sparkles",
-}
+local PARTICLE_CLASSES = { "ParticleEmitter", "Trail", "Beam", "Fire", "Smoke", "Sparkles" }
 local function isParticle(obj)
     for _, c in ipairs(PARTICLE_CLASSES) do
         if obj:IsA(c) then return true end
     end
     return false
 end
-
 local function ApplyRemoveParticles()
     for _, obj in ipairs(workspace:GetDescendants()) do
         if isParticle(obj) then
@@ -155,9 +142,7 @@ local function RemoveRemoveParticles()
     end
 end
 
---// ---------------------------------------------------------------------------
 --// Grass
---// ---------------------------------------------------------------------------
 local function ApplyRemoveGrass()
     local terrain = workspace:FindFirstChildOfClass("Terrain")
     if terrain then safeSet(terrain, "Decoration", false) end
@@ -167,9 +152,7 @@ local function RemoveRemoveGrass()
     if terrain then safeSet(terrain, "Decoration", true) end
 end
 
---// ---------------------------------------------------------------------------
 --// Sky
---// ---------------------------------------------------------------------------
 local function ApplyRemoveSky()
     local sky = Lighting:FindFirstChildOfClass("Sky")
     if sky then
@@ -184,38 +167,6 @@ local function RemoveRemoveSky()
     end
 end
 
---// ---------------------------------------------------------------------------
---// See Through Walls (top-level map parts only)
---// ---------------------------------------------------------------------------
-local function isCharacterPart(part)
-    return Players and Players:GetPlayerFromCharacter(part.Parent) ~= nil
-        or (part.Parent and part.Parent:FindFirstChildOfClass("Humanoid"))
-end
-
-local function ApplySeeThroughWalls()
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and not isCharacterPart(obj) then
-            if not World.Internal.Saved[obj] then
-                World.Internal.Saved[obj] = { kind = "transparency", value = obj.LocalTransparencyModifier }
-            end
-            safeSet(obj, "LocalTransparencyModifier", 0.7)
-        end
-    end
-end
-local function RemoveSeeThroughWalls()
-    for obj, data in pairs(World.Internal.Saved) do
-        if data.kind == "transparency" then
-            safeSet(obj, "LocalTransparencyModifier", data.value or 0)
-            World.Internal.Saved[obj] = nil
-        end
-    end
-end
-
-local Players = Util.Players
-
---// ---------------------------------------------------------------------------
---// Public API
---// ---------------------------------------------------------------------------
 World.Functions.Restore = function()
     RemoveFullbright()
     RemoveNoFog()
@@ -224,12 +175,9 @@ World.Functions.Restore = function()
     RemoveRemoveParticles()
     RemoveRemoveGrass()
     RemoveRemoveSky()
-    RemoveSeeThroughWalls()
 end
 
---// ---------------------------------------------------------------------------
 --// UI
---// ---------------------------------------------------------------------------
 local function FillUI()
     local tab = H._UI and H._UI.WorldTab
     if not tab then return false end
@@ -266,11 +214,7 @@ local function FillUI()
         if v then ApplyRemoveSky() else RemoveRemoveSky() end
     end })
 
-    local secM = tab:CreateSection({ Name = "Map" })
-    secM:AddToggle({ Name = "See Through Walls (map)", Value = World.Settings.SeeThroughWalls, Callback = function(v)
-        World.Settings.SeeThroughWalls = v
-        if v then ApplySeeThroughWalls() else RemoveSeeThroughWalls() end
-    end })
+    local secM = tab:CreateSection({ Name = "Presets" })
     secM:AddButton({ Name = "Restore All World Settings", Callback = function()
         World.Functions.Restore()
         for k in pairs(World.Settings) do World.Settings[k] = false end
