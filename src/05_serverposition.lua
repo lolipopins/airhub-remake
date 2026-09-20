@@ -49,14 +49,12 @@ local function make_ghost(real)
     g.CFrame      = real.CFrame
     g.Parent      = workspace
 
-    --// SelectionBox for outline
     local box = Instance.new("SelectionBox")
     box.Adornee       = g
     box.LineThickness = 0.04
     box.SurfaceTransparency = 1
     box.Parent = g
 
-    --// BoxHandleAdornment renders THROUGH walls (AlwaysOnTop)
     local adorn = Instance.new("BoxHandleAdornment")
     adorn.Name         = "GhostAdornment"
     adorn.Adornee      = g
@@ -74,10 +72,9 @@ local function is_replicate(p)
     return p and not p.Anchored
 end
 
-local function is_owner(p)
-    return p and p.ReceiveAge == 0
-end
-
+--// FIXED: removed is_owner check that relied on `ReceiveAge` (legacy property
+--// that's essentially always 0 on modern BaseParts). Velocity now always
+--// extrapolates forward from the last snapshot.
 local function StartServerPosition()
     if ServerPosition.Internal.Connection then return end
     local char = LocalPlayer.Character
@@ -125,11 +122,7 @@ local function StartServerPosition()
         local ping = LocalPlayer.GetNetworkPing and LocalPlayer:GetNetworkPing() or 0.08
 
         if is_replicate(hrp) then
-            if is_owner(hrp) then
-                lin_vel = hrp.AssemblyLinearVelocity
-            else
-                lin_vel = -hrp.AssemblyLinearVelocity
-            end
+            lin_vel = hrp.AssemblyLinearVelocity
             if acc >= ping then
                 server_cf = hrp.CFrame
                 acc = 0
