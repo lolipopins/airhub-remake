@@ -93,15 +93,6 @@ local function ApplyAllEnabledStates()
             end
         end
     end
-
-    --// Spoof Anim restore (module exists, no UI tab)
-    if Hg.AntiAim and Hg.AntiAim.SpoofAnim and Hg.AntiAim.SpoofAnim.Functions then
-        if Hg.AntiAim.SpoofAnim.Settings.Enabled then
-            Hg.AntiAim.SpoofAnim.Functions.Start()
-        else
-            Hg.AntiAim.SpoofAnim.Functions.Stop()
-        end
-    end
 end
 
 H._UI = H._UI or {}
@@ -158,9 +149,6 @@ task.delay(math.random(1, 3), function()
         if WallHack.Visuals.SelfESP    then WallHack.Visuals.SelfESP.Enabled    = false end
         AntiAim.Settings.Enabled = false
         AntiAim.Desync.Settings.Enabled = false
-        if AntiAim.SpoofAnim and AntiAim.SpoofAnim.Settings then
-            AntiAim.SpoofAnim.Settings.Enabled = false
-        end
         ServerPosition.Settings.Enabled = false
         Fly.Settings.Enabled = false
         Bhop.Settings.Enabled = false
@@ -181,11 +169,6 @@ task.delay(math.random(1, 3), function()
         pcall(StopServerPosition)
         pcall(StopDesync)
         pcall(Fly_ClearInstances)
-        pcall(function()
-            if AntiAim.SpoofAnim and AntiAim.SpoofAnim.Functions and AntiAim.SpoofAnim.Functions.Stop then
-                AntiAim.SpoofAnim.Functions.Stop()
-            end
-        end)
         pcall(function()
             local char = LocalPlayer.Character
             if char then
@@ -289,86 +272,4 @@ task.delay(math.random(1, 3), function()
         Min = 1, Max = 20,
         Callback = function(v) Aimbot.Settings.AimSmoothingSpeed = v end })
 
-    secA:AddToggle({ Name = "Target NPCs (rigs/dummies)", Value = Aimbot.Settings.TargetNPCs,
-        Callback = function(v) Aimbot.Settings.TargetNPCs = v end })
-    secA:AddTextbox({ Name = "NPC name filter (optional, substring)", Value = Aimbot.Settings.NPCNameFilter or "",
-        Callback = function(v) Aimbot.Settings.NPCNameFilter = v end })
-
-    local predSec = H._UI.AimbotTab:CreateSection({ Name = "Prediction" })
-    predSec:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.PredictionEnabled,
-        Callback = function(v) Aimbot.Settings.PredictionEnabled = v end })
-    predSec:AddSlider({ Name = "Prediction X (%)", Value = Aimbot.Settings.PredictionX,
-        Min = -100, Max = 100,
-        Callback = function(v) Aimbot.Settings.PredictionX = v end })
-    predSec:AddSlider({ Name = "Prediction Y (%)", Value = Aimbot.Settings.PredictionY,
-        Min = -100, Max = 100,
-        Callback = function(v) Aimbot.Settings.PredictionY = v end })
-    predSec:AddSlider({ Name = "Base Time (s)", Value = Aimbot.Settings.PredictionTime,
-        Min = 0.01, Max = 0.5, Decimals = 2,
-        Callback = function(v) Aimbot.Settings.PredictionTime = v end })
-
-    local secW = H._UI.AimbotTab:CreateSection({ Name = "Visibility", Side = "Right" })
-    secW:AddToggle({ Name = "WallCheck", Value = Aimbot.Settings.WallCheck,
-        Callback = function(v) Aimbot.Settings.WallCheck = v end })
-    secW:AddDropdown({ Name = "WallCheck Mode", Value = Aimbot.Settings.WallCheckMode,
-        List = wallCheckModes,
-        Callback = function(v) Aimbot.Settings.WallCheckMode = v end })
-    secW:AddToggle({ Name = "Delay Shot", Value = Aimbot.Settings.DelayShot,
-        Callback = function(v) Aimbot.Settings.DelayShot = v end })
-    secW:AddToggle({ Name = "Alive Check", Value = Aimbot.Settings.AliveCheck,
-        Callback = function(v) Aimbot.Settings.AliveCheck = v end })
-    secW:AddToggle({ Name = "Team Check", Value = Aimbot.Settings.TeamCheck.Enabled,
-        Callback = function(v) Aimbot.Settings.TeamCheck.Enabled = v end })
-    secW:AddDropdown({ Name = "Team Mode", Value = Aimbot.Settings.TeamCheck.Mode,
-        List = teamModes,
-        Callback = function(v) Aimbot.Settings.TeamCheck.Mode = v end })
-    secW:AddToggle({ Name = "Treat Neutrals as Enemies", Value = Aimbot.Settings.TeamCheck.TreatNeutralAsEnemy,
-        Callback = function(v) Aimbot.Settings.TeamCheck.TreatNeutralAsEnemy = v end })
-
-    local secD = H._UI.AimbotTab:CreateSection({ Name = "Silent Aim", Side = "Right" })
-    secD:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.SilentAim,
-        Callback = function(v) Aimbot.Settings.SilentAim = v end })
-    secD:AddDropdown({ Name = "Mode", Value = Aimbot.Settings.SilentAimMode,
-        List = silentAimModes,
-        Callback = function(v)
-            Aimbot.Settings.SilentAimMode = v
-            if v ~= "RayHook"          and Aimbot.RemoveRayHook         then Aimbot.RemoveRayHook()         end
-            if v ~= "RayNew"           and Aimbot.RemoveRayNewHook      then Aimbot.RemoveRayNewHook()      end
-            if v ~= "Vector3Unit"      and Aimbot.RemoveVector3UnitHook then Aimbot.RemoveVector3UnitHook() end
-            if v ~= "ScreenPointToRay" and Aimbot.RemoveSPRHook         then Aimbot.RemoveSPRHook()         end
-            if v ~= "MouseHit" and v ~= "MouseFull" and Aimbot.RemoveMouseHook then Aimbot.RemoveMouseHook()   end
-            if v ~= "FireServer"       and Aimbot.RemoveFireServerHook  then Aimbot.RemoveFireServerHook()  end
-        end })
-
-    local secAS = H._UI.AimbotTab:CreateSection({ Name = "Auto Shoot", Side = "Right" })
-    secAS:AddToggle({ Name = "Enabled", Value = Aimbot.Settings.AutoShoot.Enabled,
-        Callback = function(v) Aimbot.Settings.AutoShoot.Enabled = v end })
-    secAS:AddToggle({ Name = "Only when aiming", Value = Aimbot.Settings.AutoShoot.OnlyWhenAiming,
-        Callback = function(v) Aimbot.Settings.AutoShoot.OnlyWhenAiming = v end })
-    secAS:AddTextbox({ Name = "Manual delay (s)", Value = tostring(Aimbot.Settings.AutoShoot.FireRate),
-        Callback = function(v)
-            local n = tonumber(v)
-            if n then Aimbot.Settings.AutoShoot.FireRate = math.clamp(n, 0.001, 1) end
-        end })
-    secAS:AddDropdown({ Name = "Shoot Key", Value = "Left Click",
-        List = { "Left Click", "Right Click" },
-        Callback = function(v)
-            Aimbot.Settings.AutoShoot.ShootKey = (v == "Left Click") and "MouseButton1" or "MouseButton2"
-        end })
-    secAS:AddToggle({ Name = "AutoStop", Value = Aimbot.Settings.AutoShoot.AutoStop.Enabled,
-        Callback = function(v) Aimbot.Settings.AutoShoot.AutoStop.Enabled = v end })
-    secAS:AddSlider({ Name = "Stop time (s)", Value = Aimbot.Settings.AutoShoot.AutoStop.Time,
-        Min = 0.01, Max = 0.5, Decimals = 2,
-        Callback = function(v) Aimbot.Settings.AutoShoot.AutoStop.Time = v end })
-
-    local secE = H._UI.AimbotTab:CreateSection({ Name = "FOV" })
-    secE:AddToggle({ Name = "Enabled", Value = Aimbot.FOVSettings.Enabled,
-        Callback = function(v) Aimbot.FOVSettings.Enabled = v end })
-    secE:AddToggle({ Name = "Visible", Value = Aimbot.FOVSettings.Visible,
-        Callback = function(v) Aimbot.FOVSettings.Visible = v end })
-    secE:AddSlider({ Name = "Radius", Value = Aimbot.FOVSettings.Amount,
-        Min = 10, Max = 300,
-        Callback = function(v) Aimbot.FOVSettings.Amount = v end })
-
-    ShowError("AirHub UI core loaded")
-end)
+    secA:AddToggle({ Name = "Target NPCs (rigs/dummies)", Value = Aimb
