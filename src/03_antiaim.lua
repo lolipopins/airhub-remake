@@ -1,13 +1,15 @@
 --// ============================================================================
 --// AirHub — 03_antiaim.lua
 --// Anti-Aim (body) + Desync (client-side).
---// Modes: Default / OldPosition / Void
+--// Desync modes: Default / OldPosition / Void / InPlayer
+--// Body settings: unified Amount + Speed (used by all modes)
 --// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 03_antiaim: core not loaded") return end
 if H.AntiAim then warn("[AirHub] AntiAim already loaded") return end
 
 local Util        = H.Util
+local Players     = Util.Players
 local RunService  = Util.RunService
 local LocalPlayer = Util.LocalPlayer
 local Track       = Util.Track
@@ -20,12 +22,9 @@ H.AntiAim = {
         Method  = "CFrame",
         Body = {
             Reference          = "Camera",
-            Yaw                = 0,
-            SpinSpeed          = 0,
-            JitterAmount       = 5,
-            JitterSpeed        = 10,
-            SwayAmount         = 30,
-            SwaySpeed          = 2,
+            Yaw                = 0,       -- base yaw offset applied to all modes
+            Amount             = 15,      -- magnitude (Static yaw / Spin max / Jitter / Sway)
+            Speed              = 5,       -- speed for Spin/Jitter/Sway
             IgnoreMoving       = false,
             MoveSpeedThreshold = 0.5,
         },
@@ -33,15 +32,22 @@ H.AntiAim = {
     Desync = {
         Settings = {
             Enabled        = false,
-            Mode           = "Default",   -- Default / OldPosition / Void
+            Mode           = "Default",   -- Default / OldPosition / Void / InPlayer
+            --// Default mode position
             X              = 5,
             Y              = 5,
             Z              = 5,
             Random         = false,
             UpdateInterval = 0.05,
+            --// OldPosition mode
             OldPosDelay    = 0.5,
+            --// Void mode
             VoidDepth      = -1000,
+            --// InPlayer mode
+            InPlayerOffset = 2,           -- extra studs offset behind target
+            --// Shared
             RefreshOnShot  = false,
+            RandomRotate   = false,       -- instant random pitch/yaw/roll on interval
         },
         Internal = {
             Connection       = nil,
@@ -55,6 +61,11 @@ H.AntiAim = {
             RealRotVelocity  = nil,
             OldPosTimer      = 0,
             PendingRefresh   = false,
+            --// RandomRotate state
+            RotAcc           = 0,
+            RotPitch         = 0,
+            RotYaw           = 0,
+            RotRoll          = 0,
         },
     },
     Internal = {
@@ -119,6 +130,26 @@ local function BuildDefaultOffset(settings)
     return Vector3.new(X, Y, Z)
 end
 
+--// Find nearest live player's HumanoidRootPart (excluding self)
+local function GetNearestPlayerHRP(myPos)
+    if not myPos then return nil end
+    local nearest, nearestDist = nil, math.huge
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hrp and hum and hum.Health > 0 then
+                local d = (hrp.Position - myPos).Magnitude
+                if d < nearestDist then
+                    nearestDist = d
+                    nearest = hrp
+                end
+            end
+        end
+    end
+    return nearest
+end
+
 --// ---------------------------------------------------------------------------
 --// Desync
 --// ---------------------------------------------------------------------------
@@ -133,6 +164,10 @@ local function StartDesync()
     desync.Internal.RealCFrame      = nil
     desync.Internal.RealVelocity    = nil
     desync.Internal.RealRotVelocity = nil
+    desync.Internal.RotAcc          = 0
+    desync.Internal.RotPitch        = 0
+    desync.Internal.RotYaw          = 0
+    desync.Internal.RotRoll         = 0
 
     if desync.Settings.Mode == "OldPosition" then
         local hrp = GetCurrentHRP()
@@ -157,6 +192,9 @@ local function StartDesync()
 
         local S = desync.Settings
         local mode = S.Mode
+        local interval = tonumber(S.UpdateInterval) or 0.05
+        if interval < 0.01 then interval = 0.01 end
+
         local targetCF
 
         --// ===================== OldPosition =========================
@@ -186,18 +224,49 @@ local function StartDesync()
             local voidY = tonumber(S.VoidDepth) or -1000
             targetCF = CFrame.new(oldcf.X, voidY, oldcf.Z)
 
+        --// ===================== InPlayer ============================
+        --// Teleport desync onto the nearest live player.
+        elseif mode == "InPlayer" then
+            local targetHrp = GetNearestPlayerHRP(oldcf.Position)
+            if targetHrp then
+                local offset = tonumber(S.InPlayerOffset) or 0
+                -- offset behind them based on their look direction
+                local look = targetHrp.CFrame.LookVector
+                local flatLook = Vector3.new(look.X, 0, look.Z)
+                if flatLook.Magnitude < 0.001 then
+                    targetCF = targetHrp.CFrame
+                else
+                    targetCF = targetHrp.CFrame - flatLook.Unit * offset
+                end
+            else
+                targetCF = oldcf
+            end
+
         --// ===================== Default =============================
         else
             desync.Internal.Acc = desync.Internal.Acc + dt
-            local interval = tonumber(S.UpdateInterval) or 0.05
-            if interval < 0.01 then interval = 0.01 end
-
             if desync.Internal.Acc >= interval then
                 desync.Internal.Acc = 0
                 desync.Internal.TargetOffset = BuildDefaultOffset(S)
             end
-
             targetCF = oldcf * CFrame.new(desync.Internal.TargetOffset)
+        end
+
+        --// ===================== RandomRotate ========================
+        --// Instant random pitch/yaw/roll applied on interval to any mode.
+        if S.RandomRotate then
+            desync.Internal.RotAcc = desync.Internal.RotAcc + dt
+            if desync.Internal.RotAcc >= interval then
+                desync.Internal.RotAcc = 0
+                desync.Internal.RotPitch = (math.random() * 2 - 1) * math.pi
+                desync.Internal.RotYaw   = (math.random() * 2 - 1) * math.pi
+                desync.Internal.RotRoll  = (math.random() * 2 - 1) * math.pi
+            end
+            targetCF = targetCF * CFrame.Angles(
+                desync.Internal.RotPitch,
+                desync.Internal.RotYaw,
+                desync.Internal.RotRoll
+            )
         end
 
         hrp.CFrame = targetCF
@@ -226,16 +295,13 @@ local function StopDesync()
         end
     end
 
-    --// STEP 2: disconnect heartbeat
     if desync.Internal.Connection then
         pcall(function() desync.Internal.Connection:Disconnect() end)
         desync.Internal.Connection = nil
     end
 
-    --// STEP 3: kill pending render step
     pcall(function() RunService:UnbindFromRenderStep(desync.Internal.RenderBindName) end)
 
-    --// STEP 4: reset state
     desync.Internal.SavedCFrame      = nil
     desync.Internal.RealCFrame       = nil
     desync.Internal.RealVelocity     = nil
@@ -245,6 +311,10 @@ local function StopDesync()
     desync.Internal.Acc              = 0
     desync.Internal.CurrentOffset    = Vector3.new(0, 0, 0)
     desync.Internal.TargetOffset     = Vector3.new(0, 0, 0)
+    desync.Internal.RotAcc           = 0
+    desync.Internal.RotPitch         = 0
+    desync.Internal.RotYaw           = 0
+    desync.Internal.RotRoll          = 0
 end
 
 --// ---------------------------------------------------------------------------
@@ -304,19 +374,22 @@ local function ApplyAntiAim()
 
     if shouldApply then
         local baseYaw = GetBaseYaw(bodySet.Reference, char)
-        local yaw = 0
+        local amount  = math.clamp(tonumber(bodySet.Amount) or 15, 0, 180)
+        local speed   = math.max(tonumber(bodySet.Speed) or 5, 0.1)
+        local yaw     = 0
+
         if mode == "Static" then
-            yaw = baseYaw + math.rad(bodySet.Yaw)
+            yaw = baseYaw + math.rad(bodySet.Yaw + amount)
         elseif mode == "Spin" then
-            yaw = baseYaw + math.rad((now * bodySet.SpinSpeed) % 360 + bodySet.Yaw)
+            yaw = baseYaw + math.rad((now * speed) % 360 + bodySet.Yaw)
         elseif mode == "Jitter" then
-            if now - AntiAim.Internal.BodyJitterTime > 1 / bodySet.JitterSpeed then
+            if now - AntiAim.Internal.BodyJitterTime > 1 / speed then
                 AntiAim.Internal.BodyJitterTime = now
-                AntiAim.Internal.BodyJitterOffset = (math.random() - 0.5) * 2 * bodySet.JitterAmount
+                AntiAim.Internal.BodyJitterOffset = (math.random() - 0.5) * 2 * amount
             end
             yaw = baseYaw + math.rad(bodySet.Yaw + AntiAim.Internal.BodyJitterOffset)
         elseif mode == "Sway" then
-            yaw = baseYaw + math.rad(bodySet.Yaw + math.sin(now * bodySet.SwaySpeed) * bodySet.SwayAmount)
+            yaw = baseYaw + math.rad(bodySet.Yaw + math.sin(now * speed) * amount)
         end
 
         if method == "CFrame" then
@@ -402,7 +475,7 @@ local function ApplyAntiAim()
                 av.Parent = root
                 AntiAim.Internal.AngularVelocity = av
             end
-            local spinSpeed = (mode == "Spin") and math.rad(bodySet.SpinSpeed) or 0
+            local spinSpeed = (mode == "Spin") and math.rad(speed) or 0
             AntiAim.Internal.AngularVelocity.AngularVelocity = Vector3.new(0, spinSpeed, 0)
         end
     else
@@ -427,10 +500,12 @@ AntiAim.Functions = {
             Mode = "Static",
             Method = "CFrame",
             Body = {
-                Reference = "Camera", Yaw = 0, SpinSpeed = 0,
-                JitterAmount = 5, JitterSpeed = 10,
-                SwayAmount = 30, SwaySpeed = 2,
-                IgnoreMoving = false, MoveSpeedThreshold = 0.5,
+                Reference = "Camera",
+                Yaw = 0,
+                Amount = 15,
+                Speed = 5,
+                IgnoreMoving = false,
+                MoveSpeedThreshold = 0.5,
             },
         }
         AntiAim.Desync.Settings = {
@@ -441,7 +516,9 @@ AntiAim.Functions = {
             UpdateInterval = 0.05,
             OldPosDelay = 0.5,
             VoidDepth = -1000,
+            InPlayerOffset = 2,
             RefreshOnShot = false,
+            RandomRotate = false,
         }
         AntiAim.Internal = {
             BodyLastUpdate = 0, BodyJitterTime = 0, BodyJitterOffset = 0,
@@ -455,6 +532,7 @@ AntiAim.Functions = {
         AntiAim.Desync.Internal.RealRotVelocity = nil
         AntiAim.Desync.Internal.OldPosTimer     = 0
         AntiAim.Desync.Internal.PendingRefresh  = false
+        AntiAim.Desync.Internal.RotAcc          = 0
         CleanupAntiAim()
         StopDesync()
     end,
