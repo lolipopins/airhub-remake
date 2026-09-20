@@ -1,5 +1,5 @@
 --// AirHub - 07b_ui_tabs.lua
---// Visuals, Anti-Aim, Movement, Settings tabs.
+--// Visuals, Anti-Aim, Spoof Anims, Movement, Settings tabs.
 
 local H = getgenv().AirHub
 if not H or not H._UI then warn("[AirHub] 07b: 07a not loaded"); return end
@@ -44,10 +44,11 @@ task.spawn(function()
     local Config_Delete    = H.Config.Delete
     local Config_ListFiles = H.Config.ListFiles
 
-    local VisualsTab  = H._UI.VisualsTab
-    local AntiTab     = H._UI.AntiTab
-    local MovementTab = H._UI.MovementTab
-    local SettingsTab = H._UI.SettingsTab
+    local VisualsTab   = H._UI.VisualsTab
+    local AntiTab      = H._UI.AntiTab
+    local SpoofAnimTab = H._UI.SpoofAnimTab
+    local MovementTab  = H._UI.MovementTab
+    local SettingsTab  = H._UI.SettingsTab
 
     local glowModes = { "Outline", "Fill", "Both", "Pulse" }
 
@@ -247,10 +248,19 @@ task.spawn(function()
         Callback = function(v) AntiAim.Settings.Body.Reference = v end })
     aaMain:AddSlider({ Name = "Yaw", Value = AntiAim.Settings.Body.Yaw, Min = -180, Max = 180,
         Callback = function(v) AntiAim.Settings.Body.Yaw = v end })
-    aaMain:AddSlider({ Name = "Amount", Value = AntiAim.Settings.Body.Amount, Min = 0, Max = 180,
-        Callback = function(v) AntiAim.Settings.Body.Amount = v end })
-    aaMain:AddSlider({ Name = "Speed", Value = AntiAim.Settings.Body.Speed, Min = 0.1, Max = 30, Decimals = 1,
-        Callback = function(v) AntiAim.Settings.Body.Speed = v end })
+
+    --// Amount and Speed as textboxes → any number
+    aaMain:AddTextbox({ Name = "Amount (any number)", Value = tostring(AntiAim.Settings.Body.Amount),
+        Callback = function(v)
+            local n = tonumber(v)
+            if n then AntiAim.Settings.Body.Amount = n end
+        end })
+    aaMain:AddTextbox({ Name = "Speed (any number)", Value = tostring(AntiAim.Settings.Body.Speed),
+        Callback = function(v)
+            local n = tonumber(v)
+            if n then AntiAim.Settings.Body.Speed = n end
+        end })
+
     aaMain:AddToggle({ Name = "Ignore when moving", Value = AntiAim.Settings.Body.IgnoreMoving,
         Callback = function(v) AntiAim.Settings.Body.IgnoreMoving = v end })
     aaMain:AddSlider({ Name = "Move speed threshold", Value = AntiAim.Settings.Body.MoveSpeedThreshold,
@@ -269,11 +279,9 @@ task.spawn(function()
             if AntiAim.Desync.Settings.Enabled then StopDesync(); task.wait(0.05); StartDesync() end
         end })
 
-    --// Random rotate (works with any mode)
     desyncSec:AddToggle({ Name = "Random Rotate (pitch/yaw/roll)", Value = AntiAim.Desync.Settings.RandomRotate,
         Callback = function(v) AntiAim.Desync.Settings.RandomRotate = v end })
 
-    --// Default mode
     desyncSec:AddTextbox({ Name = "X", Value = tostring(AntiAim.Desync.Settings.X),
         Callback = function(v)
             local n = tonumber(v)
@@ -296,6 +304,8 @@ task.spawn(function()
         Callback = function(v) AntiAim.Desync.Settings.UpdateInterval = v end })
 
     --// OldPosition
+    desyncSec:AddToggle({ Name = "OldPosition Delay Enabled", Value = AntiAim.Desync.Settings.OldPosDelayEnabled,
+        Callback = function(v) AntiAim.Desync.Settings.OldPosDelayEnabled = v end })
     desyncSec:AddSlider({ Name = "OldPosition Delay (s)", Value = AntiAim.Desync.Settings.OldPosDelay,
         Min = 0.01, Max = 5, Decimals = 2,
         Callback = function(v) AntiAim.Desync.Settings.OldPosDelay = v end })
@@ -310,7 +320,6 @@ task.spawn(function()
         Min = 0, Max = 20, Decimals = 1,
         Callback = function(v) AntiAim.Desync.Settings.InPlayerOffset = v end })
 
-    --// Shared
     desyncSec:AddToggle({ Name = "Refresh position on shot", Value = AntiAim.Desync.Settings.RefreshOnShot,
         Callback = function(v) AntiAim.Desync.Settings.RefreshOnShot = v end })
     desyncSec:AddButton({ Name = "Save Current Position",
@@ -318,6 +327,91 @@ task.spawn(function()
             local ok = AntiAim.Functions.SaveOldPosition()
             if ok then ShowError("Old position saved") else ShowError("No character") end
         end })
+
+    --// =====================================================================
+    --// SPOOF ANIMATIONS TAB
+    --// =====================================================================
+    local animPriorities = {
+        "Core", "Idle", "Movement", "Action", "Action2", "Action3", "Action4",
+    }
+
+    local saMain = SpoofAnimTab:CreateSection({ Name = "Spoof Animation" })
+    saMain:AddToggle({ Name = "Enabled", Value = AntiAim.SpoofAnim.Settings.Enabled,
+        Callback = function(v)
+            AntiAim.SpoofAnim.Settings.Enabled = v
+            if v then AntiAim.SpoofAnim.Functions.Start() else AntiAim.SpoofAnim.Functions.Stop() end
+        end })
+
+    --// ID box + quick buttons
+    local animIdBox = saMain:AddTextbox({
+        Name = "Animation ID",
+        Value = AntiAim.SpoofAnim.Settings.AnimationId,
+        Callback = function(v)
+            AntiAim.SpoofAnim.Settings.AnimationId = v
+            AntiAim.SpoofAnim.Functions.Restart()
+        end,
+    })
+
+    saMain:AddButton({ Name = "Play Spoof",
+        Callback = function()
+            AntiAim.SpoofAnim.Functions.Restart()
+            ShowError("Spoof animation reloaded")
+        end })
+    saMain:AddButton({ Name = "Stop Spoof",
+        Callback = function()
+            AntiAim.SpoofAnim.Functions.Stop()
+            ShowError("Spoof animation stopped")
+        end })
+
+    saMain:AddTextbox({ Name = "Speed (any number)", Value = tostring(AntiAim.SpoofAnim.Settings.Speed),
+        Callback = function(v)
+            local n = tonumber(v)
+            if n then
+                AntiAim.SpoofAnim.Settings.Speed = n
+                AntiAim.SpoofAnim.Functions.Restart()
+            end
+        end })
+    saMain:AddToggle({ Name = "Looped", Value = AntiAim.SpoofAnim.Settings.Looped,
+        Callback = function(v)
+            AntiAim.SpoofAnim.Settings.Looped = v
+            local tr = AntiAim.SpoofAnim.Internal.Track
+            if tr then pcall(function() tr.Looped = v end) end
+        end })
+    saMain:AddToggle({ Name = "Stop when moving", Value = AntiAim.SpoofAnim.Settings.StopOnMove,
+        Callback = function(v) AntiAim.SpoofAnim.Settings.StopOnMove = v end })
+    saMain:AddDropdown({ Name = "Priority", Value = AntiAim.SpoofAnim.Settings.Priority, List = animPriorities,
+        Callback = function(v)
+            AntiAim.SpoofAnim.Settings.Priority = v
+            AntiAim.SpoofAnim.Functions.Restart()
+        end })
+
+    --// Presets (right column)
+    local saPresets = SpoofAnimTab:CreateSection({ Name = "Presets", Side = "Right" })
+
+    local PRESETS = {
+        { name = "Dance (Floss)",     id = "rbxassetid://10407164740" },
+        { name = "Dab",               id = "rbxassetid://4673728251" },
+        { name = "Russian Dance",     id = "rbxassetid://4690431229" },
+        { name = "Gangnam Style",     id = "rbxassetid://4609414737" },
+        { name = "Default Idle",      id = "rbxassetid://507766666" },
+        { name = "Default Walk",      id = "rbxassetid://507777826" },
+        { name = "R6 Fall",           id = "rbxassetid://180436148" },
+        { name = "R6 Climb",          id = "rbxassetid://180436334" },
+    }
+
+    for _, p in ipairs(PRESETS) do
+        saPresets:AddButton({
+            Name = p.name,
+            Callback = function()
+                AntiAim.SpoofAnim.Settings.AnimationId = p.id
+                if animIdBox and type(animIdBox.Set) == "function" then
+                    pcall(function() animIdBox:Set(p.id) end)
+                end
+                AntiAim.SpoofAnim.Functions.Restart()
+                ShowError("Preset loaded: " .. p.name)
+            end,
+        })
+    end
 
     --// =====================================================================
     --// MOVEMENT TAB
@@ -641,7 +735,7 @@ task.spawn(function()
             end)
             if not ok or not data then ShowError("ServerHop failed"); return end
             local servers = {}
-            for _, v in ipairs(data.videos or data.data or {}) do
+            for _, v in ipairs(data.data or {}) do
                 if v.playing and v.id ~= game.JobId then servers[#servers + 1] = v.id end
             end
             if #servers > 0 then
