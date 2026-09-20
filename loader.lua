@@ -1,8 +1,19 @@
+--// Features:
+--//   • Supports FIVE AirHub versions:
+--//         - Full     (lolipopins modular, 11 files from /src/)
+--//         - Lite     (lolipopins single-file)
+--//         - Legacy   (lolipopins single-file, archived)
+--//         - Original V2 (Exunys official V2, single-file)
+--//         - Original    (Exunys official V1, single-file)
+--//   • Version picker in the menu (5 buttons, wraps into 2 rows)
+--//   • Kick Logger with reason-change detection
+--//   • All bypasses embedded, selectable from menu (OFF by default)
+--// ============================================================================
 local AIRHUB_VERSIONS = {
     full = {
         id          = "full",
         label       = "Full",
-        description = "Modular build (9 modules from /src/)",
+        description = "Modular build (11 modules from /src/)",
         type        = "modules",
         repo        = "https://raw.githubusercontent.com/lolipopins/airhub-remake/main/src/",
         files       = {
@@ -15,9 +26,10 @@ local AIRHUB_VERSIONS = {
             "06b_movement_speed_strafer.lua",
             "07a_ui_core.lua",
             "07b_ui_tabs.lua",
-            "08_world.lua",       -- NEW
-            "09_exploits.lua",    -- NEW
+            "08_world.lua",
+            "09_exploits.lua",
         },
+    },
     lite = {
         id          = "lite",
         label       = "Lite",
@@ -1172,7 +1184,7 @@ local function loadSingleFile(url, name)
     return true
 end
 
---// Load modular AirHub (9 files from /src/)
+--// Load modular AirHub (11 files from /src/)
 local function loadModularVersion(version)
     local loaded, failed = 0, 0
     for _, file in ipairs(version.files) do
