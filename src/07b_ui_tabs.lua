@@ -30,19 +30,19 @@ task.spawn(function()
     local AutoStrafer    = H.AutoStrafer
     local Noclip         = H.Noclip
 
-    local CancelLock           = Aimbot.CancelLock
-    local ApplyGlowToAll       = WallHack.ApplyGlowToAll
-    local StartServerPosition  = ServerPosition.Start
-    local StopServerPosition   = ServerPosition.Stop
-    local Fly_ClearInstances   = Fly.ClearInstances
-    local PickNextDelay        = AntiAim.PickNextDelay
-    local StopDesync           = AntiAim.StopDesync
-    local StartDesync          = AntiAim.StartDesync
+    local CancelLock          = Aimbot.CancelLock
+    local ApplyGlowToAll      = WallHack.ApplyGlowToAll
+    local StartServerPosition = ServerPosition.Start
+    local StopServerPosition  = ServerPosition.Stop
+    local Fly_ClearInstances  = Fly.ClearInstances
+    local PickNextDelay       = AntiAim.PickNextDelay
+    local StopDesync          = AntiAim.StopDesync
+    local StartDesync         = AntiAim.StartDesync
 
-    local Library        = H._UI.Library
-    local Config_Save    = H.Config.Save
-    local Config_Load    = H.Config.Load
-    local Config_Delete  = H.Config.Delete
+    local Library          = H._UI.Library
+    local Config_Save      = H.Config.Save
+    local Config_Load      = H.Config.Load
+    local Config_Delete    = H.Config.Delete
     local Config_ListFiles = H.Config.ListFiles
 
     local VisualsTab  = H._UI.VisualsTab
@@ -55,8 +55,6 @@ task.spawn(function()
     --// =====================================================================
     --// VISUALS TAB
     --// =====================================================================
-
-    --// LEFT COLUMN
     local vis1 = VisualsTab:CreateSection({ Name = "WallHack" })
     vis1:AddToggle({ Name = "Enabled", Value = WallHack.Settings.Enabled,
         Callback = function(v) WallHack.Settings.Enabled = v; ApplyGlowToAll() end })
@@ -88,7 +86,7 @@ task.spawn(function()
         Min = 1, Max = 5,
         Callback = function(v) WallHack.Visuals.BoxSettings.Increase = v end })
 
-    --// HUD (in Visuals)
+    --// HUD — all toggles/dropdown, no colors (HUD colors are fixed tasteful defaults)
     local hudSec = VisualsTab:CreateSection({ Name = "HUD" })
     hudSec:AddToggle({ Name = "Enable HUD", Value = WallHack.Visuals.HUDSettings.Enabled,
         Callback = function(v) WallHack.Functions.SetHUDEnabled(v) end })
@@ -104,7 +102,6 @@ task.spawn(function()
     hudSec:AddToggle({ Name = "Show Session time", Value = WallHack.Visuals.HUDSettings.ShowSession,
         Callback = function(v) WallHack.Visuals.HUDSettings.ShowSession = v end })
 
-    --// RIGHT COLUMN
     local glowSec = VisualsTab:CreateSection({ Name = "Glow", Side = "Right" })
     glowSec:AddToggle({ Name = "Enabled", Value = WallHack.Visuals.GlowSettings.Enabled,
         Callback = function(v) WallHack.Visuals.GlowSettings.Enabled = v; ApplyGlowToAll() end })
@@ -124,7 +121,7 @@ task.spawn(function()
             ApplyGlowToAll()
         end })
 
-    --// SELF ESP (in Visuals, right column)
+    --// SELF ESP — all colors via AddColorpicker
     local seSec = VisualsTab:CreateSection({ Name = "Self ESP", Side = "Right" })
     seSec:AddToggle({ Name = "Enable Self ESP", Value = WallHack.Visuals.SelfESP.Enabled,
         Callback = function(v)
@@ -143,11 +140,11 @@ task.spawn(function()
             WallHack.Visuals.SelfESP.Chams.Mode = v
             WallHack.Functions.RefreshSelfESP()
         end })
-    seSec:AddTextbox({ Name = "  Chams: Fill Color (hex)",
-        Value = WallHack.Functions.ColorToHex(WallHack.Visuals.SelfESP.Chams.FillColor),
+    seSec:AddColorpicker({ Name = "  Chams: Fill Color",
+        Value = WallHack.Visuals.SelfESP.Chams.FillColor,
         Callback = function(v)
-            local c = WallHack.Functions.ParseHex(v)
-            if c then WallHack.Visuals.SelfESP.Chams.FillColor = c; WallHack.Functions.RefreshSelfESP() end
+            WallHack.Visuals.SelfESP.Chams.FillColor = SanitizeColor(v)
+            WallHack.Functions.RefreshSelfESP()
         end })
     seSec:AddSlider({ Name = "  Chams: Fill Transparency",
         Value = WallHack.Visuals.SelfESP.Chams.FillTransparency,
@@ -156,11 +153,11 @@ task.spawn(function()
             WallHack.Visuals.SelfESP.Chams.FillTransparency = v
             WallHack.Functions.RefreshSelfESP()
         end })
-    seSec:AddTextbox({ Name = "  Chams: Outline Color (hex)",
-        Value = WallHack.Functions.ColorToHex(WallHack.Visuals.SelfESP.Chams.OutlineColor),
+    seSec:AddColorpicker({ Name = "  Chams: Outline Color",
+        Value = WallHack.Visuals.SelfESP.Chams.OutlineColor,
         Callback = function(v)
-            local c = WallHack.Functions.ParseHex(v)
-            if c then WallHack.Visuals.SelfESP.Chams.OutlineColor = c; WallHack.Functions.RefreshSelfESP() end
+            WallHack.Visuals.SelfESP.Chams.OutlineColor = SanitizeColor(v)
+            WallHack.Functions.RefreshSelfESP()
         end })
     seSec:AddSlider({ Name = "  Chams: Outline Transparency",
         Value = WallHack.Visuals.SelfESP.Chams.OutlineTransparency,
@@ -181,11 +178,11 @@ task.spawn(function()
             WallHack.Visuals.SelfESP.ChinaHat.Enabled = v
             WallHack.Functions.RefreshSelfESP()
         end })
-    seSec:AddTextbox({ Name = "  China Hat: Color (hex)",
-        Value = WallHack.Functions.ColorToHex(WallHack.Visuals.SelfESP.ChinaHat.Color),
+    seSec:AddColorpicker({ Name = "  China Hat: Color",
+        Value = WallHack.Visuals.SelfESP.ChinaHat.Color,
         Callback = function(v)
-            local c = WallHack.Functions.ParseHex(v)
-            if c then WallHack.Visuals.SelfESP.ChinaHat.Color = c; WallHack.Functions.RefreshSelfESP() end
+            WallHack.Visuals.SelfESP.ChinaHat.Color = SanitizeColor(v)
+            WallHack.Functions.RefreshSelfESP()
         end })
     seSec:AddSlider({ Name = "  China Hat: Size", Value = WallHack.Visuals.SelfESP.ChinaHat.Size,
         Min = 1, Max = 10, Decimals = 1,
@@ -197,6 +194,13 @@ task.spawn(function()
         Min = 0, Max = 5, Decimals = 1,
         Callback = function(v)
             WallHack.Visuals.SelfESP.ChinaHat.OffsetY = v
+            WallHack.Functions.RefreshSelfESP()
+        end })
+    seSec:AddSlider({ Name = "  China Hat: Rotation",
+        Value = WallHack.Visuals.SelfESP.ChinaHat.Rotation,
+        Min = 0, Max = 360,
+        Callback = function(v)
+            WallHack.Visuals.SelfESP.ChinaHat.Rotation = v
             WallHack.Functions.RefreshSelfESP()
         end })
     seSec:AddSlider({ Name = "  China Hat: Transparency", Value = WallHack.Visuals.SelfESP.ChinaHat.Transparency,
@@ -230,9 +234,9 @@ task.spawn(function()
     --// =====================================================================
     --// ANTI-AIM TAB
     --// =====================================================================
-    local aaModes   = { "Static", "Spin", "Jitter", "Sway" }
-    local refModes  = { "Camera", "Movement", "Player" }
-    local aaMethods = { "CFrame", "BodyGyro", "Motor6D", "AlignOrientation", "AngularVelocity" }
+    local aaModes     = { "Static", "Spin", "Jitter", "Sway" }
+    local refModes    = { "Camera", "Movement", "Player" }
+    local aaMethods   = { "CFrame", "BodyGyro", "Motor6D", "AlignOrientation", "AngularVelocity" }
     local desyncModes = { "Random", "OldPosition", "Void", "VoidRandom" }
 
     local aaMain = AntiTab:CreateSection({ Name = "Body (Server)" })
@@ -274,8 +278,6 @@ task.spawn(function()
             AntiAim.Desync.Settings.Mode = v
             if AntiAim.Desync.Settings.Enabled then StopDesync(); task.wait(0.05); StartDesync() end
         end })
-
-    --// Random mode
     desyncSec:AddSlider({ Name = "X Radius", Value = AntiAim.Desync.Settings.RadiusX,
         Min = -100, Max = 100,
         Callback = function(v) AntiAim.Desync.Settings.RadiusX = v end })
@@ -285,13 +287,9 @@ task.spawn(function()
     desyncSec:AddSlider({ Name = "Z Radius", Value = AntiAim.Desync.Settings.RadiusZ,
         Min = -100, Max = 100,
         Callback = function(v) AntiAim.Desync.Settings.RadiusZ = v end })
-
-    --// Void mode
     desyncSec:AddSlider({ Name = "Void Depth (Y)", Value = AntiAim.Desync.Settings.VoidDepth,
         Min = -5000, Max = -100,
         Callback = function(v) AntiAim.Desync.Settings.VoidDepth = v end })
-
-    --// VoidRandom mode
     desyncSec:AddSlider({ Name = "Void Radius X", Value = AntiAim.Desync.Settings.VoidRadiusX,
         Min = 0, Max = 1000,
         Callback = function(v) AntiAim.Desync.Settings.VoidRadiusX = v end })
@@ -301,8 +299,6 @@ task.spawn(function()
     desyncSec:AddSlider({ Name = "Void Radius Z", Value = AntiAim.Desync.Settings.VoidRadiusZ,
         Min = 0, Max = 1000,
         Callback = function(v) AntiAim.Desync.Settings.VoidRadiusZ = v end })
-
-    --// Common
     desyncSec:AddSlider({ Name = "Update Interval", Value = AntiAim.Desync.Settings.UpdateInterval,
         Min = 0.01, Max = 1, Decimals = 2,
         Callback = function(v) AntiAim.Desync.Settings.UpdateInterval = v end })
@@ -350,11 +346,11 @@ task.spawn(function()
     --// =====================================================================
     --// MOVEMENT TAB
     --// =====================================================================
-    local strafeModes = { "Legit", "Spam" }
-    local strafeKeys  = { "Space", "LeftShift", "LeftControl", "C", "X", "Z", "Q", "E" }
-    local flyMethods  = { "BodyVelocity", "LinearVelocity", "Velocity", "CFrame" }
-    local flyKeys     = { "F", "G", "H", "V", "B", "N", "Space", "LeftShift" }
-    local bhopKeys    = { "Space", "LeftControl", "LeftShift", "C", "X", "Z" }
+    local strafeModes  = { "Legit", "Spam" }
+    local strafeKeys   = { "Space", "LeftShift", "LeftControl", "C", "X", "Z", "Q", "E" }
+    local flyMethods   = { "BodyVelocity", "LinearVelocity", "Velocity", "CFrame" }
+    local flyKeys      = { "F", "G", "H", "V", "B", "N", "Space", "LeftShift" }
+    local bhopKeys     = { "Space", "LeftControl", "LeftShift", "C", "X", "Z" }
     local speedMethods = { "WalkSpeed", "CFrame", "Velocity" }
 
     local asSec = MovementTab:CreateSection({ Name = "AutoStrafer" })
