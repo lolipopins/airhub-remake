@@ -22,8 +22,8 @@ H.AntiAim = {
         Body = {
             Reference          = "Camera",
             Yaw                = 0,
-            Amount             = 15,       -- any number (textbox in UI)
-            Speed              = 5,        -- any number (textbox in UI)
+            Amount             = 15,
+            Speed              = 5,
             IgnoreMoving       = false,
             MoveSpeedThreshold = 0.5,
         },
@@ -31,13 +31,13 @@ H.AntiAim = {
     Desync = {
         Settings = {
             Enabled            = false,
-            Mode               = "Default",   -- Default / OldPosition / Void / InPlayer
+            Mode               = "Default",
             X                  = 5,
             Y                  = 5,
             Z                  = 5,
             Random             = false,
             UpdateInterval     = 0.05,
-            OldPosDelayEnabled = true,        -- NEW
+            OldPosDelayEnabled = true,
             OldPosDelay        = 0.5,
             VoidDepth          = -1000,
             InPlayerOffset     = 2,
@@ -83,10 +83,10 @@ H.AntiAim = {
             Priority     = "Action",
         },
         Internal = {
-            Track   = nil,
-            Anim    = nil,
+            Track    = nil,
+            Anim     = nil,
             LoadedId = nil,
-            Conn    = nil,
+            Conn     = nil,
         },
         Functions = {},
     },
@@ -219,7 +219,6 @@ local function StartDesync()
                 desync.Internal.OldPosTimer = 0
             end
 
-            --// Only re-capture position if OldPosDelay is enabled
             if S.OldPosDelayEnabled then
                 local delay = tonumber(S.OldPosDelay) or 0.5
                 if delay < 0.01 then delay = 0.01 end
@@ -544,7 +543,6 @@ local function PlaySpoofAnim()
     local id = S.AnimationId
     if not id or id == "" then return end
 
-    --// Load new animation if changed
     if SA.Internal.LoadedId ~= id then
         if SA.Internal.Track then
             pcall(function() SA.Internal.Track:Stop() end)
@@ -579,7 +577,6 @@ local function PlaySpoofAnim()
         pcall(function() track:Play(0.1, 1, spd) end)
     end
 
-    --// Stop on move
     if S.StopOnMove then
         local char = LocalPlayer.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
