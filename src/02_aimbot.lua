@@ -8,17 +8,17 @@ if H.Aimbot then
     return
 end
 
-local Util = H.Util
-local Players = Util.Players
-local RunService = Util.RunService
-local UserInputService = Util.UserInputService
+local Util              = H.Util
+local Players           = Util.Players
+local RunService        = Util.RunService
+local UserInputService  = Util.UserInputService
 local VirtualInputManager = Util.VirtualInputManager
 local ReplicatedStorage = Util.ReplicatedStorage
-local LocalPlayer = Util.LocalPlayer
-local Track = Util.Track
-local HandleError = Util.HandleError
-local AddLog = Util.AddLog
-local RAY_FILTER = Util.RAY_FILTER
+local LocalPlayer       = Util.LocalPlayer
+local Track             = Util.Track
+local HandleError       = Util.HandleError
+local AddLog            = Util.AddLog
+local RAY_FILTER        = Util.RAY_FILTER
 
 --// ---------------------------------------------------------------------------
 --// Aimbot state
@@ -27,43 +27,58 @@ H.Aimbot = {
     Settings = {
         Enabled = false,
         TeamCheck = { Enabled = true, Mode = "Enemies", TreatNeutralAsEnemy = true },
-        AliveCheck = true, WallCheck = false, FallbackToVisible = false,
+        AliveCheck = true,
+        WallCheck = false,
+        FallbackToVisible = false,
         WallCheckMode = "Perfect",
         DelayShot = true,
-        AimSmoothingSpeed = 6.0, TriggerKey = "MouseButton2", Toggle = false,
-        LockPart = "Head", AimMethod = "Smooth",
-        SilentAim = true, SilentAimMode = "Camera", IgnoreFOV = false,
+        AimSmoothingSpeed = 6.0,
+        TriggerKey = "MouseButton2",
+        Toggle = false,
+        LockPart = "Head",
+        AimMethod = "Smooth",
+        SilentAim = true,
+        SilentAimMode = "Camera",   -- "Camera" | "Mouse" | "GunHandler" | "RayHook" | "MouseHit"
+        IgnoreFOV = false,
         CheckFromPlayerOnTP = true,
         PredictionEnabled = false,
         PredictionX = 0,
         PredictionY = 0,
         PredictionTime = 0.15,
         AutoShoot = {
-            Enabled = false, ShootKey = "MouseButton1", FireRate = 0.05,
+            Enabled = false,
+            ShootKey = "MouseButton1",
+            FireRate = 0.05,
             OnlyWhenAiming = true,
             AutoStop = { Enabled = false, Time = 0.1 },
         },
     },
     FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
-    FOVCircle = Drawing.new("Circle"),
-    Locked = nil, LockPartInstance = nil, Internal = {},
+    FOVCircle   = Drawing.new("Circle"),
+    Locked      = nil,
+    LockPartInstance = nil,
+    Internal    = {},
 }
-
 local Aimbot = H.Aimbot
 
 --// Aimbot-local runtime state
-local Running = false
-local Typing = false
-local LastShotTime = 0
-local lastDelta = tick()
+local Running       = false
+local Typing        = false
+local LastShotTime  = 0
+local lastDelta     = tick()
 
 --// ---------------------------------------------------------------------------
 --// Helpers
 --// ---------------------------------------------------------------------------
-local VISIBLE_PARTS = { "Head", "HumanoidRootPart", "UpperTorso", "LowerTorso", "Torso", "Left Arm", "Right Arm" }
+local VISIBLE_PARTS = {
+    "Head", "HumanoidRootPart", "UpperTorso", "LowerTorso",
+    "Torso", "Left Arm", "Right Arm",
+}
 
 local function GetActualPartName(lockPart)
-    if lockPart == "Torso" then return { "Torso", "UpperTorso", "LowerTorso" } end
+    if lockPart == "Torso" then
+        return { "Torso", "UpperTorso", "LowerTorso" }
+    end
     return { lockPart }
 end
 
@@ -156,10 +171,7 @@ local function GetNearestVisibleMultipoint(origin, part, refScreen)
             local screen, on = workspace.CurrentCamera:WorldToViewportPoint(pt)
             if on then
                 local d = (refScreen - Vector2.new(screen.X, screen.Y)).Magnitude
-                if d < bestDist then
-                    bestDist = d
-                    bestPt = pt
-                end
+                if d < bestDist then bestDist = d; bestPt = pt end
             end
         end
     end
@@ -173,10 +185,7 @@ local function GetClosestMultipointToMouse(part, refScreen)
         local screen, on = workspace.CurrentCamera:WorldToViewportPoint(pt)
         if on then
             local d = (refScreen - Vector2.new(screen.X, screen.Y)).Magnitude
-            if d < bestDist then
-                bestDist = d
-                bestPt = pt
-            end
+            if d < bestDist then bestDist = d; bestPt = pt end
         end
     end
     return bestPt or PredictPartPosition(part)
@@ -184,10 +193,7 @@ end
 
 local function GetVisiblePointOnPart(origin, part)
     if not part or not part:IsA("BasePart") then return nil end
-
-    if not Aimbot.Settings.WallCheck then
-        return PredictPartPosition(part)
-    end
+    if not Aimbot.Settings.WallCheck then return PredictPartPosition(part) end
 
     local isNearest = (Aimbot.Settings.LockPart == "Nearest")
     local isPerfect = (Aimbot.Settings.WallCheckMode == "Perfect")
@@ -196,20 +202,13 @@ local function GetVisiblePointOnPart(origin, part)
         local params = BuildRayParams(part.Parent)
         local pts = GetMultipoints(part)
         for _, pt in ipairs(pts) do
-            if not IsPointVisible(origin, pt, params) then
-                return nil
-            end
+            if not IsPointVisible(origin, pt, params) then return nil end
         end
-        if isNearest then
-            return GetClosestMultipointToMouse(part, GetMousePos())
-        end
+        if isNearest then return GetClosestMultipointToMouse(part, GetMousePos()) end
         return PredictPartPosition(part)
     end
 
-    if isNearest then
-        return GetNearestVisibleMultipoint(origin, part, GetMousePos())
-    end
-
+    if isNearest then return GetNearestVisibleMultipoint(origin, part, GetMousePos()) end
     return GetVisiblePoint_Fast(origin, part)
 end
 
@@ -226,10 +225,7 @@ local function FindNearestPartToMouse(player, origin)
                 local screen, on = workspace.CurrentCamera:WorldToViewportPoint(pt)
                 if on then
                     local d = (mousePos - Vector2.new(screen.X, screen.Y)).Magnitude
-                    if d < bestDist then
-                        bestDist = d
-                        bestPart = part
-                    end
+                    if d < bestDist then bestDist = d; bestPart = part end
                 end
             end
         end
@@ -263,6 +259,7 @@ local function IsTargetValid(targetPlayer)
     if not char then return false end
     local hum = char:FindFirstChildOfClass("Humanoid")
     if Aimbot.Settings.AliveCheck and (not hum or hum.Health <= 0) then return false end
+
     local tc = Aimbot.Settings.TeamCheck
     if not tc.Enabled then return true end
     local lt, tt = LocalPlayer.Team, targetPlayer.Team
@@ -290,18 +287,12 @@ end
 local function GetClosestPlayer()
     if Aimbot.Locked then
         local target = Aimbot.Locked
-        if not target or not target.Character then
-            CancelLock()
-            return
-        end
-        if not IsTargetValid(target) then
-            CancelLock()
-            return
-        end
+        if not target or not target.Character then CancelLock() return end
+        if not IsTargetValid(target) then CancelLock() return end
+
         local origin = GetCheckOrigin()
         local lockPart = Aimbot.Settings.LockPart
         local part
-
         if lockPart == "Nearest" then
             part = FindNearestPartToMouse(target, origin)
         else
@@ -312,18 +303,12 @@ local function GetClosestPlayer()
                 for _, name in ipairs(preferred) do
                     local p = target.Character:FindFirstChild(name)
                     if p and p:IsA("BasePart") and GetVisiblePointOnPart(origin, p) then
-                        part = p
-                        break
+                        part = p; break
                     end
                 end
             end
         end
-
-        if part then
-            Aimbot.LockPartInstance = part
-        else
-            CancelLock()
-        end
+        if part then Aimbot.LockPartInstance = part else CancelLock() end
         return
     end
 
@@ -350,15 +335,13 @@ local function GetClosestPlayer()
                         for _, name in ipairs(preferred) do
                             local p = charTarget:FindFirstChild(name)
                             if p and p:IsA("BasePart") and GetVisiblePointOnPart(origin, p) then
-                                targetPart = p
-                                break
+                                targetPart = p; break
                             end
                         end
                     end
                 end
                 if targetPart then
-                    local point = GetVisiblePointOnPart(origin, targetPart)
-                        or PredictPartPosition(targetPart)
+                    local point = GetVisiblePointOnPart(origin, targetPart) or PredictPartPosition(targetPart)
                     local vec, on = workspace.CurrentCamera:WorldToViewportPoint(point)
                     local dist
                     if ignoreFOV then
@@ -373,6 +356,7 @@ local function GetClosestPlayer()
             end
         end
     end
+
     if bestTarget and bestPart then
         Aimbot.Locked = bestTarget
         Aimbot.LockPartInstance = bestPart
@@ -389,12 +373,15 @@ local function LogShot(targetPlayer, startHealth, hitPartName, wasVisible)
     if not hum then return end
     local endHealth = hum.Health
     local hit = endHealth < startHealth
+
     if hit then
         if hum.Health <= 0 then Util.PlayKillsound() else Util.PlayHitsound() end
     end
+
     if not H.Logging.Enabled then return end
     if hit and not H.Logging.ShowHit then return end
     if not hit and not H.Logging.ShowMiss then return end
+
     local msg, color
     if hit then
         if hum.Health <= 0 then
@@ -438,8 +425,11 @@ local function RefreshOldPositionIfNeeded()
     if minV < 0 then minV = 0 end
     if maxV < minV then maxV = minV end
     local nextDelay
-    if maxV - minV < 0.001 then nextDelay = minV
-    else nextDelay = minV + math.random() * (maxV - minV) end
+    if maxV - minV < 0.001 then
+        nextDelay = minV
+    else
+        nextDelay = minV + math.random() * (maxV - minV)
+    end
     d.Internal.NextUpdate = nextDelay
     d.Internal.PendingRefresh = false
 end
@@ -449,19 +439,13 @@ end
 --// ---------------------------------------------------------------------------
 local function WaitForShotPoint(targetPart)
     if not targetPart then return nil, false end
-
     if not Aimbot.Settings.WallCheck then
         return PredictPartPosition(targetPart), true
     end
-
     local origin = GetCheckOrigin()
     local pt = GetVisiblePointOnPart(origin, targetPart)
     if pt then return pt, true end
-
-    if not Aimbot.Settings.DelayShot then
-        return nil, false
-    end
-
+    if not Aimbot.Settings.DelayShot then return nil, false end
     local deadline = tick() + H.DELAY_SHOT_TIMEOUT
     while tick() < deadline and not H.ShuttingDown do
         task.wait(0.005)
@@ -471,12 +455,49 @@ local function WaitForShotPoint(targetPart)
     return nil, false
 end
 
+--// ---------------------------------------------------------------------------
+--// Mouse-move helper for "Mouse" silent aim mode
+--// ---------------------------------------------------------------------------
+--// Converts a world position into VirtualInputManager mouse coordinates
+--// (viewport -> VIM space, topbar offset +36 on Y).
+local function WorldToMouseVIM(worldPos)
+    local screenPos, onScreen = workspace.CurrentCamera:WorldToViewportPoint(worldPos)
+    if not onScreen then return nil end
+    return math.floor(screenPos.X), math.floor(screenPos.Y + 36)
+end
+
+--// Tries several methods to move the physical cursor to (x, y).
+--// Returns true if any method succeeded.
+local function MoveMouseAbs(x, y)
+    -- 1) executor helper (most reliable on Synapse/KRNL/etc.)
+    if type(mousemoveabs) == "function" then
+        if pcall(mousemoveabs, x, y) then return true end
+    end
+    if type(mousemoverel) == "function" then
+        -- fall back: compute delta from current location and use relative move
+        local cur = UserInputService:GetMouseLocation()
+        local dx = x - math.floor(cur.X)
+        local dy = y - math.floor(cur.Y)
+        if pcall(mousemoverel, dx, dy) then return true end
+    end
+    -- 2) VirtualInputManager
+    local vimOk = pcall(function()
+        VirtualInputManager:SendMouseMoveEvent(x, y, game)
+    end)
+    return vimOk
+end
+
+--// ---------------------------------------------------------------------------
+--// Silent shot dispatcher
+--// ---------------------------------------------------------------------------
 local function PerformSilentShot(targetPart, btn, wasVisible)
     if not Aimbot.Settings.SilentAim then return end
     if not targetPart then return end
+
     local targetChar = targetPart.Parent
     local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
     if not targetPlayer then return end
+
     local hum = targetChar:FindFirstChildOfClass("Humanoid")
     if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
     local startHealth = hum and hum.Health or 0
@@ -487,32 +508,80 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if Aimbot.Settings.WallCheck and not checkPoint then return end
     if nowVisible ~= nil then wasVisible = nowVisible end
 
+    --// =====================================================================
+    --// NEW: "Mouse" silent aim — physically move cursor, click, restore
+    --// =====================================================================
+    if Aimbot.Settings.SilentAimMode == "Mouse" then
+        local visiblePoint = checkPoint
+        if not visiblePoint then
+            local origin = workspace.CurrentCamera.CFrame.Position
+            visiblePoint = GetVisiblePointOnPart(origin, targetPart)
+        end
+        if not visiblePoint then return end
+
+        local targetX, targetY = WorldToMouseVIM(visiblePoint)
+        if not targetX then return end
+
+        -- Save current mouse position in VIM space
+        local curMouse = UserInputService:GetMouseLocation()
+        local oldX = math.floor(curMouse.X)
+        local oldY = math.floor(curMouse.Y)
+
+        -- Move -> click down -> click up -> move back
+        local ok = pcall(function()
+            MoveMouseAbs(targetX, targetY)
+            task.wait()  -- one frame for the move to register
+            VirtualInputManager:SendMouseButtonEvent(targetX, targetY, btn, true,  game, 1)
+            VirtualInputManager:SendMouseButtonEvent(targetX, targetY, btn, false, game, 1)
+            MoveMouseAbs(oldX, oldY)
+        end)
+        if not ok then HandleError("Mouse silent shot failed") end
+
+        task.delay(0.15, function()
+            LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible)
+        end)
+        return
+    end
+
+    --// =====================================================================
+    --// Hook-based modes (GunHandler / RayHook / MouseHit) — just trigger
+    --// the click; the hook will redirect the raycast/Origin.
+    --// =====================================================================
     if Aimbot.Settings.SilentAimMode == "GunHandler"
         or Aimbot.Settings.SilentAimMode == "RayHook"
         or Aimbot.Settings.SilentAimMode == "MouseHit" then
         local mousePos = UserInputService:GetMouseLocation()
-        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
         task.wait(0.001)
         VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
-        task.delay(0.15, function() LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible) end)
+        task.delay(0.15, function()
+            LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible)
+        end)
         return
     end
 
+    --// =====================================================================
+    --// Default: "Camera" mode — temporarily rotate camera, click, restore
+    --// =====================================================================
     local origin = workspace.CurrentCamera.CFrame.Position
     local visiblePoint = checkPoint or GetVisiblePointOnPart(origin, targetPart)
     if not visiblePoint then return end
 
     local oldCF = workspace.CurrentCamera.CFrame
     workspace.CurrentCamera.CFrame = CFrame.new(oldCF.Position, visiblePoint)
+
     local ok = pcall(function()
         local mousePos = UserInputService:GetMouseLocation()
-        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
         task.wait(0.001)
         VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
     end)
     workspace.CurrentCamera.CFrame = oldCF
     if not ok then HandleError("Silent shot input failed") end
-    task.delay(0.15, function() LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible) end)
+
+    task.delay(0.15, function()
+        LogShot(targetPlayer, startHealth, targetPart.Name, wasVisible)
+    end)
 end
 
 --// ---------------------------------------------------------------------------
@@ -538,9 +607,9 @@ local function SetupGunHandlerHook()
     GunHandler.Shoot = function(p1, p2, p3, p4, p5, p6, p7, p8)
         local Hg = getgenv().AirHub
         if Hg and Hg.Aimbot and Hg.Aimbot.Settings.Enabled
-            and Hg.Aimbot.Settings.SilentAim
-            and Hg.Aimbot.Settings.SilentAimMode == "GunHandler"
-            and Running and Hg.Aimbot.Locked and Hg.Aimbot.LockPartInstance then
+           and Hg.Aimbot.Settings.SilentAim
+           and Hg.Aimbot.Settings.SilentAimMode == "GunHandler"
+           and Running and Hg.Aimbot.Locked and Hg.Aimbot.LockPartInstance then
             if p1 == LocalPlayer then
                 RefreshOldPositionIfNeeded()
                 local pt = WaitForShotPoint(Hg.Aimbot.LockPartInstance)
@@ -600,10 +669,7 @@ local function GetClosestTargetRay()
                     if onScreen then
                         local headPos = Vector2.new(screenPos.X, screenPos.Y)
                         local mag = (mousePos - headPos).magnitude
-                        if mag < dist then
-                            dist = mag
-                            target = head
-                        end
+                        if mag < dist then dist = mag; target = head end
                     end
                 end
             end
@@ -626,9 +692,9 @@ local function SetupRayHook()
         if k == 'Direction' and not H.ShuttingDown then
             local Hg = getgenv().AirHub
             if Hg and Hg.Aimbot and Hg.Aimbot.Settings.Enabled
-                and Hg.Aimbot.Settings.SilentAim
-                and Hg.Aimbot.Settings.SilentAimMode == "RayHook"
-                and Running then
+               and Hg.Aimbot.Settings.SilentAim
+               and Hg.Aimbot.Settings.SilentAimMode == "RayHook"
+               and Running then
                 local target = GetClosestTargetRay()
                 if target then
                     local origin = oldRayIndex(t, 'Origin')
@@ -649,9 +715,7 @@ end
 local function RemoveRayHook()
     if not RayHookActive then return end
     local success, mt = pcall(getrawmetatable, Ray.new())
-    if success and mt and oldRayIndex then
-        mt.__index = oldRayIndex
-    end
+    if success and mt and oldRayIndex then mt.__index = oldRayIndex end
     RayHookActive = false
 end
 
@@ -677,9 +741,9 @@ local function SetupMouseHitHook()
                 if k == "Hit" and not H.ShuttingDown then
                     local Hg = getgenv().AirHub
                     if Hg and Hg.Aimbot and Hg.Aimbot.Settings.Enabled
-                        and Hg.Aimbot.Settings.SilentAim
-                        and Hg.Aimbot.Settings.SilentAimMode == "MouseHit"
-                        and Running and Hg.Aimbot.LockPartInstance then
+                       and Hg.Aimbot.Settings.SilentAim
+                       and Hg.Aimbot.Settings.SilentAimMode == "MouseHit"
+                       and Running and Hg.Aimbot.LockPartInstance then
                         local origin = GetCheckOrigin()
                         local vp = GetVisiblePointOnPart(origin, Hg.Aimbot.LockPartInstance)
                         if vp then return vp end
@@ -691,7 +755,7 @@ local function SetupMouseHitHook()
                 end
                 return realMouse[k]
             end,
-            __newindex = function(t, k, v) realMouse[k] = v end
+            __newindex = function(t, k, v) realMouse[k] = v end,
         })
     end
     MouseHitHooked = true
@@ -752,12 +816,15 @@ local function LoadAimbot()
             end
         end
 
-        if Aimbot.Settings.SilentAimMode == "RayHook" and Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim then
+        if Aimbot.Settings.SilentAimMode == "RayHook"
+           and Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim then
             SetupRayHook()
         else
             RemoveRayHook()
         end
-        if Aimbot.Settings.SilentAimMode == "MouseHit" and Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim then
+
+        if Aimbot.Settings.SilentAimMode == "MouseHit"
+           and Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim then
             SetupMouseHitHook()
         else
             RemoveMouseHitHook()
@@ -806,12 +873,14 @@ local function LoadAimbot()
         if gpe or Typing then return end
         if not Aimbot.Settings.Enabled then return end
         if not Running or not Aimbot.Locked then return end
+
         local btn = nil
         if inp.UserInputType == Enum.UserInputType.MouseButton1 then btn = 0
         elseif inp.UserInputType == Enum.UserInputType.MouseButton2 then btn = 1 end
         if btn == nil then return end
         if btn == 1 and Aimbot.Settings.TriggerKey == "MouseButton2" then return end
         if Aimbot.Settings.AutoShoot.Enabled then return end
+
         local targetPart = Aimbot.LockPartInstance
         if targetPart then
             if Aimbot.Settings.SilentAim then
@@ -823,7 +892,7 @@ local function LoadAimbot()
                 end
                 RefreshOldPositionIfNeeded()
                 local mousePos = UserInputService:GetMouseLocation()
-                VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
+                VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
                 task.wait(0.001)
                 VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
             end
@@ -836,25 +905,21 @@ local function LoadAimbot()
                 if not Aimbot.Settings.AutoShoot.Enabled then return end
                 if Aimbot.Settings.AutoShoot.OnlyWhenAiming and not Running then return end
                 if not Aimbot.Locked or not Aimbot.LockPartInstance then return end
+
                 local nowt = tick()
                 if nowt - LastShotTime < Aimbot.Settings.AutoShoot.FireRate then return end
+
                 local targetPart = Aimbot.LockPartInstance
                 if not targetPart then return end
                 local targetChar = targetPart.Parent
                 local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
                 if not targetPlayer then return end
                 local hum = targetChar:FindFirstChildOfClass("Humanoid")
-                if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then
-                    CancelLock()
-                    return
-                end
+                if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then CancelLock() return end
                 local startHealth = hum and hum.Health or 0
 
                 local visiblePoint, nowVisible = WaitForShotPoint(targetPart)
-                if Aimbot.Settings.WallCheck and not visiblePoint then
-                    CancelLock()
-                    return
-                end
+                if Aimbot.Settings.WallCheck and not visiblePoint then CancelLock() return end
 
                 if Aimbot.Settings.AutoShoot.AutoStop.Enabled then
                     local char = LocalPlayer.Character
@@ -875,7 +940,7 @@ local function LoadAimbot()
                 else
                     RefreshOldPositionIfNeeded()
                     local mousePos = UserInputService:GetMouseLocation()
-                    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, shootBtn, true, game, 1)
+                    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, shootBtn, true,  game, 1)
                     task.wait(0.001)
                     VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, shootBtn, false, game, 1)
                 end
@@ -887,13 +952,16 @@ end
 
 Track(UserInputService.TextBoxFocused:Connect(function() Typing = true end))
 Track(UserInputService.TextBoxFocusReleased:Connect(function() Typing = false end))
+
 LoadAimbot()
 
 --// Expose hooks
-Aimbot.CancelLock = CancelLock
-Aimbot.RemoveRayHook = RemoveRayHook
-Aimbot.RemoveMouseHitHook = RemoveMouseHitHook
+Aimbot.CancelLock          = CancelLock
+Aimbot.RemoveRayHook       = RemoveRayHook
+Aimbot.RemoveMouseHitHook  = RemoveMouseHitHook
 Aimbot.RemoveGunHandlerHook = RemoveGunHandlerHook
 Aimbot.GetVisiblePointOnPart = GetVisiblePointOnPart
-Aimbot.GetMousePos = GetMousePos
+Aimbot.GetMousePos         = GetMousePos
 Aimbot.PredictPartPosition = PredictPartPosition
+Aimbot.MoveMouseAbs        = MoveMouseAbs
+Aimbot.WorldToMouseVIM     = WorldToMouseVIM
