@@ -1,14 +1,3 @@
---// Features:
---//   • Supports FIVE AirHub versions:
---//         - Full     (lolipopins modular, 9 files from /src/)
---//         - Lite     (lolipopins single-file)
---//         - Legacy   (lolipopins single-file, archived)
---//         - Original V2 (Exunys official V2, single-file)
---//         - Original    (Exunys official V1, single-file)
---//   • Version picker in the menu (5 buttons, wraps into 2 rows)
---//   • Kick Logger with reason-change detection
---//   • All bypasses embedded, selectable from menu
---// ============================================================================
 local AIRHUB_VERSIONS = {
     full = {
         id          = "full",
@@ -847,26 +836,27 @@ end
 --// ============================================================================
 --// MENU
 --// ============================================================================
+--// ВАЖНО: все обходы античита по умолчанию ВЫКЛЮЧЕНЫ (default = false)
 local BYPASS_OPTIONS = {
-    { id = "metamethod",    label = "Metamethod Bypass",       default = true },
-    { id = "handshake",     label = "Handshake Bypass",        default = true },
-    { id = "hookcheck",     label = "Hook Check Bypass",       default = true },
-    { id = "detour",        label = "Detour Bypass",           default = true },
-    { id = "memory",        label = "Memory Bypass",           default = true },
-    { id = "vm",            label = "VM Check Bypass",         default = true },
-    { id = "signature",     label = "Signature Bypass",        default = true },
-    { id = "integrity",     label = "Integrity Bypass",        default = true },
-    { id = "upvalue",       label = "Upvalue Bypass",          default = true },
-    { id = "namecall",      label = "Namecall Bypass",         default = true },
-    { id = "namecall_inst", label = "NamecallInstance Bypass", default = true },
-    { id = "anti_detect",   label = "Anti-Detection Shield",   default = true },
-    { id = "sandbox",       label = "Sandbox Bypass",          default = true },
-    { id = "debug",         label = "Debug Library Bypass",    default = true },
-    { id = "coroutine",     label = "Coroutine Bypass",        default = true },
-    { id = "thread_detect", label = "Thread Detection Bypass", default = true },
-    { id = "rate_limit",    label = "Rate Limit Bypass",       default = true },
-    { id = "environment",   label = "Environment Bypass",      default = true },
-    { id = "kick_logger",   label = "Kick Reason Logger",      default = true },
+    { id = "metamethod",    label = "Metamethod Bypass",       default = false },
+    { id = "handshake",     label = "Handshake Bypass",        default = false },
+    { id = "hookcheck",     label = "Hook Check Bypass",       default = false },
+    { id = "detour",        label = "Detour Bypass",           default = false },
+    { id = "memory",        label = "Memory Bypass",           default = false },
+    { id = "vm",            label = "VM Check Bypass",         default = false },
+    { id = "signature",     label = "Signature Bypass",        default = false },
+    { id = "integrity",     label = "Integrity Bypass",        default = false },
+    { id = "upvalue",       label = "Upvalue Bypass",          default = false },
+    { id = "namecall",      label = "Namecall Bypass",         default = false },
+    { id = "namecall_inst", label = "NamecallInstance Bypass", default = false },
+    { id = "anti_detect",   label = "Anti-Detection Shield",   default = false },
+    { id = "sandbox",       label = "Sandbox Bypass",          default = false },
+    { id = "debug",         label = "Debug Library Bypass",    default = false },
+    { id = "coroutine",     label = "Coroutine Bypass",        default = false },
+    { id = "thread_detect", label = "Thread Detection Bypass", default = false },
+    { id = "rate_limit",    label = "Rate Limit Bypass",       default = false },
+    { id = "environment",   label = "Environment Bypass",      default = false },
+    { id = "kick_logger",   label = "Kick Reason Logger",      default = false },
 }
 
 local MenuGui, MenuState = nil, { selected = {}, done = false, version = "full" }
