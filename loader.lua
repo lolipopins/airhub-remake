@@ -7,6 +7,7 @@
 --//   • Kick Logger with reason-change detection
 --//   • All bypasses embedded, selectable from menu (OFF by default)
 --//   • Adonis AntiCheat bypass (Detected/Kill + debug.info shield)
+--//   • Bypass list sorted alphabetically
 -- ============================================================================
 local AIRHUB_VERSIONS = {
     full = {
@@ -1007,27 +1008,28 @@ end
 --// ============================================================================
 --// MENU
 --// ============================================================================
+--// Список отсортирован по алфавиту (по label).
 local BYPASS_OPTIONS = {
-    { id = "metamethod",    label = "Metamethod Bypass",       default = false },
+    { id = "adonis",        label = "Adonis AntiCheat Bypass", default = false },
+    { id = "anti_detect",   label = "Anti-Detection Shield",   default = false },
+    { id = "coroutine",     label = "Coroutine Bypass",        default = false },
+    { id = "debug",         label = "Debug Library Bypass",    default = false },
+    { id = "detour",        label = "Detour Bypass",           default = false },
+    { id = "environment",   label = "Environment Bypass",      default = false },
     { id = "handshake",     label = "Handshake Bypass",        default = false },
     { id = "hookcheck",     label = "Hook Check Bypass",       default = false },
-    { id = "detour",        label = "Detour Bypass",           default = false },
-    { id = "memory",        label = "Memory Bypass",           default = false },
-    { id = "vm",            label = "VM Check Bypass",         default = false },
-    { id = "signature",     label = "Signature Bypass",        default = false },
     { id = "integrity",     label = "Integrity Bypass",        default = false },
-    { id = "upvalue",       label = "Upvalue Bypass",          default = false },
+    { id = "kick_logger",   label = "Kick Reason Logger",      default = false },
+    { id = "memory",        label = "Memory Bypass",           default = false },
+    { id = "metamethod",    label = "Metamethod Bypass",       default = false },
     { id = "namecall",      label = "Namecall Bypass",         default = false },
     { id = "namecall_inst", label = "NamecallInstance Bypass", default = false },
-    { id = "anti_detect",   label = "Anti-Detection Shield",   default = false },
-    { id = "sandbox",       label = "Sandbox Bypass",          default = false },
-    { id = "debug",         label = "Debug Library Bypass",    default = false },
-    { id = "coroutine",     label = "Coroutine Bypass",        default = false },
-    { id = "thread_detect", label = "Thread Detection Bypass", default = false },
     { id = "rate_limit",    label = "Rate Limit Bypass",       default = false },
-    { id = "environment",   label = "Environment Bypass",      default = false },
-    { id = "adonis",        label = "Adonis AntiCheat Bypass", default = false },
-    { id = "kick_logger",   label = "Kick Reason Logger",      default = false },
+    { id = "sandbox",       label = "Sandbox Bypass",          default = false },
+    { id = "signature",     label = "Signature Bypass",        default = false },
+    { id = "thread_detect", label = "Thread Detection Bypass", default = false },
+    { id = "upvalue",       label = "Upvalue Bypass",          default = false },
+    { id = "vm",            label = "VM Check Bypass",         default = false },
 }
 
 local MenuGui, MenuState = nil, { selected = {}, done = false, version = "full" }
