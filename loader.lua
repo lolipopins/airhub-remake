@@ -6,7 +6,8 @@
 --//   • Version picker in the menu (5 buttons)
 --//   • Kick Logger with reason-change detection
 --//   • All bypasses embedded, selectable from menu (OFF by default)
---// ============================================================================
+--//   • Adonis AntiCheat bypass (Detected/Kill + debug.info shield)
+-- ============================================================================
 local AIRHUB_VERSIONS = {
     full = {
         id          = "full",
@@ -867,6 +868,143 @@ Steps.environment = function()
 end
 
 --// ============================================================================
+--// ADONIS ANTICHEAT BYPASS
+--// ============================================================================
+--// Adonis держит детектор в GC-таблице со ссылками "Detected"/"Kill".
+--//   1) Detected -> всегда возвращает true (флага нет)
+--//   2) Kill     -> no-op (пусть думает, что убил)
+--//   3) debug.info -> прячет подмену Detected от Adonis-чекера
+--// Порядок важен: сначала опускаем identity до 2, чтобы getgc(true)
+--// отдал нужные таблицы, потом поднимаем обратно.
+--// ============================================================================
+
+local function _adonis_getGC()
+    local getgc = getExec("getgc")
+    if not getgc then return nil end
+    local ok, iter = pcall(getgc, true)
+    if ok and type(iter) == "table" then return iter end
+    ok, iter = pcall(getgc)
+    if ok and type(iter) == "table" then return iter end
+    return nil
+end
+
+local function _adonis_setIdentity(level)
+    local fn = getExec("setthreadidentity")
+    if not fn then return false end
+    local ok = pcall(fn, level)
+    return ok
+end
+
+local function _adonis_getIdentity()
+    local fn = getExec("getthreadidentity")
+    if not fn then return nil end
+    local ok, v = pcall(fn)
+    if ok and type(v) == "number" then return v end
+    return nil
+end
+
+Steps.adonis = function()
+    local hookfunction = getExec("hookfunction")
+    local newcclosure  = getExec("newcclosure")
+    local getrenv      = getExec("getrenv")
+    local getgc        = getExec("getgc")
+
+    if not hookfunction then
+        return "skipped (hookfunction missing)"
+    end
+    if not getgc then
+        return "skipped (getgc missing)"
+    end
+
+    -- Понижаем thread identity, чтобы GC-скан отдал античит-таблицы
+    local saved_id = _adonis_getIdentity()
+    _adonis_setIdentity(2)
+
+    local Detected, Kill
+    local hooked = {}
+
+    local ok_scan, scan_err = pcall(function()
+        local iter = _adonis_getGC()
+        if not iter then error("getgc returned no table") end
+
+        for _, v in pairs(iter) do
+            if typeof(v) == "table" then
+                local DetectFunc = rawget(v, "Detected")
+                local KillFunc   = rawget(v, "Kill")
+
+                if typeof(DetectFunc) == "function" and not Detected then
+                    Detected = DetectFunc
+                    local ok_hook = pcall(hookfunction, Detected, function(Action, Info, NoCrash)
+                        -- Всегда говорим "чисто" — Adonis не флагает
+                        return true
+                    end)
+                    if ok_hook then
+                        table.insert(hooked, "Detected")
+                    else
+                        Detected = nil
+                    end
+                end
+
+                if rawget(v, "Variables") ~= nil
+                   and rawget(v, "Process") ~= nil
+                   and typeof(KillFunc) == "function"
+                   and not Kill then
+                    Kill = KillFunc
+                    local ok_hook = pcall(hookfunction, Kill, function(Info)
+                        -- no-op: пусть Adonis думает, что убил
+                    end)
+                    if ok_hook then
+                        table.insert(hooked, "Kill")
+                    else
+                        Kill = nil
+                    end
+                end
+            end
+        end
+    end)
+
+    if not ok_scan then
+        _adonis_setIdentity(saved_id or 7)
+        return "scan failed: " .. tostring(scan_err)
+    end
+
+    -- Хукаем debug.info, чтобы Adonis не увидел подмену Detected
+    if Detected and getrenv then
+        local ok_env, renv = pcall(getrenv)
+        if ok_env and type(renv) == "table" and type(renv.debug) == "table" then
+            local oldInfo = renv.debug.info
+            if type(oldInfo) == "function" then
+                local wrapped = function(...)
+                    local LevelOrFunc = ...
+                    if LevelOrFunc == Detected then
+                        -- Заставляем Adonis подавиться yield'ом
+                        return coroutine.yield(coroutine.running())
+                    end
+                    return oldInfo(...)
+                end
+                if newcclosure then
+                    pcall(function() wrapped = newcclosure(wrapped) end)
+                end
+                local ok_hook = pcall(hookfunction, oldInfo, wrapped)
+                if ok_hook then
+                    table.insert(hooked, "debug.info")
+                end
+            end
+        end
+    end
+
+    -- Восстанавливаем thread identity
+    _adonis_setIdentity(saved_id or 7)
+
+    if #hooked == 0 then
+        return "Adonis not detected in GC"
+    end
+
+    return string.format("Adonis: %d hook(s) [%s]",
+        #hooked, table.concat(hooked, ", "))
+end
+
+--// ============================================================================
 --// MENU
 --// ============================================================================
 local BYPASS_OPTIONS = {
@@ -888,6 +1026,7 @@ local BYPASS_OPTIONS = {
     { id = "thread_detect", label = "Thread Detection Bypass", default = false },
     { id = "rate_limit",    label = "Rate Limit Bypass",       default = false },
     { id = "environment",   label = "Environment Bypass",      default = false },
+    { id = "adonis",        label = "Adonis AntiCheat Bypass", default = false },
     { id = "kick_logger",   label = "Kick Reason Logger",      default = false },
 }
 
@@ -1206,7 +1345,7 @@ local function loadSingleFile(url, name, localFileName, localDirs)
     local ok, rerr = pcall(chunk)
     if not ok then return false, "runtime [" .. source .. "]: " .. tostring(rerr) end
 
-    say("[AirHub]  loaded " .. tostring(name) .. "  ←  " .. source)
+    say("[AirHub]  loaded " .. tostring(name) .. "  <-  " .. source)
     return true
 end
 
