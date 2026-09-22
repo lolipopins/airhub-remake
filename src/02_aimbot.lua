@@ -713,6 +713,7 @@ local function RestoreCurrentCFrame()
     return false
 end
 
+--// Телепорт к цели + наведение камеры на цель
 local function TeleportToTarget(targetPart)
     local hrp = GetHRP()
     if not hrp or not targetPart then return false end
@@ -720,9 +721,20 @@ local function TeleportToTarget(targetPart)
     local distance = Aimbot.Settings.TPAimDistance or 5
     local offsetCF = targetCF * CFrame.new(0, 0, distance)
     hrp.CFrame = offsetCF
+
+    --// Наводим камеру на цель, чтобы выстрел шёл точно в target
+    local cam = workspace.CurrentCamera
+    if cam and targetPart.Parent then
+        local aimPos = PredictPartPosition(targetPart)
+        local camPos = cam.CFrame.Position
+        if (aimPos - camPos).Magnitude > 0.001 then
+            cam.CFrame = CFrame.lookAt(camPos, aimPos)
+        end
+    end
     return true
 end
 
+--// Wallbang — RemotePatch
 local function PerformWallbang_RemotePatch(targetPart, btn)
     local hookf = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
@@ -758,26 +770,43 @@ local function PerformWallbang_RemotePatch(targetPart, btn)
     return true
 end
 
+--// Wallbang — RayIgnore (правильный хук через __namecall, т.к. Raycast — метод)
 local function PerformWallbang_RayIgnore(targetPart, btn)
-    local oldRaycast = workspace.Raycast
-    local newc = getExec("newcclosure")
-    workspace.Raycast = newc(function(self, origin, direction, params)
-        if params and typeof(params) == "Instance" and params:IsA("RaycastParams") then
-            params.FilterType = Enum.RaycastFilterType.Exclude
-            params.FilterDescendantsInstances = { workspace.CurrentCamera }
+    local hookf     = getExec("hookmetamethod")
+    local getMethod = getExec("getnamecallmethod")
+    local newc      = getExec("newcclosure")
+    local checkC    = getExec("checkcaller")
+    if not hookf or not getMethod then return false end
+
+    local original
+    original = hookf(game, "__namecall", newc(function(self, ...)
+        local method = getMethod()
+        if method == "Raycast" and not checkC() then
+            local args = { ... }
+            local params = args[3]
+            if typeof(params) == "Instance" and params:IsA("RaycastParams") then
+                pcall(function()
+                    params.FilterType = Enum.RaycastFilterType.Exclude
+                    params.FilterDescendantsInstances = { workspace.CurrentCamera }
+                end)
+            end
+            return original(self, table.unpack(args, 1, #args))
         end
-        return oldRaycast(self, origin, direction, params)
-    end)
+        return original(self, ...)
+    end))
+
     local mousePos = UserInputService:GetMouseLocation()
-    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
+    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
     task.wait(0.001)
     VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+
     task.delay(0.05, function()
-        workspace.Raycast = oldRaycast
+        pcall(function() hookf(game, "__namecall", original) end)
     end)
     return true
 end
 
+--// Wallbang — BulletTeleport
 local function PerformWallbang_BulletTeleport(targetPart, btn)
     local hrp = GetHRP()
     if not hrp then return false end
@@ -819,6 +848,7 @@ local function PerformWallbang(targetPart, btn)
     return ok
 end
 
+--// TP Aim — MagicBullet
 local function PerformMagicBullet(targetPart, btn)
     if not Aimbot.Settings.TPAimEnabled or Aimbot.Settings.TPAimMethod ~= "MagicBullet" then return end
     if not targetPart then return end
@@ -864,6 +894,7 @@ local function PerformMagicBullet(targetPart, btn)
     end)
 end
 
+--// TP Aim — InfiniteTP
 local function PerformInfiniteTP(targetPart, btn)
     if not Aimbot.Settings.TPAimEnabled or Aimbot.Settings.TPAimMethod ~= "InfiniteTP" then return end
     if not targetPart then return end
@@ -1879,7 +1910,7 @@ Aimbot.PerformMagicBullet    = PerformMagicBullet
 Aimbot.PerformInfiniteTP     = PerformInfiniteTP
 
 --// ---------------------------------------------------------------------------
---// DIAGNOSTICS — проверка всех зависимостей аимбота при инжекте
+--// DIAGNOSTICS
 --// ---------------------------------------------------------------------------
 
 local function Check(cond, label, detail)
