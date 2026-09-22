@@ -51,7 +51,7 @@ H.Aimbot = {
         LockPart = "Head",
         AimMethod = "Smooth",
         SilentAim = true,
-        SilentAimMode = "Camera",
+        SilentAimMode = "Auto",
         IgnoreFOV = false,
         CheckFromPlayerOnTP = true,
         PredictionEnabled = false,
@@ -91,7 +91,7 @@ H.Aimbot = {
         AutoTestDuration = 4,
         AutoMinHookCalls = 3,
         AutoFallback     = "Camera",
-        AutoRunOnLoad    = false,
+        AutoRunOnLoad    = true,
     },
     FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
     FOVCircle   = Drawing.new("Circle"),
@@ -1332,7 +1332,9 @@ local function RunAutoScan()
     Aimbot.AutoDetect.Results  = {}
     Aimbot.AutoDetect.LastScanTime = tick()
 
-    AddLog("[Auto] scanning game hooks...", Color3.fromRGB(0, 200, 255))
+    warn("========================================")
+    warn("[AutoScan] Starting silent aim method detection...")
+    warn("========================================")
 
     task.spawn(function()
         local order = Aimbot.Settings.AutoPriorityOrder
@@ -1344,12 +1346,14 @@ local function RunAutoScan()
 
             if Aimbot.Settings.AutoEnabledMethods[mode] == false then
                 Aimbot.AutoDetect.Results[mode] = { available = false, reason = "disabled", calls = 0 }
+                warn("[AutoScan] " .. mode .. " -> SKIPPED (disabled by user)")
             else
                 local available, reason = IsModeAvailable(mode)
                 if not available then
                     Aimbot.AutoDetect.Results[mode] = { available = false, reason = reason, calls = 0 }
-                    AddLog("[Auto] " .. mode .. " skip: " .. tostring(reason), Color3.fromRGB(180, 180, 180))
+                    warn("[AutoScan] " .. mode .. " -> UNAVAILABLE: " .. tostring(reason))
                 else
+                    warn("[AutoScan] Testing " .. mode .. " (" .. tostring(Aimbot.Settings.AutoTestDuration) .. "s)...")
                     Aimbot.AutoDetect.TestMode      = mode
                     Aimbot.AutoDetect.HookCallCount = 0
 
@@ -1368,12 +1372,12 @@ local function RunAutoScan()
 
                     if calls >= (Aimbot.Settings.AutoMinHookCalls or 3) then
                         selected = mode
-                        AddLog("[Auto] " .. mode .. " accepted (" .. calls .. " calls)", Color3.fromRGB(0, 255, 0))
+                        warn("[AutoScan] " .. mode .. " -> OK (" .. calls .. " game hook calls) -> SELECTED")
                         Aimbot.AutoDetect.TestMode = nil
                         task.wait(0.1)
                         break
                     else
-                        AddLog("[Auto] " .. mode .. " rejected (" .. calls .. " calls)", Color3.fromRGB(255, 120, 120))
+                        warn("[AutoScan] " .. mode .. " -> FAIL (" .. calls .. " game hook calls, need " .. tostring(Aimbot.Settings.AutoMinHookCalls or 3) .. ")")
                         Aimbot.AutoDetect.TestMode = nil
                         task.wait(0.1)
                     end
@@ -1385,12 +1389,20 @@ local function RunAutoScan()
         Aimbot.AutoDetect.Active = false
         Aimbot.AutoDetect.TestMode = nil
 
-        AddLog("[Auto] selected: " .. tostring(Aimbot.AutoDetect.SelectedMethod),
-               Color3.fromRGB(0, 255, 180))
+        warn("========================================")
+        if selected then
+            warn("[AutoScan] RESULT: Silent Aim mode set to " .. tostring(selected))
+        else
+            warn("[AutoScan] RESULT: No hook detected. Falling back to " .. tostring(Aimbot.AutoDetect.SelectedMethod))
+        end
+        warn("========================================")
     end)
 end
 
 local function CancelAutoScan()
+    if Aimbot.AutoDetect.Active then
+        warn("[AutoScan] Cancelled by user.")
+    end
     Aimbot.AutoDetect.Active = false
     Aimbot.AutoDetect.TestMode = nil
 end
@@ -1583,8 +1595,11 @@ Aimbot.RunAutoScan           = RunAutoScan
 Aimbot.CancelAutoScan        = CancelAutoScan
 Aimbot.IsModeAvailable       = IsModeAvailable
 
+--// Auto-run on load: fires if SilentAimMode is "Auto" and AutoRunOnLoad is true
 if Aimbot.Settings.AutoRunOnLoad and Aimbot.Settings.SilentAimMode == "Auto" then
     task.delay(2, function()
-        if H.Aimbot then H.Aimbot.RunAutoScan() end
+        if H.Aimbot and H.Aimbot.RunAutoScan then
+            H.Aimbot.RunAutoScan()
+        end
     end)
 end
