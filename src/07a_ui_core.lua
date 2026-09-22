@@ -487,7 +487,7 @@ task.delay(math.random(1, 3), function()
 
     secWB:AddSlider({ Name = "Max Distance",
         Value = AS.WallbangDistance or 500,
-        Min = 10, Max = 2000, Decimals = 0,
+        Min = 10, Max = 2000,
         Callback = function(v) aSetWB("WallbangDistance", v) end })
 
     --// ==== TP Aim ====
@@ -514,7 +514,7 @@ task.delay(math.random(1, 3), function()
 
     secTP:AddSlider({ Name = "TP Distance (studs)",
         Value = AS.TPAimDistance or 5,
-        Min = 1, Max = 50, Decimals = 1,
+        Min = 1, Max = 50,
         Callback = function(v) aSetTP("TPAimDistance", v) end })
 
     secTP:AddToggle({ Name = "Return on kill (MagicBullet)",
