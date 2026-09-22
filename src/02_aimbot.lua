@@ -1,5 +1,5 @@
 --// AirHub - 02_aimbot.lua
---// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim.
+--// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, diagnostics.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -723,8 +723,6 @@ local function TeleportToTarget(targetPart)
     return true
 end
 
---// Wallbang — 3 methods
-
 local function PerformWallbang_RemotePatch(targetPart, btn)
     local hookf = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
@@ -820,8 +818,6 @@ local function PerformWallbang(targetPart, btn)
     end
     return ok
 end
-
---// TP Aim — 2 methods
 
 local function PerformMagicBullet(targetPart, btn)
     if not Aimbot.Settings.TPAimEnabled or Aimbot.Settings.TPAimMethod ~= "MagicBullet" then return end
@@ -1086,7 +1082,6 @@ end
 --// Hooks
 --// ---------------------------------------------------------------------------
 
---// RayHook
 local RayHookActive = false
 local oldRayIndex = nil
 
@@ -1128,7 +1123,6 @@ local function RemoveRayHook()
     RayHookActive = false
 end
 
---// RayNew
 local RayNewActive = false
 local RayNewOriginal = nil
 
@@ -1178,7 +1172,6 @@ local function RemoveRayNewHook()
     RayNewOriginal = nil
 end
 
---// Vector3Unit
 local V3UnitActive = false
 local V3_oldIndex = nil
 
@@ -1226,7 +1219,6 @@ local function RemoveVector3UnitHook()
     V3UnitActive = false
 end
 
---// ScreenPointToRay
 local SPR_Active = false
 local SPR_Original = nil
 
@@ -1273,7 +1265,6 @@ local function RemoveScreenPointToRayHook()
     SPR_Original = nil
 end
 
---// Mouse hook
 local MouseHooked = false
 local originalGetMouse = nil
 
@@ -1350,7 +1341,6 @@ local function RemoveMouseHook()
     MouseHooked = false
 end
 
---// FireServer
 local FS_Active = false
 local FS_Original = nil
 
@@ -1417,7 +1407,6 @@ local function RemoveFireServerHook()
     FS_Original = nil
 end
 
---// GunHandler
 local GunHandlerHooked = false
 local GunHandlerRef = nil
 local GunHandlerOldShoot = nil
@@ -1470,7 +1459,6 @@ local function RemoveGunHandlerHook()
     GunHandlerOldShoot = nil
 end
 
---// CFrameHook
 local CFrameHookActive = false
 local CFrameHookOriginal = nil
 
@@ -1519,7 +1507,6 @@ local function RemoveCFrameHook()
     CFrameHookOriginal = nil
 end
 
---// Vector3New
 local Vector3NewActive = false
 local Vector3NewOriginal = nil
 
@@ -1839,7 +1826,6 @@ end
 Track(UserInputService.TextBoxFocused:Connect(function() Typing = true end))
 Track(UserInputService.TextBoxFocusReleased:Connect(function() Typing = false end))
 
---// Key handling для InfiniteTP
 Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     if gpe or Typing then return end
     if not Aimbot.Settings.TPAimEnabled then return end
@@ -1892,8 +1878,174 @@ Aimbot.PerformWallbang       = PerformWallbang
 Aimbot.PerformMagicBullet    = PerformMagicBullet
 Aimbot.PerformInfiniteTP     = PerformInfiniteTP
 
+--// ---------------------------------------------------------------------------
+--// DIAGNOSTICS — проверка всех зависимостей аимбота при инжекте
+--// ---------------------------------------------------------------------------
+
+local function Check(cond, label, detail)
+    local mark = cond and "[OK]  " or "[FAIL]"
+    local line = mark .. " " .. label
+    if detail then line = line .. " — " .. tostring(detail) end
+    warn(line)
+    return cond and 1 or 0
+end
+
+local function Diagnose()
+    local passed, failed = 0, 0
+    local function T(cond, label, detail)
+        if Check(cond, label, detail) == 1 then
+            passed = passed + 1
+        else
+            failed = failed + 1
+        end
+    end
+
+    warn("==========================================================")
+    warn("          AirHub Aimbot - DIAGNOSTICS")
+    warn("==========================================================")
+
+    warn("-- [1/6] Core modules --")
+    T(H ~= nil,                              "H (AirHub) exists")
+    T(H._CoreLoaded ~= nil,                  "H._CoreLoaded set")
+    T(Util ~= nil,                           "Util module present")
+    if Util then
+        T(Util.Players ~= nil,               "Util.Players")
+        T(Util.RunService ~= nil,            "Util.RunService")
+        T(Util.UserInputService ~= nil,      "Util.UserInputService")
+        T(Util.VirtualInputManager ~= nil,   "Util.VirtualInputManager")
+        T(Util.ReplicatedStorage ~= nil,     "Util.ReplicatedStorage")
+        T(Util.LocalPlayer ~= nil,           "Util.LocalPlayer")
+        T(type(Util.Track) == "function",    "Util.Track")
+        T(type(Util.HandleError) == "function", "Util.HandleError")
+        T(type(Util.AddLog) == "function",   "Util.AddLog")
+        T(type(Util.SafeKeyCode) == "function", "Util.SafeKeyCode")
+        T(type(Util.SafeUserInputType) == "function", "Util.SafeUserInputType")
+        T(Util.RAY_FILTER ~= nil,            "Util.RAY_FILTER")
+        T(H.DELAY_SHOT_TIMEOUT ~= nil,       "H.DELAY_SHOT_TIMEOUT", H.DELAY_SHOT_TIMEOUT)
+    end
+
+    warn("-- [2/6] Roblox services --")
+    T(Players ~= nil,                        "Players service")
+    T(RunService ~= nil,                     "RunService")
+    T(UserInputService ~= nil,               "UserInputService")
+    T(VirtualInputManager ~= nil,            "VirtualInputManager")
+    T(ReplicatedStorage ~= nil,              "ReplicatedStorage")
+    T(LocalPlayer ~= nil,                    "LocalPlayer")
+    T(workspace.CurrentCamera ~= nil,        "CurrentCamera")
+    T(LocalPlayer and LocalPlayer.Character ~= nil, "LocalPlayer.Character")
+
+    warn("-- [3/6] Drawing / FOVCircle --")
+    local drawingOK = pcall(function() local d = Drawing.new("Circle"); d:Remove() end)
+    T(drawingOK,                             "Drawing.new available")
+    T(Aimbot.FOVCircle ~= nil,               "Aimbot.FOVCircle created")
+    if Aimbot.FOVCircle then
+        local ok = pcall(function() Aimbot.FOVCircle.Radius = 50 end)
+        T(ok,                                "FOVCircle writable")
+    end
+
+    warn("-- [4/6] Executor functions --")
+    local execs = {
+        "hookmetamethod", "hookfunction", "newcclosure", "checkcaller",
+        "getrawmetatable", "setreadonly", "getnamecallmethod",
+        "mousemoverel", "mousemoveabs", "setclipboard", "getconnections",
+    }
+    for _, name in ipairs(execs) do
+        T(getExec(name) ~= nil, "executor: " .. name)
+    end
+
+    warn("-- [5/6] Hook availability --")
+    if Aimbot.IsModeAvailable then
+        local modes = {
+            "RayHook", "RayNew", "Vector3Unit", "ScreenPointToRay",
+            "MouseHit", "MouseFull", "GunHandler", "FireServer",
+            "MouseLock", "Mouse", "Camera", "CFrameHook", "Vector3New",
+        }
+        local available = {}
+        for _, m in ipairs(modes) do
+            local ok, reason = Aimbot.IsModeAvailable(m)
+            if ok then
+                available[#available + 1] = m
+                T(true, "hook: " .. m)
+            else
+                T(false, "hook: " .. m, reason)
+            end
+        end
+        Aimbot.AutoDetect.AvailableMethods = available
+    else
+        T(false, "Aimbot.IsModeAvailable", "not exported")
+    end
+
+    warn("-- [6/6] Aimbot exports --")
+    local exports = {
+        "CancelLock", "GetVisiblePointOnPart", "GetMousePos",
+        "PredictPartPosition", "MoveMouseAbs", "WorldToMouseVIM",
+        "GetNPCCharacters", "GetLockedCharacter",
+        "RunAutoScan", "CancelAutoScan", "IsModeAvailable",
+        "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
+    }
+    for _, name in ipairs(exports) do
+        T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
+    end
+
+    warn("-- Settings sanity --")
+    local S = Aimbot.Settings
+    T(S ~= nil,                              "Settings table")
+    if S then
+        T(S.TriggerKey ~= nil,               "TriggerKey", S.TriggerKey)
+        T(S.SilentAimMode ~= nil,            "SilentAimMode", S.SilentAimMode)
+        T(S.LockPart ~= nil,                 "LockPart", S.LockPart)
+        T(S.TeamCheck ~= nil,                "TeamCheck table")
+        T(S.AutoShoot ~= nil,                "AutoShoot table")
+        T(S.AutoEnabledMethods ~= nil,       "AutoEnabledMethods table")
+        T(S.AutoPriorityOrder ~= nil,        "AutoPriorityOrder list")
+        T(S.TPAimKey ~= nil,                 "TPAimKey", S.TPAimKey)
+        T(S.TPAimDistance ~= nil,            "TPAimDistance", tostring(S.TPAimDistance))
+        T(S.WallbangDistance ~= nil,         "WallbangDistance", tostring(S.WallbangDistance))
+    end
+
+    warn("-- AntiAim dependency --")
+    local AA = H.AntiAim
+    T(AA ~= nil,                             "H.AntiAim")
+    if AA then
+        T(AA.Desync ~= nil,                  "AntiAim.Desync")
+        T(type(AA.StartDesync) == "function",  "AntiAim.StartDesync")
+        T(type(AA.StopDesync) == "function",   "AntiAim.StopDesync")
+        if AA.Desync and AA.Desync.Settings then
+            T(true, "AntiAim.Desync.Settings ready")
+        else
+            T(false, "AntiAim.Desync.Settings", "not initialized")
+        end
+    end
+
+    warn("==========================================================")
+    warn(string.format("  RESULT: %d passed, %d failed", passed, failed))
+    warn("==========================================================")
+    if failed == 0 then
+        warn("[DIAG] Everything looks GOOD. Aimbot should work.")
+    else
+        warn("[DIAG] " .. tostring(failed) .. " check(s) FAILED - see [FAIL] lines above.")
+        warn("[DIAG] Common causes:")
+        warn("  - Executor missing hookmetamethod/hookfunction -> most silent-aim modes won't work")
+        warn("  - Drawing.new not available -> FOV circle won't show, use executor with Drawing support")
+        warn("  - AntiAim module not loaded -> TP Aim (MagicBullet) can't toggle desync")
+        warn("  - Util module incomplete -> check 01_core.lua loaded before 02_aimbot.lua")
+    end
+
+    return passed, failed
+end
+
+Aimbot.Diagnose = Diagnose
+
+task.delay(1, function()
+    if H.ShuttingDown then return end
+    local ok, err = pcall(Diagnose)
+    if not ok then
+        warn("[DIAG] Diagnose() crashed: " .. tostring(err))
+    end
+end)
+
 if Aimbot.Settings.AutoRunOnLoad and Aimbot.Settings.SilentAimMode == "Auto" then
-    task.delay(2, function()
+    task.delay(3, function()
         if H.Aimbot and H.Aimbot.RunAutoScan then
             H.Aimbot.RunAutoScan()
         end
