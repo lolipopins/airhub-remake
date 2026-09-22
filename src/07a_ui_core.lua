@@ -1,5 +1,5 @@
 --// AirHub - 07a_ui_core.lua
---// UI library load, window, tabs, Aimbot tab.
+--// UI library load, window, tabs, Aimbot tab + Auto-scan section.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
@@ -22,17 +22,13 @@ local FastStop       = H.FastStop
 local AutoStrafer    = H.AutoStrafer
 local Noclip         = H.Noclip
 
---// ---------------------------------------------------------------------------
---// Defensive proxies — any missing module/function becomes a no-op instead of
---// crashing the whole UI module. Logs once so it's visible in the console.
---// ---------------------------------------------------------------------------
 local _missingLogged = {}
 local function noop() end
 local function orNoop(fn, label)
     if type(fn) == "function" then return fn end
     if label and not _missingLogged[label] then
         _missingLogged[label] = true
-        warn("[AirHub] 07a: missing function → " .. tostring(label))
+        warn("[AirHub] 07a: missing function -> " .. tostring(label))
     end
     return noop
 end
@@ -40,7 +36,7 @@ local function orTable(t, label)
     if type(t) == "table" then return t end
     if label and not _missingLogged[label] then
         _missingLogged[label] = true
-        warn("[AirHub] 07a: missing module → " .. tostring(label))
+        warn("[AirHub] 07a: missing module -> " .. tostring(label))
     end
     return {}
 end
@@ -60,6 +56,8 @@ local CancelLock           = orNoop(Aimbot.CancelLock,                "Aimbot.Ca
 local RemoveRayHook        = orNoop(Aimbot.RemoveRayHook,             "Aimbot.RemoveRayHook")
 local RemoveMouseHitHook   = orNoop(Aimbot.RemoveMouseHitHook,        "Aimbot.RemoveMouseHitHook")
 local RemoveGunHandlerHook = orNoop(Aimbot.RemoveGunHandlerHook,      "Aimbot.RemoveGunHandlerHook")
+local RemoveCFrameHook     = orNoop(Aimbot.RemoveCFrameHook,          "Aimbot.RemoveCFrameHook")
+local RemoveVector3NewHook = orNoop(Aimbot.RemoveVector3NewHook,      "Aimbot.RemoveVector3NewHook")
 local ApplyGlowToAll       = orNoop(WallHack.ApplyGlowToAll,          "WallHack.ApplyGlowToAll")
 local StartServerPosition  = orNoop(ServerPosition.Start,             "ServerPosition.Start")
 local StopServerPosition   = orNoop(ServerPosition.Stop,              "ServerPosition.Stop")
@@ -70,9 +68,6 @@ local StartDesync          = orNoop(AntiAim.StartDesync,              "AntiAim.S
 local CleanupAntiAim       = orNoop(AntiAim.CleanupAntiAim,           "AntiAim.CleanupAntiAim")
 local AA_BIND_NAME         = AntiAim.AA_BIND_NAME or "AirHubAntiAim"
 
---// ---------------------------------------------------------------------------
---// ApplyAllEnabledStates
---// ---------------------------------------------------------------------------
 local function ApplyAllEnabledStates()
     local Hg = getgenv().AirHub
     if not Hg then return end
@@ -143,9 +138,6 @@ end
 H._UI = H._UI or {}
 H._UI.ApplyAllEnabledStates = ApplyAllEnabledStates
 
---// ---------------------------------------------------------------------------
---// UI bootstrap
---// ---------------------------------------------------------------------------
 task.delay(math.random(1, 3), function()
     if H.ShuttingDown then return end
     local Library
@@ -193,6 +185,7 @@ task.delay(math.random(1, 3), function()
             if Aimbot.Settings.AutoShoot then Aimbot.Settings.AutoShoot.Enabled = false end
         end
         if Aimbot.FOVSettings then Aimbot.FOVSettings.Enabled = false end
+        if Aimbot.CancelAutoScan then pcall(Aimbot.CancelAutoScan) end
 
         if WallHack.Settings then WallHack.Settings.Enabled = false end
         if WallHack.Visuals then
@@ -252,6 +245,8 @@ task.delay(math.random(1, 3), function()
         pcall(function() RemoveRayHook() end)
         pcall(function() RemoveMouseHitHook() end)
         pcall(function() RemoveGunHandlerHook() end)
+        pcall(function() RemoveCFrameHook() end)
+        pcall(function() RemoveVector3NewHook() end)
         if Aimbot.RemoveRayNewHook      then pcall(Aimbot.RemoveRayNewHook)      end
         if Aimbot.RemoveVector3UnitHook then pcall(Aimbot.RemoveVector3UnitHook) end
         if Aimbot.RemoveSPRHook         then pcall(Aimbot.RemoveSPRHook)         end
@@ -314,15 +309,19 @@ task.delay(math.random(1, 3), function()
 
     local teamModes      = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
     local wallCheckModes = { "Fast", "Perfect" }
+
     local silentAimModes = {
-        "Camera", "Mouse", "MouseLock", "MouseHit", "MouseFull",
-        "RayHook", "RayNew", "ScreenPointToRay", "Vector3Unit",
+        "Auto",
+        "Camera",
+        "Mouse", "MouseLock",
+        "MouseHit", "MouseFull",
+        "RayHook", "RayNew",
+        "ScreenPointToRay",
+        "Vector3Unit", "Vector3New",
         "FireServer", "GunHandler",
+        "CFrameHook",
     }
 
-    --// -----------------------------------------------------------------
-    --// Aimbot tab
-    --// -----------------------------------------------------------------
     local AS = (Aimbot and Aimbot.Settings) or {}
     local function aSet(key, val) if Aimbot.Settings then Aimbot.Settings[key] = val end end
     local function aSetTeam(key, val)
@@ -403,6 +402,22 @@ task.delay(math.random(1, 3), function()
     local secD = H._UI.AimbotTab:CreateSection({ Name = "Silent Aim", Side = "Right" })
     secD:AddToggle({ Name = "Enabled", Value = AS.SilentAim ~= false,
         Callback = function(v) aSet("SilentAim", v) end })
+
+    local modeStatusLabel = nil
+    local function refreshModeLabel()
+        if not modeStatusLabel then return end
+        local A = Aimbot.AutoDetect
+        local txt
+        if A and A.Active then
+            txt = "Scanning: " .. tostring(A.TestMode) .. " (" .. tostring(A.HookCallCount) .. ")"
+        elseif A and A.SelectedMethod then
+            txt = "Auto -> " .. tostring(A.SelectedMethod)
+        else
+            txt = "Mode: " .. tostring(AS.SilentAimMode or "Camera")
+        end
+        pcall(function() modeStatusLabel:SetLabel(txt) end)
+    end
+
     secD:AddDropdown({ Name = "Mode", Value = AS.SilentAimMode or "Camera",
         List = silentAimModes,
         Callback = function(v)
@@ -413,6 +428,109 @@ task.delay(math.random(1, 3), function()
             if v ~= "ScreenPointToRay" and Aimbot.RemoveSPRHook         then pcall(Aimbot.RemoveSPRHook)         end
             if v ~= "MouseHit" and v ~= "MouseFull" and Aimbot.RemoveMouseHook then pcall(Aimbot.RemoveMouseHook)   end
             if v ~= "FireServer"       and Aimbot.RemoveFireServerHook  then pcall(Aimbot.RemoveFireServerHook)  end
+            if v ~= "CFrameHook"       and Aimbot.RemoveCFrameHook      then pcall(Aimbot.RemoveCFrameHook)      end
+            if v ~= "Vector3New"       and Aimbot.RemoveVector3NewHook  then pcall(Aimbot.RemoveVector3NewHook)  end
+
+            if v ~= "Auto" and Aimbot.CancelAutoScan then pcall(Aimbot.CancelAutoScan) end
+            refreshModeLabel()
+        end })
+
+    do
+        local okLabel = pcall(function()
+            modeStatusLabel = secD:AddLabel({ Name = "Mode Status", Text = "Mode: " .. tostring(AS.SilentAimMode or "Camera") })
+        end)
+        if not okLabel then modeStatusLabel = nil end
+    end
+
+    secD:AddButton({ Name = "Run Auto-Scan", Callback = function()
+        if Aimbot.RunAutoScan then
+            Aimbot.RunAutoScan()
+            refreshModeLabel()
+        end
+    end })
+    secD:AddButton({ Name = "Cancel Auto-Scan", Callback = function()
+        if Aimbot.CancelAutoScan then
+            Aimbot.CancelAutoScan()
+            refreshModeLabel()
+        end
+    end })
+
+    task.spawn(function()
+        while not H.ShuttingDown do
+            refreshModeLabel()
+            task.wait(0.2)
+        end
+    end)
+
+    local secAuto = H._UI.AimbotTab:CreateSection({ Name = "Auto Detection", Side = "Right" })
+
+    local function aSetAuto(key, val)
+        if Aimbot.Settings then Aimbot.Settings[key] = val end
+    end
+    local function aSetAutoMethod(name, val)
+        if Aimbot.Settings and Aimbot.Settings.AutoEnabledMethods then
+            Aimbot.Settings.AutoEnabledMethods[name] = val
+        end
+    end
+
+    secAuto:AddSlider({ Name = "Test Duration (s)",
+        Value = AS.AutoTestDuration or 4,
+        Min = 1, Max = 15, Decimals = 1,
+        Callback = function(v) aSetAuto("AutoTestDuration", v) end })
+
+    secAuto:AddSlider({ Name = "Min Hook Calls to accept",
+        Value = AS.AutoMinHookCalls or 3,
+        Min = 1, Max = 50,
+        Callback = function(v) aSetAuto("AutoMinHookCalls", v) end })
+
+    secAuto:AddDropdown({ Name = "Fallback Mode",
+        Value = AS.AutoFallback or "Camera",
+        List = { "Camera", "Mouse", "MouseLock" },
+        Callback = function(v) aSetAuto("AutoFallback", v) end })
+
+    secAuto:AddToggle({ Name = "Auto-run on load",
+        Value = AS.AutoRunOnLoad or false,
+        Callback = function(v) aSetAuto("AutoRunOnLoad", v) end })
+
+    secAuto:AddToggle({ Name = "Allow CFrameHook (experimental)",
+        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.CFrameHook) or false,
+        Callback = function(v) aSetAutoMethod("CFrameHook", v) end })
+
+    secAuto:AddToggle({ Name = "Allow Vector3New (experimental, laggy)",
+        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.Vector3New) or false,
+        Callback = function(v) aSetAutoMethod("Vector3New", v) end })
+
+    secAuto:AddToggle({ Name = "Allow RayHook",
+        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.RayHook) ~= false,
+        Callback = function(v) aSetAutoMethod("RayHook", v) end })
+    secAuto:AddToggle({ Name = "Allow RayNew",
+        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.RayNew) ~= false,
+        Callback = function(v) aSetAutoMethod("RayNew", v) end })
+    secAuto:AddToggle({ Name = "Allow ScreenPointToRay",
+        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.ScreenPointToRay) ~= false,
+        Callback = function(v) aSetAutoMethod("ScreenPointToRay", v) end })
+    secAuto:AddToggle({ Name = "Allow Vector3Unit",
+        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.Vector3Unit) ~= false,
+        Callback = function(v) aSetAutoMethod("Vector3Unit", v) end })
+    secAuto:AddToggle({ Name = "Allow MouseHit / MouseFull",
+        Value = ((AS.AutoEnabledMethods and AS.AutoEnabledMethods.MouseFull) ~= false)
+                or ((AS.AutoEnabledMethods and AS.AutoEnabledMethods.MouseHit) ~= false),
+        Callback = function(v)
+            aSetAutoMethod("MouseFull", v)
+            aSetAutoMethod("MouseHit", v)
+        end })
+    secAuto:AddToggle({ Name = "Allow GunHandler",
+        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.GunHandler) ~= false,
+        Callback = function(v) aSetAutoMethod("GunHandler", v) end })
+    secAuto:AddToggle({ Name = "Allow FireServer",
+        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.FireServer) ~= false,
+        Callback = function(v) aSetAutoMethod("FireServer", v) end })
+    secAuto:AddToggle({ Name = "Allow MouseLock / Mouse",
+        Value = ((AS.AutoEnabledMethods and AS.AutoEnabledMethods.MouseLock) ~= false)
+                or ((AS.AutoEnabledMethods and AS.AutoEnabledMethods.Mouse) ~= false),
+        Callback = function(v)
+            aSetAutoMethod("MouseLock", v)
+            aSetAutoMethod("Mouse", v)
         end })
 
     local secAS = H._UI.AimbotTab:CreateSection({ Name = "Auto Shoot", Side = "Right" })
