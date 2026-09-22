@@ -1,5 +1,5 @@
 --// AirHub - 07a_ui_core.lua
---// UI library load, window, tabs, Aimbot tab. (Auto Detection section removed.)
+--// UI library load, window, tabs, Aimbot tab + Wallbang + TP Aim sections.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
@@ -186,9 +186,12 @@ task.delay(math.random(1, 3), function()
         if Aimbot.Settings then
             Aimbot.Settings.Enabled = false
             if Aimbot.Settings.AutoShoot then Aimbot.Settings.AutoShoot.Enabled = false end
+            Aimbot.Settings.TPAimEnabled = false
+            Aimbot.Settings.WallbangEnabled = false
         end
         if Aimbot.FOVSettings then Aimbot.FOVSettings.Enabled = false end
         if Aimbot.CancelAutoScan then pcall(Aimbot.CancelAutoScan) end
+        if Aimbot.TPAimInternal then Aimbot.TPAimInternal.Active = false end
 
         if WallHack.Settings then WallHack.Settings.Enabled = false end
         if WallHack.Visuals then
@@ -402,6 +405,7 @@ task.delay(math.random(1, 3), function()
         Value = (AS.TeamCheck and AS.TeamCheck.TreatNeutralAsEnemy) ~= false,
         Callback = function(v) aSetTeam("TreatNeutralAsEnemy", v) end })
 
+    --// ==== Silent Aim ====
     local secD = H._UI.AimbotTab:CreateSection({ Name = "Silent Aim", Side = "Right" })
     secD:AddToggle({ Name = "Enabled", Value = AS.SilentAim ~= false,
         Callback = function(v) aSet("SilentAim", v) end })
@@ -416,7 +420,7 @@ task.delay(math.random(1, 3), function()
         elseif A and A.SelectedMethod then
             txt = "Auto -> " .. tostring(A.SelectedMethod)
         else
-            txt = "Mode: " .. tostring(AS.SilentAimMode or "Camera")
+            txt = "Mode: " .. tostring(AS.SilentAimMode or "Auto")
         end
         pcall(function() modeStatusLabel:SetLabel(txt) end)
     end
@@ -465,6 +469,59 @@ task.delay(math.random(1, 3), function()
         end
     end)
 
+    --// ==== Wallbang ====
+    local secWB = H._UI.AimbotTab:CreateSection({ Name = "Wallbang", Side = "Right" })
+
+    local function aSetWB(key, val)
+        if Aimbot.Settings then Aimbot.Settings[key] = val end
+    end
+
+    secWB:AddToggle({ Name = "Enabled",
+        Value = AS.WallbangEnabled or false,
+        Callback = function(v) aSetWB("WallbangEnabled", v) end })
+
+    secWB:AddDropdown({ Name = "Method",
+        Value = AS.WallbangMethod or "RemotePatch",
+        List = { "RemotePatch", "RayIgnore", "BulletTeleport" },
+        Callback = function(v) aSetWB("WallbangMethod", v) end })
+
+    secWB:AddSlider({ Name = "Max Distance",
+        Value = AS.WallbangDistance or 500,
+        Min = 10, Max = 2000, Decimals = 0,
+        Callback = function(v) aSetWB("WallbangDistance", v) end })
+
+    --// ==== TP Aim ====
+    local secTP = H._UI.AimbotTab:CreateSection({ Name = "TP Aim", Side = "Right" })
+
+    local function aSetTP(key, val)
+        if Aimbot.Settings then Aimbot.Settings[key] = val end
+    end
+
+    secTP:AddToggle({ Name = "Enabled",
+        Value = AS.TPAimEnabled or false,
+        Callback = function(v) aSetTP("TPAimEnabled", v) end })
+
+    secTP:AddDropdown({ Name = "Method",
+        Value = AS.TPAimMethod or "MagicBullet",
+        List = { "MagicBullet", "InfiniteTP" },
+        Callback = function(v) aSetTP("TPAimMethod", v) end })
+
+    secTP:AddTextbox({ Name = "InfiniteTP Key (KeyCode)",
+        Value = AS.TPAimKey or "E",
+        Callback = function(v)
+            if v and v ~= "" then aSetTP("TPAimKey", v) end
+        end })
+
+    secTP:AddSlider({ Name = "TP Distance (studs)",
+        Value = AS.TPAimDistance or 5,
+        Min = 1, Max = 50, Decimals = 1,
+        Callback = function(v) aSetTP("TPAimDistance", v) end })
+
+    secTP:AddToggle({ Name = "Return on kill (MagicBullet)",
+        Value = AS.TPAimReturnOnKill ~= false,
+        Callback = function(v) aSetTP("TPAimReturnOnKill", v) end })
+
+    --// ==== Auto Shoot ====
     local secAS = H._UI.AimbotTab:CreateSection({ Name = "Auto Shoot", Side = "Right" })
     secAS:AddToggle({ Name = "Enabled", Value = (AS.AutoShoot and AS.AutoShoot.Enabled) or false,
         Callback = function(v) aSetAS("Enabled", v) end })
@@ -497,6 +554,7 @@ task.delay(math.random(1, 3), function()
             end
         end })
 
+    --// ==== FOV ====
     local secE = H._UI.AimbotTab:CreateSection({ Name = "FOV" })
     secE:AddToggle({ Name = "Enabled", Value = (Aimbot.FOVSettings and Aimbot.FOVSettings.Enabled) ~= false,
         Callback = function(v) aSetFov("Enabled", v) end })
