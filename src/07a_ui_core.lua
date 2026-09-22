@@ -485,10 +485,12 @@ task.delay(math.random(1, 3), function()
         List = { "RemotePatch", "RayIgnore", "BulletTeleport" },
         Callback = function(v) aSetWB("WallbangMethod", v) end })
 
-    secWB:AddSlider({ Name = "Max Distance",
-        Value = AS.WallbangDistance or 500,
-        Min = 10, Max = 2000,
-        Callback = function(v) aSetWB("WallbangDistance", v) end })
+    secWB:AddTextbox({ Name = "Max Distance (studs)",
+        Value = tostring(AS.WallbangDistance or 500),
+        Callback = function(v)
+            local n = tonumber(v)
+            if n and n > 0 then aSetWB("WallbangDistance", math.floor(n)) end
+        end })
 
     --// ==== TP Aim ====
     local secTP = H._UI.AimbotTab:CreateSection({ Name = "TP Aim", Side = "Right" })
@@ -512,10 +514,12 @@ task.delay(math.random(1, 3), function()
             if v and v ~= "" then aSetTP("TPAimKey", v) end
         end })
 
-    secTP:AddSlider({ Name = "TP Distance (studs)",
-        Value = AS.TPAimDistance or 5,
-        Min = 1, Max = 50,
-        Callback = function(v) aSetTP("TPAimDistance", v) end })
+    secTP:AddTextbox({ Name = "TP Distance (studs)",
+        Value = tostring(AS.TPAimDistance or 5),
+        Callback = function(v)
+            local n = tonumber(v)
+            if n and n > 0 then aSetTP("TPAimDistance", n) end
+        end })
 
     secTP:AddToggle({ Name = "Return on kill (MagicBullet)",
         Value = AS.TPAimReturnOnKill ~= false,
