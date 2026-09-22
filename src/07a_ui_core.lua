@@ -1,5 +1,5 @@
 --// AirHub - 07a_ui_core.lua
---// UI library load, window, tabs, Aimbot tab + Auto-scan section.
+--// UI library load, window, tabs, Aimbot tab. (Auto Detection section removed.)
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
@@ -138,6 +138,9 @@ end
 H._UI = H._UI or {}
 H._UI.ApplyAllEnabledStates = ApplyAllEnabledStates
 
+--// ---------------------------------------------------------------------------
+--// UI bootstrap
+--// ---------------------------------------------------------------------------
 task.delay(math.random(1, 3), function()
     if H.ShuttingDown then return end
     local Library
@@ -418,7 +421,7 @@ task.delay(math.random(1, 3), function()
         pcall(function() modeStatusLabel:SetLabel(txt) end)
     end
 
-    secD:AddDropdown({ Name = "Mode", Value = AS.SilentAimMode or "Camera",
+    secD:AddDropdown({ Name = "Mode", Value = AS.SilentAimMode or "Auto",
         List = silentAimModes,
         Callback = function(v)
             aSet("SilentAimMode", v)
@@ -437,7 +440,7 @@ task.delay(math.random(1, 3), function()
 
     do
         local okLabel = pcall(function()
-            modeStatusLabel = secD:AddLabel({ Name = "Mode Status", Text = "Mode: " .. tostring(AS.SilentAimMode or "Camera") })
+            modeStatusLabel = secD:AddLabel({ Name = "Mode Status", Text = "Mode: " .. tostring(AS.SilentAimMode or "Auto") })
         end)
         if not okLabel then modeStatusLabel = nil end
     end
@@ -461,77 +464,6 @@ task.delay(math.random(1, 3), function()
             task.wait(0.2)
         end
     end)
-
-    local secAuto = H._UI.AimbotTab:CreateSection({ Name = "Auto Detection", Side = "Right" })
-
-    local function aSetAuto(key, val)
-        if Aimbot.Settings then Aimbot.Settings[key] = val end
-    end
-    local function aSetAutoMethod(name, val)
-        if Aimbot.Settings and Aimbot.Settings.AutoEnabledMethods then
-            Aimbot.Settings.AutoEnabledMethods[name] = val
-        end
-    end
-
-    secAuto:AddSlider({ Name = "Test Duration (s)",
-        Value = AS.AutoTestDuration or 4,
-        Min = 1, Max = 15, Decimals = 1,
-        Callback = function(v) aSetAuto("AutoTestDuration", v) end })
-
-    secAuto:AddSlider({ Name = "Min Hook Calls to accept",
-        Value = AS.AutoMinHookCalls or 3,
-        Min = 1, Max = 50,
-        Callback = function(v) aSetAuto("AutoMinHookCalls", v) end })
-
-    secAuto:AddDropdown({ Name = "Fallback Mode",
-        Value = AS.AutoFallback or "Camera",
-        List = { "Camera", "Mouse", "MouseLock" },
-        Callback = function(v) aSetAuto("AutoFallback", v) end })
-
-    secAuto:AddToggle({ Name = "Auto-run on load",
-        Value = AS.AutoRunOnLoad or false,
-        Callback = function(v) aSetAuto("AutoRunOnLoad", v) end })
-
-    secAuto:AddToggle({ Name = "Allow CFrameHook (experimental)",
-        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.CFrameHook) or false,
-        Callback = function(v) aSetAutoMethod("CFrameHook", v) end })
-
-    secAuto:AddToggle({ Name = "Allow Vector3New (experimental, laggy)",
-        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.Vector3New) or false,
-        Callback = function(v) aSetAutoMethod("Vector3New", v) end })
-
-    secAuto:AddToggle({ Name = "Allow RayHook",
-        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.RayHook) ~= false,
-        Callback = function(v) aSetAutoMethod("RayHook", v) end })
-    secAuto:AddToggle({ Name = "Allow RayNew",
-        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.RayNew) ~= false,
-        Callback = function(v) aSetAutoMethod("RayNew", v) end })
-    secAuto:AddToggle({ Name = "Allow ScreenPointToRay",
-        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.ScreenPointToRay) ~= false,
-        Callback = function(v) aSetAutoMethod("ScreenPointToRay", v) end })
-    secAuto:AddToggle({ Name = "Allow Vector3Unit",
-        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.Vector3Unit) ~= false,
-        Callback = function(v) aSetAutoMethod("Vector3Unit", v) end })
-    secAuto:AddToggle({ Name = "Allow MouseHit / MouseFull",
-        Value = ((AS.AutoEnabledMethods and AS.AutoEnabledMethods.MouseFull) ~= false)
-                or ((AS.AutoEnabledMethods and AS.AutoEnabledMethods.MouseHit) ~= false),
-        Callback = function(v)
-            aSetAutoMethod("MouseFull", v)
-            aSetAutoMethod("MouseHit", v)
-        end })
-    secAuto:AddToggle({ Name = "Allow GunHandler",
-        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.GunHandler) ~= false,
-        Callback = function(v) aSetAutoMethod("GunHandler", v) end })
-    secAuto:AddToggle({ Name = "Allow FireServer",
-        Value = (AS.AutoEnabledMethods and AS.AutoEnabledMethods.FireServer) ~= false,
-        Callback = function(v) aSetAutoMethod("FireServer", v) end })
-    secAuto:AddToggle({ Name = "Allow MouseLock / Mouse",
-        Value = ((AS.AutoEnabledMethods and AS.AutoEnabledMethods.MouseLock) ~= false)
-                or ((AS.AutoEnabledMethods and AS.AutoEnabledMethods.Mouse) ~= false),
-        Callback = function(v)
-            aSetAutoMethod("MouseLock", v)
-            aSetAutoMethod("Mouse", v)
-        end })
 
     local secAS = H._UI.AimbotTab:CreateSection({ Name = "Auto Shoot", Side = "Right" })
     secAS:AddToggle({ Name = "Enabled", Value = (AS.AutoShoot and AS.AutoShoot.Enabled) or false,
