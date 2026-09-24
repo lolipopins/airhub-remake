@@ -341,33 +341,64 @@ local function GetClosestMultipointToMouse(part, refScreen)
     return bestPt or PredictPartPosition(part)
 end
 
+--// ---------------------------------------------------------------------------
+--// GetVisiblePointOnPart — wallcheck против aimPos (backtrack-aware)
+--// ---------------------------------------------------------------------------
 local function GetVisiblePointOnPart(origin, part)
     if not part or not part:IsA("BasePart") then return nil end
 
-    --// NOTE: backtrack NO LONGER bypasses wallcheck.
-    --// If backtrack is enabled, PredictPartPosition returns the old position,
-    --// and wallcheck runs against that old position (from origin to that point).
-    --// This means: walls still block shots, but the shot goes to the OLD spot.
+    --// 1. Позиция куда хотим стрелять (с учётом backtrack)
+    local aimPos = PredictPartPosition(part)
 
+    --// 2. WallCheck выключен / TP / WB — возвращаем сразу
     if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
-        return PredictPartPosition(part)
+        return aimPos
     end
+
+    --// 3. WallCheck против aimPos, НЕ против реального part.CFrame
+    local params = BuildRayParams(part.Parent)
+    local size = part.Size
+    local hx, hy, hz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
+    local cf = CFrame.new(aimPos)
 
     local isNearest = (Aimbot.Settings.LockPart == "Nearest")
     local isPerfect = (Aimbot.Settings.WallCheckMode == "Perfect")
 
     if isPerfect then
-        local params = BuildRayParams(part.Parent)
-        local pts = GetMultipoints(part)
+        local pts = {
+            aimPos,
+            (cf * CFrame.new( hx,  hy,  hz)).Position,
+            (cf * CFrame.new(-hx,  hy,  hz)).Position,
+            (cf * CFrame.new( hx, -hy,  hz)).Position,
+            (cf * CFrame.new(-hx, -hy,  hz)).Position,
+            (cf * CFrame.new( hx,  hy, -hz)).Position,
+            (cf * CFrame.new(-hx,  hy, -hz)).Position,
+            (cf * CFrame.new( hx, -hy, -hz)).Position,
+            (cf * CFrame.new(-hx, -hy, -hz)).Position,
+        }
         for _, pt in ipairs(pts) do
             if not IsPointVisible(origin, pt, params) then return nil end
         end
-        if isNearest then return GetClosestMultipointToMouse(part, GetMousePos()) end
-        return PredictPartPosition(part)
+        if isNearest then
+            local mousePos = GetMousePos()
+            local bestPt, bestDist = aimPos, math.huge
+            for _, pt in ipairs(pts) do
+                local screen, on = workspace.CurrentCamera:WorldToViewportPoint(pt)
+                if on then
+                    local d = (mousePos - Vector2.new(screen.X, screen.Y)).Magnitude
+                    if d < bestDist then bestDist = d; bestPt = pt end
+                end
+            end
+            return bestPt
+        end
+        return aimPos
     end
 
-    if isNearest then return GetNearestVisibleMultipoint(origin, part, GetMousePos()) end
-    return GetVisiblePoint_Fast(origin, part)
+    --// Fast mode: проверка одной центральной точки
+    if IsPointVisible(origin, aimPos, params) then
+        return aimPos
+    end
+    return nil
 end
 
 local function FindNearestPartToMouse(char, origin)
@@ -614,7 +645,6 @@ end
 
 local function WaitForShotPoint(targetPart)
     if not targetPart then return nil, false end
-    --// NOTE: backtrack NO LONGER bypasses wallcheck here either.
     if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
         return PredictPartPosition(targetPart), true
     end
