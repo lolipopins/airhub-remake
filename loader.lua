@@ -7,7 +7,8 @@
 --//   • Kick Logger with reason-change detection
 --//   • All bypasses embedded, selectable from menu (OFF by default)
 --//   • Adonis AntiCheat bypass (Detected/Kill + debug.info shield)
---//   • Humanoid Replace bypass (fixes Roblox camera on substitution)
+--//   • replaceHumanoid(BAC) — мягкая подмена Humanoid с авто-фиксом камеры
+--//     и перезапуском Animate (минимум побочек).
 --//   • Bypass list sorted alphabetically
 -- ============================================================================
 local AIRHUB_VERSIONS = {
@@ -165,8 +166,6 @@ local function httpGet(url)
     return nil
 end
 
---// Пробуем прочитать локальный файл по списку директорий. Возвращает
---// (content, fullPath) или (nil, nil) если ничего не нашли.
 local function tryReadLocal(filename, dirs)
     if type(readfile) ~= "function" then return nil, nil end
     if type(filename) ~= "string" or filename == "" then return nil, nil end
@@ -504,104 +503,175 @@ end
 --// ============================================================================
 local Steps = {}
 
---// ---- Humanoid Replace Bypass -----------------------------------------------
---// Заменяет Humanoid на клон, сбрасывает Animate и пересоздаёт Animator.
---// ФИКС КАМЕРЫ: после подмены принудительно перепривязывает
---// workspace.CurrentCamera.CameraSubject к новому Humanoid, иначе
---// камера Roblox теряет цель и «зависает».
---// Используется как разово, так и через авто-хук на CharacterAdded.
+--// ---- replaceHumanoid(BAC) --------------------------------------------------
+--// Мягкая подмена Humanoid на клон. Сохраняем:
+--//   • Animator (создаём свежий, чтобы animation pipeline запустился заново)
+--//   • Animate (отключаем на время подмены и включаем обратно — он сам
+--//     подхватит новый Humanoid/Animator; так анимации не отваливаются)
+--//   • Camera (НЕ перепривязываем вслепую — наблюдаем и лечим только если
+--//     subject указывает в никуда / на старый / на удалённый объект)
+--//   • WalkSpeed / JumpPower / JumpHeight / Health / MaxHealth (снимок ДО)
+--//
+--// Гарантии «мягкости»:
+--//   1) Ждём HumanoidRootPart — камера уже стабилизировалась.
+--//   2) Старый Humanoid открепляется (Parent = nil), а НЕ удаляется сразу.
+--//      Удаление отложено на 0.4 сек — модуль камеры и Animate успевают
+--//      переключиться.
+--//   3) Слабая таблица _replaced не даёт заменить один и тот же персонаж
+--//      дважды (хук + ручной вызов — безопасно сосуществуют).
+--//   4) Любая операция обёрнута в pcall — падение не рушит остальной пайплайн.
+--// ============================================================================
+
+local _replaced = setmetatable({}, { __mode = "k" })
+
+--// Мягкое перепривязывание камеры: срабатывает только если subject реально
+--// потерян (nil / старый гуманоид / объект без Parent). Иначе — не трогаем.
+local function _fixCameraIfBroken(newHumanoid, oldHumanoid)
+    local cam = workspace.CurrentCamera
+    if not cam or not newHumanoid or not newHumanoid.Parent then return end
+
+    local subj = cam.CameraSubject
+    local broken = (subj == nil)
+                or (subj == oldHumanoid)
+                or (typeof(subj) == "Instance" and subj.Parent == nil)
+
+    if broken then
+        pcall(function()
+            cam.CameraType = Enum.CameraType.Custom
+            cam.CameraSubject = newHumanoid
+        end)
+    end
+end
+
 local function replaceHumanoid(character)
-    if not character then return nil end
+    if not character or typeof(character) ~= "Instance" then return nil end
+    if _replaced[character] then return nil end  -- уже подменён ранее
 
     local oldHumanoid = character:WaitForChild("Humanoid", 10)
     if not oldHumanoid then return nil end
 
-    tick()
-
-    -- 1. Отключаем старый Animate
-    local animate = character:FindFirstChild("Animate")
-    if animate and animate:IsA("LocalScript") then
-        animate.Disabled = true
+    --// 1. Даём персонажу полностью собраться (камера уже смотрит на него)
+    if not character.PrimaryPart then
+        character:WaitForChild("HumanoidRootPart", 5)
     end
+    tick()  -- пропускаем кадр — плеер-модуль успевает инициализироваться
 
-    -- 2. Останавливаем треки на старом Animator
-    local oldAnimator = oldHumanoid:FindFirstChildOfClass("Animator")
-    if oldAnimator then
-        local ok, tracks = pcall(function() return oldAnimator:GetPlayingAnimationTracks() end)
-        if ok and type(tracks) == "table" then
-            for _, track in ipairs(tracks) do
-                pcall(function() track:Stop(0) end)
-            end
-        end
-    end
+    _replaced[character] = true  -- помечаем сразу, чтобы хук и ручной вызов не дублировались
 
-    -- 3. Клонируем
-    oldHumanoid.Archivable = true
-    local okClone, newHumanoid = pcall(function() return oldHumanoid:Clone() end)
-    if not okClone or not newHumanoid then return nil end
+    local okRun = pcall(function()
+        --// 2. Снимок Animate (позже перезапустим)
+        local animate = character:FindFirstChild("Animate")
 
-    -- 4. Подмена имён/родителя
-    oldHumanoid.Name = "_OldHumanoid"
-    newHumanoid.Name = "Humanoid"
-    newHumanoid.Parent = character
-
-    -- 5. Свежий Animator
-    local newAnimator = Instance.new("Animator")
-    newAnimator.Parent = newHumanoid
-
-    -- 6. Переносим статы
-    newHumanoid.WalkSpeed  = oldHumanoid.WalkSpeed
-    newHumanoid.JumpPower  = oldHumanoid.JumpPower
-    newHumanoid.JumpHeight = oldHumanoid.JumpHeight
-    newHumanoid.MaxHealth  = oldHumanoid.MaxHealth
-    newHumanoid.Health     = oldHumanoid.MaxHealth
-
-    -- 7. ФИКС КАМЕРЫ
-    local camera = workspace.CurrentCamera
-    if camera then
-        pcall(function()
-            camera.CameraType = Enum.CameraType.Custom
-            camera.CameraSubject = newHumanoid
-        end)
-    end
-
-    -- 8. Чистим старый гуманоид
-    pcall(function() oldHumanoid:Destroy() end)
-
-    return newHumanoid
-end
-
---// Хук на респавн — ставится один раз, но с защитой от дублей.
-local function installHumanoidReplaceHook()
-    if Steps._humanoid_hook_installed then return true end
-    if not LP then return false, "no LocalPlayer" end
-
-    safe(function()
-        LP.CharacterAdded:Connect(function(character)
-            if not character then return end
-            task.spawn(function()
-                pcall(replaceHumanoid, character)
+        --// 3. Стопаем треки на СТАРОМ Animator, но его не трогаем
+        local oldAnimator = oldHumanoid:FindFirstChildOfClass("Animator")
+        if oldAnimator then
+            pcall(function()
+                for _, track in ipairs(oldAnimator:GetPlayingAnimationTracks()) do
+                    track:Stop(0)
+                end
             end)
+        end
+
+        --// 4. Снимок статов ДО открепления
+        local stats = {
+            WalkSpeed  = oldHumanoid.WalkSpeed,
+            JumpPower  = oldHumanoid.JumpPower,
+            JumpHeight = oldHumanoid.JumpHeight,
+            MaxHealth  = oldHumanoid.MaxHealth,
+            Health     = oldHumanoid.Health,
+        }
+
+        --// 5. Клонируем
+        oldHumanoid.Archivable = true
+        local okClone, newHumanoid = pcall(function() return oldHumanoid:Clone() end)
+        if not okClone or not newHumanoid then
+            error("clone failed")
+        end
+
+        --// 6. Гасим Animate на время подмены (иначе он может дёрнуть
+        --//    уже мёртвый Animator и наплодить warning'ов)
+        if animate then
+            pcall(function() animate.Disabled = true end)
+        end
+
+        --// 7. Открепляем старый (не удаляем!), ставим новый
+        pcall(function()
+            oldHumanoid.Name = "_OldHumanoid"
+            oldHumanoid.Parent = nil
+        end)
+
+        newHumanoid.Name = "Humanoid"
+        newHumanoid.Parent = character
+
+        --// 8. Свежий Animator для нового Humanoid
+        local newAnimator = Instance.new("Animator")
+        newAnimator.Parent = newHumanoid
+
+        --// 9. Статы (Health клампим, чтобы не улететь выше максимума)
+        newHumanoid.WalkSpeed  = stats.WalkSpeed
+        newHumanoid.JumpPower  = stats.JumpPower
+        newHumanoid.JumpHeight = stats.JumpHeight
+        newHumanoid.MaxHealth  = stats.MaxHealth
+        newHumanoid.Health     = math.clamp(stats.Health, 0, stats.MaxHealth)
+
+        --// 10. Перезапускаем Animate — он сам найдёт новый Humanoid/Animator
+        if animate then
+            task.defer(function()
+                pcall(function() animate.Disabled = false end)
+            end)
+        end
+
+        --// 11. Лечим камеру в несколько точек времени — не спамим,
+        --//     а срабатываем только если сломалась
+        _fixCameraIfBroken(newHumanoid, oldHumanoid)
+        for _, d in ipairs({ 0.05, 0.15, 0.30, 0.50 }) do
+            task.delay(d, function()
+                _fixCameraIfBroken(newHumanoid, oldHumanoid)
+            end)
+        end
+
+        --// 12. Уничтожаем старый только после того, как всё устоялось
+        task.delay(0.4, function()
+            pcall(function() oldHumanoid:Destroy() end)
         end)
     end)
 
-    Steps._humanoid_hook_installed = true
+    if not okRun then
+        _replaced[character] = nil  -- разрешаем повторную попытку
+        return nil
+    end
+
+    return character:FindFirstChild("Humanoid")
+end
+
+--// Единственный коннект на CharacterAdded. Повторный вызов
+--// installHumanoidReplaceHook не создаст второй хук.
+local _humanoid_hook_conn = nil
+
+local function installHumanoidReplaceHook()
+    if _humanoid_hook_conn then return true end
+    if not LP then return false, "no LocalPlayer" end
+
+    _humanoid_hook_conn = LP.CharacterAdded:Connect(function(character)
+        task.spawn(function()
+            pcall(replaceHumanoid, character)
+        end)
+    end)
     return true
 end
 
-Steps.humanoid_replace = function()
+Steps.replace_humanoid = function()
     local character = LP and LP.Character
     if not character then
-        return "no character (skip, hook will apply on spawn)"
+        return "no character (hook will apply on spawn)"
     end
 
-    local newH = replaceHumanoid(character)
     installHumanoidReplaceHook()
-
+    local newH = replaceHumanoid(character)
     if newH then
-        return "replaced + camera rebound"
+        return "replaced, camera guarded, animate restarted"
     end
-    return "replace failed (check humanoid)"
+    return "replace failed (already done or humanoid missing)"
 end
 
 --// ---- Existing bypasses -----------------------------------------------------
@@ -1113,27 +1183,27 @@ end
 --// ============================================================================
 --// Список отсортирован по алфавиту (по label).
 local BYPASS_OPTIONS = {
-    { id = "adonis",           label = "Adonis AntiCheat Bypass", default = false },
-    { id = "anti_detect",      label = "Anti-Detection Shield",   default = false },
-    { id = "coroutine",        label = "Coroutine Bypass",        default = false },
-    { id = "debug",            label = "Debug Library Bypass",    default = false },
-    { id = "detour",           label = "Detour Bypass",           default = false },
-    { id = "environment",      label = "Environment Bypass",      default = false },
-    { id = "handshake",        label = "Handshake Bypass",        default = false },
-    { id = "hookcheck",        label = "Hook Check Bypass",       default = false },
-    { id = "humanoid_replace", label = "Humanoid Replace Bypass(BAC)", default = false },
-    { id = "integrity",        label = "Integrity Bypass",        default = false },
-    { id = "kick_logger",      label = "Kick Reason Logger",      default = false },
-    { id = "memory",           label = "Memory Bypass",           default = false },
-    { id = "metamethod",       label = "Metamethod Bypass",       default = false },
-    { id = "namecall",         label = "Namecall Bypass",         default = false },
-    { id = "namecall_inst",    label = "NamecallInstance Bypass", default = false },
-    { id = "rate_limit",       label = "Rate Limit Bypass",       default = false },
-    { id = "sandbox",          label = "Sandbox Bypass",          default = false },
-    { id = "signature",        label = "Signature Bypass",        default = false },
-    { id = "thread_detect",    label = "Thread Detection Bypass", default = false },
-    { id = "upvalue",          label = "Upvalue Bypass",          default = false },
-    { id = "vm",               label = "VM Check Bypass",         default = false },
+    { id = "adonis",           label = "Adonis AntiCheat Bypass",   default = false },
+    { id = "anti_detect",      label = "Anti-Detection Shield",     default = false },
+    { id = "coroutine",        label = "Coroutine Bypass",          default = false },
+    { id = "debug",            label = "Debug Library Bypass",      default = false },
+    { id = "detour",           label = "Detour Bypass",             default = false },
+    { id = "environment",      label = "Environment Bypass",        default = false },
+    { id = "handshake",        label = "Handshake Bypass",          default = false },
+    { id = "hookcheck",        label = "Hook Check Bypass",         default = false },
+    { id = "integrity",        label = "Integrity Bypass",          default = false },
+    { id = "kick_logger",      label = "Kick Reason Logger",        default = false },
+    { id = "memory",           label = "Memory Bypass",             default = false },
+    { id = "metamethod",       label = "Metamethod Bypass",         default = false },
+    { id = "namecall",         label = "Namecall Bypass",           default = false },
+    { id = "namecall_inst",    label = "NamecallInstance Bypass",   default = false },
+    { id = "rate_limit",       label = "Rate Limit Bypass",         default = false },
+    { id = "replace_humanoid", label = "replaceHumanoid(BAC)",      default = false },
+    { id = "sandbox",          label = "Sandbox Bypass",            default = false },
+    { id = "signature",        label = "Signature Bypass",          default = false },
+    { id = "thread_detect",    label = "Thread Detection Bypass",   default = false },
+    { id = "upvalue",          label = "Upvalue Bypass",            default = false },
+    { id = "vm",               label = "VM Check Bypass",           default = false },
 }
 
 local MenuGui, MenuState = nil, { selected = {}, done = false, version = "full" }
@@ -1459,9 +1529,9 @@ local function loadModularVersion(version)
     local loaded, failed = 0, 0
     for _, file in ipairs(version.files) do
         local ok, err = loadSingleFile(
-            version.repo .. file,   -- HTTP url
-            file,                   -- chunk name
-            file,                   -- local filename ("02_aimbot.lua")
+            version.repo .. file,
+            file,
+            file,
             LOCAL_DIRS_MODULES
         )
         if ok then
@@ -1496,7 +1566,7 @@ local function loadAirHub(versionId)
         local ok, err = loadSingleFile(
             v.url,
             "airhub_" .. v.id,
-            v.localPath,          -- e.g. "airhub lite.lua"
+            v.localPath,
             LOCAL_DIRS_SINGLE
         )
         if ok then
@@ -1532,14 +1602,14 @@ end
 
 pcall(function()
     GENV().AirHubLoader = {
-        getKickHistory      = function() return KickLogger.events end,
-        installKickLogger   = installAllKickHooks,
-        logKick             = logKick,
-        resetKickTracking   = resetKickTracking,
-        replaceHumanoid     = replaceHumanoid,
-        installHumanoidHook = installHumanoidReplaceHook,
-        steps               = Steps,
-        versions            = AIRHUB_VERSIONS,
+        getKickHistory         = function() return KickLogger.events end,
+        installKickLogger      = installAllKickHooks,
+        logKick                = logKick,
+        resetKickTracking      = resetKickTracking,
+        replaceHumanoid        = replaceHumanoid,           -- replaceHumanoid(BAC)
+        installReplaceHook     = installHumanoidReplaceHook,
+        steps                  = Steps,
+        versions               = AIRHUB_VERSIONS,
     }
 end)
 
