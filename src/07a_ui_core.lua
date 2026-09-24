@@ -328,6 +328,17 @@ task.delay(math.random(1, 3), function()
         "CFrameHook",
     }
 
+    local wallbangModes = {
+        "RemotePatch",
+        "RemotePatchFull",
+        "RayIgnore",
+        "RayNewHook",
+        "MuzzleTeleport",
+        "MouseHit",
+        "ScreenPointToRay",
+        "CameraTP",
+    }
+
     local AS = (Aimbot and Aimbot.Settings) or {}
     local function aSet(key, val) if Aimbot.Settings then Aimbot.Settings[key] = val end end
     local function aSetTeam(key, val)
@@ -435,7 +446,6 @@ task.delay(math.random(1, 3), function()
         List = silentAimModes,
         Callback = function(v)
             aSet("SilentAimMode", v)
-            --// force re-manage on next frame
             if Aimbot.Internal then Aimbot.Internal.LastManageKey = nil end
 
             if v ~= "RayHook"          and Aimbot.RemoveRayHook         then pcall(Aimbot.RemoveRayHook)         end
@@ -451,7 +461,7 @@ task.delay(math.random(1, 3), function()
             refreshModeLabel()
         end })
 
-    --// Use Backtrack — стрельба в backtrack-позицию
+    --// Use Backtrack — стрельба в ghost-позицию (экспериментально)
     secD:AddToggle({ Name = "Use Backtrack", Value = AS.UseBacktrack or false,
         Callback = function(v)
             aSet("UseBacktrack", v)
@@ -464,6 +474,10 @@ task.delay(math.random(1, 3), function()
                 end
             end
         end })
+
+    --// Aim at ghost — если выключено, стреляем в реального игрока (kills работают)
+    secD:AddToggle({ Name = "Aim At Ghost (experimental)", Value = AS.BacktrackAimAtGhost or false,
+        Callback = function(v) aSet("BacktrackAimAtGhost", v) end })
 
     do
         local okLabel = pcall(function()
@@ -505,8 +519,15 @@ task.delay(math.random(1, 3), function()
 
     secWB:AddDropdown({ Name = "Method",
         Value = AS.WallbangMethod or "RemotePatch",
-        List = { "RemotePatch", "RayIgnore", "BulletTeleport" },
+        List = wallbangModes,
         Callback = function(v) aSetWB("WallbangMethod", v) end })
+
+    secWB:AddTextbox({ Name = "Hold Time (s) — 0.05-0.5",
+        Value = tostring(AS.WallbangHoldTime or 0.1),
+        Callback = function(v)
+            local n = tonumber(v)
+            if n then aSetWB("WallbangHoldTime", math.clamp(n, 0.05, 0.5)) end
+        end })
 
     secWB:AddTextbox({ Name = "Max Distance (studs)",
         Value = tostring(AS.WallbangDistance or 500),
