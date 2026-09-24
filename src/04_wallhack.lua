@@ -1,11 +1,14 @@
 --// ============================================================================
---// AirHub — 04_wallhack.lua (patched 7 — live material watching)
+--// AirHub — 04_wallhack.lua (patched 8 — bulletproof ChinaHat material)
 --//
---// r7 changelog:
---//   [FIX-32] Loop watches C.Material every frame; re-resolves on change.
---//            Direct assignment C.Material = "Wood" now works instantly.
---//   [FIX-33] ForceMaterialRefresh() public helper.
---//   [FIX-34] LastSchemaMaterial tracking to detect schema-side changes.
+--// r8 changelog:
+--//   [FIX-35] Material watcher applies change to live part IMMEDIATELY.
+--//   [FIX-36] MaterialVariant auto-cleared on hat to prevent visual overrides.
+--//   [FIX-37] resolveMaterial validates EnumItem type + uses prebuilt lookup.
+--//   [FIX-38] applyMaterialToPart() helper centralizes material application.
+--//   [FIX-39] Belt-and-suspenders: loop force-syncs material every frame.
+--//   [FIX-40] SetChinaHatMaterial uses helper (single source of truth).
+--//   [FIX-41] DebugHat prints MaterialVariant presence for diagnosis.
 --// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 04_wallhack: core not loaded") return end
@@ -67,7 +70,8 @@ WallHack.Internal = WallHack.Internal or {
         Highlight = nil, HatPart = nil, HatHead = nil,
         HatConn = nil, CharConn = nil, HatFolder = nil,
         ResolvedMaterial = Enum.Material.Neon,
-        LastSchemaMaterial = nil,           -- [FIX-34]
+        LastSchemaMaterial = nil,
+        LastAppliedMaterial = nil,           -- [FIX-39] for belt-and-suspenders
     },
 }
 WallHack.WrappedPlayers = WallHack.WrappedPlayers or {}
@@ -120,6 +124,11 @@ local okInit, errInit = pcall(function()
     local LocalPlayer   = Util.LocalPlayer
     local SanitizeColor = Util.SanitizeColor or function(c) return c end
 
+    --// ------------------------------------------------------------------------
+    --// Material handling — rebuilt for r8
+    --// ------------------------------------------------------------------------
+
+    -- Whitelist of material names that make sense for a visible part.
     local VALID_PART_MATERIALS = {
         "Plastic", "SmoothPlastic", "Neon", "Wood", "WoodPlanks",
         "Marble", "Slate", "Concrete", "Granite", "Brick",
@@ -130,24 +139,81 @@ local okInit, errInit = pcall(function()
         "Glass", "ForceField",
     }
 
-    local function resolveMaterial(name)
-        if typeof(name) == "EnumItem" then return name end
-        if type(name) ~= "string" or name == "" then return Enum.Material.Neon end
-        local ok, m = pcall(function() return Enum.Material[name] end)
-        if ok and m then return m end
-        local lower = name:lower()
-        for _, v in ipairs(VALID_PART_MATERIALS) do
-            if v:lower() == lower then
-                local ok2, m2 = pcall(function() return Enum.Material[v] end)
-                if ok2 and m2 then return m2 end
+    -- Build a case-insensitive lookup table from the live Enum.Material items.
+    -- This is more robust than calling Enum.Material[name] for every miss.
+    local MATERIAL_LOOKUP = {}
+    do
+        local ok, items = pcall(function() return Enum.Material:GetEnumItems() end)
+        if ok and items then
+            for _, item in ipairs(items) do
+                MATERIAL_LOOKUP[item.Name:lower()] = item.Name
             end
         end
+        -- Ensure every entry in our whitelist is present, even if the enum list
+        -- was unavailable (defensive).
+        for _, name in ipairs(VALID_PART_MATERIALS) do
+            if not MATERIAL_LOOKUP[name:lower()] then
+                MATERIAL_LOOKUP[name:lower()] = name
+            end
+        end
+    end
+
+    -- Resolve any input (EnumItem | string | nil) to a valid Enum.Material.
+    -- Never returns nil.
+    local function resolveMaterial(name)
+        -- EnumItem path — must be a Material enum, not e.g. PartType.
+        if typeof(name) == "EnumItem" then
+            if name.EnumType == Enum.Material then
+                return name
+            end
+            -- Wrong enum type — fall through using its name string.
+            name = tostring(name)
+        end
+
+        if type(name) ~= "string" or name == "" then
+            return Enum.Material.Neon
+        end
+
+        -- Direct case-sensitive lookup first.
+        local ok, m = pcall(function() return Enum.Material[name] end)
+        if ok and m then return m end
+
+        -- Case-insensitive lookup via prebuilt table.
+        local canonical = MATERIAL_LOOKUP[name:lower()]
+        if canonical then
+            local ok2, m2 = pcall(function() return Enum.Material[canonical] end)
+            if ok2 and m2 then return m2 end
+        end
+
         return Enum.Material.Neon
     end
 
+    -- Centralized material application. Clears MaterialVariant (which can
+    -- override the base material visually), and only writes when changed.
+    local function applyMaterialToPart(part, materialEnum)
+        if not part or not part.Parent then return end
+        if not materialEnum or typeof(materialEnum) ~= "EnumItem" then return end
+        if materialEnum.EnumType ~= Enum.Material then return end
+
+        -- [FIX-36] Clear any MaterialVariant that could silently override us.
+        local mv = part:FindFirstChildOfClass("MaterialVariant")
+        if mv then pcall(function() mv:Destroy() end) end
+
+        if part.Material ~= materialEnum then
+            local ok = pcall(function() part.Material = materialEnum end)
+            if not ok then
+                warn("[AirHub][Hat] failed to set Material: " .. tostring(materialEnum))
+            end
+        end
+    end
+
+    -- Sets schema, cache, and (if silent==false) also applies immediately
+    -- to any live hat part. Returns the resolved Enum.Material.
     local function setChinaHatMaterialInternal(name, silent)
         local resolved = resolveMaterial(name)
         local nameStr = resolved.Name
+
+        -- Enforce whitelist (defensive — unknown materials get Neon).
         local isAllowed = false
         for _, n in ipairs(VALID_PART_MATERIALS) do
             if n == nameStr then isAllowed = true; break end
@@ -160,8 +226,19 @@ local okInit, errInit = pcall(function()
                     "ListValidMaterials() shows allowed values.", tostring(name)))
             end
         end
+
+        -- Write the canonical string back into the schema so the schema always
+        -- holds a stable string value (never an EnumItem, never a bad alias).
         WallHack.Visuals.SelfESP.ChinaHat.Material = resolved.Name
         WallHack.Internal.SelfESP.ResolvedMaterial = resolved
+
+        -- [FIX-35 / FIX-40] Apply to the live part right now, if one exists.
+        local Se = WallHack.Internal.SelfESP
+        if Se.HatPart then
+            applyMaterialToPart(Se.HatPart, resolved)
+            Se.LastAppliedMaterial = resolved
+        end
+
         return resolved
     end
 
@@ -361,8 +438,11 @@ local okInit, errInit = pcall(function()
 
     local function buildHat(head)
         local C = WallHack.Visuals.SelfESP.ChinaHat
+        local Se = WallHack.Internal.SelfESP
+
+        -- Resolve + cache material, and apply to a temp holder later.
         local resolved = setChinaHatMaterialInternal(C.Material, true)
-        WallHack.Internal.SelfESP.LastSchemaMaterial = C.Material   -- [FIX-34]
+        Se.LastSchemaMaterial = C.Material
 
         local hat = Instance.new("Part")
         hat.Name = "AirHubChinaHat"
@@ -375,21 +455,27 @@ local okInit, errInit = pcall(function()
         hat.Massless   = true
         hat.CastShadow = false
         hat.Color      = C.Color
-        hat.Material   = resolved
         hat.Transparency = C.Transparency
         hat.LocalTransparencyModifier = 0
         hat.CFrame = head.CFrame * CFrame.new(0, C.OffsetY, 0)
+        -- Parent BEFORE applyMaterialToPart (helper checks .Parent).
+        hat.Parent = getHatFolder()
 
         if C.UseMesh then
             local mesh = Instance.new("SpecialMesh")
             mesh.Name     = "AirHubHatMesh"
             mesh.MeshType = Enum.MeshType.FileMesh
             mesh.MeshId   = HAT_CONE_MESH
+            -- [FIX-36] Clear any inherited texture so the material shows through.
+            pcall(function() mesh.TextureId = "" end)
             mesh.Scale    = Vector3.new(C.Size, C.Size * 0.7, C.Size)
             mesh.Parent = hat
         end
 
-        hat.Parent = getHatFolder()
+        -- [FIX-35 / FIX-38] Centralized application.
+        applyMaterialToPart(hat, resolved)
+        Se.LastAppliedMaterial = resolved
+
         return hat
     end
 
@@ -404,6 +490,7 @@ local okInit, errInit = pcall(function()
         local Se = WallHack.Internal.SelfESP
         if Se.HatPart then pcall(function() Se.HatPart:Destroy() end); Se.HatPart = nil end
         Se.HatHead = nil
+        Se.LastAppliedMaterial = nil
     end
 
     local function startHatLoop()
@@ -426,10 +513,17 @@ local okInit, errInit = pcall(function()
             local head = Se.HatHead
             local C    = WallHack.Visuals.SelfESP.ChinaHat
 
-            -- [FIX-32] Watch schema-side material. Any change → re-resolve.
+            -- [FIX-35] Watch schema-side material. If it changed (case, alias,
+            -- or EnumItem), re-resolve AND apply to the live part immediately.
             if Se.LastSchemaMaterial ~= C.Material then
-                setChinaHatMaterialInternal(C.Material, true)
+                local newResolved = setChinaHatMaterialInternal(C.Material, true)
                 Se.LastSchemaMaterial = C.Material
+                -- setChinaHatMaterialInternal already applied to HatPart,
+                -- but ensure our local reference is fresh:
+                if hat and newResolved then
+                    applyMaterialToPart(hat, newResolved)
+                    Se.LastAppliedMaterial = newResolved
+                end
             end
 
             -- mesh / size
@@ -440,6 +534,7 @@ local okInit, errInit = pcall(function()
                     mesh.Name = "AirHubHatMesh"
                     mesh.MeshType = Enum.MeshType.FileMesh
                     mesh.MeshId = HAT_CONE_MESH
+                    pcall(function() mesh.TextureId = "" end)
                     mesh.Parent = hat
                 end
                 local wantScale = Vector3.new(C.Size, C.Size * 0.7, C.Size)
@@ -462,10 +557,11 @@ local okInit, errInit = pcall(function()
                 hat.Color = C.Color
             end
 
-            -- material (uses freshly resolved cache from FIX-32 watcher)
+            -- [FIX-39] Belt-and-suspenders: force-sync material every frame.
             local resolved = Se.ResolvedMaterial or Enum.Material.Neon
-            if hat.Material ~= resolved then
-                hat.Material = resolved
+            if Se.LastAppliedMaterial ~= resolved or hat.Material ~= resolved then
+                applyMaterialToPart(hat, resolved)
+                Se.LastAppliedMaterial = resolved
             end
 
             if not hat.Anchored then hat.Anchored = true end
@@ -525,16 +621,17 @@ local okInit, errInit = pcall(function()
         removeChams(); removeChinaHat()
     end
 
-    -- [FIX-33] Force re-resolve from schema.
+    -- [FIX-33 / FIX-40] Force re-resolve from schema AND push to live part.
     local function ForceMaterialRefresh()
         local Se = WallHack.Internal.SelfESP
         local C  = WallHack.Visuals.SelfESP.ChinaHat
-        setChinaHatMaterialInternal(C.Material, false)
+        local resolved = setChinaHatMaterialInternal(C.Material, false)
         Se.LastSchemaMaterial = C.Material
         if Se.HatPart then
-            Se.HatPart.Material = Se.ResolvedMaterial
+            applyMaterialToPart(Se.HatPart, resolved)
+            Se.LastAppliedMaterial = resolved
         end
-        return Se.ResolvedMaterial.Name
+        return resolved.Name
     end
 
     local function DebugHat()
@@ -542,14 +639,18 @@ local okInit, errInit = pcall(function()
         local hat = Se.HatPart
         if not hat then print("[AirHub][Hat] no HatPart"); return end
         local mesh = hat:FindFirstChild("AirHubHatMesh")
-        print("[AirHub][Hat] Schema.Material:  ", tostring(WallHack.Visuals.SelfESP.ChinaHat.Material))
-        print("[AirHub][Hat] LastSchemaMat:    ", tostring(Se.LastSchemaMaterial))
-        print("[AirHub][Hat] ResolvedMaterial: ", tostring(Se.ResolvedMaterial))
-        print("[AirHub][Hat] Part.Material:    ", tostring(hat.Material))
-        print("[AirHub][Hat] Mesh:             ", mesh and ("FileMesh " .. mesh.MeshId) or "none")
-        print("[AirHub][Hat] MeshScale:        ", mesh and tostring(mesh.Scale) or "-")
-        print("[AirHub][Hat] Transp:           ", hat.Transparency)
-        print("[AirHub][Hat] LTM:              ", hat.LocalTransparencyModifier)
+        local mv   = hat:FindFirstChildOfClass("MaterialVariant")
+        print("[AirHub][Hat] Schema.Material:   ", tostring(WallHack.Visuals.SelfESP.ChinaHat.Material))
+        print("[AirHub][Hat] LastSchemaMat:     ", tostring(Se.LastSchemaMaterial))
+        print("[AirHub][Hat] ResolvedMaterial:  ", tostring(Se.ResolvedMaterial))
+        print("[AirHub][Hat] LastAppliedMaterial:", tostring(Se.LastAppliedMaterial))
+        print("[AirHub][Hat] Part.Material:     ", tostring(hat.Material))
+        print("[AirHub][Hat] MaterialVariant:   ", mv and mv.Name or "none")
+        print("[AirHub][Hat] Mesh:              ", mesh and ("FileMesh " .. mesh.MeshId) or "none")
+        print("[AirHub][Hat] MeshTextureId:     ", mesh and tostring(mesh.TextureId) or "-")
+        print("[AirHub][Hat] MeshScale:         ", mesh and tostring(mesh.Scale) or "-")
+        print("[AirHub][Hat] Transp:            ", hat.Transparency)
+        print("[AirHub][Hat] LTM:               ", hat.LocalTransparencyModifier)
     end
 
     --// Glow
@@ -855,9 +956,7 @@ local okInit, errInit = pcall(function()
         local resolved = setChinaHatMaterialInternal(name, false)
         WallHack.Internal.SelfESP.LastSchemaMaterial =
             WallHack.Visuals.SelfESP.ChinaHat.Material
-        if WallHack.Internal.SelfESP.HatPart then
-            WallHack.Internal.SelfESP.HatPart.Material = resolved
-        end
+        -- [FIX-40] setChinaHatMaterialInternal already applied to the live part.
         return resolved.Name
     end
     WallHack.Functions.GetChinaHatMaterial = function()
@@ -868,8 +967,9 @@ local okInit, errInit = pcall(function()
         for i, n in ipairs(VALID_PART_MATERIALS) do out[i] = n end
         return out
     end
-    WallHack.Functions.ForceMaterialRefresh = ForceMaterialRefresh   -- [FIX-33]
+    WallHack.Functions.ForceMaterialRefresh = ForceMaterialRefresh   -- [FIX-33 / FIX-40]
 
+    -- Bootstrap: resolve once so internal caches are consistent.
     setChinaHatMaterialInternal(WallHack.Visuals.SelfESP.ChinaHat.Material, true)
     WallHack.Internal.SelfESP.LastSchemaMaterial =
         WallHack.Visuals.SelfESP.ChinaHat.Material
