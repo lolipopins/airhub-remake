@@ -75,7 +75,7 @@ local AIRHUB_VERSIONS = {
         label       = "Specific Game",
         description = "Custom mod menu: Auto Mog / Auto Clicker / Noclip / Speed",
         type        = "single",
-        url         = "https://raw.githubusercontent.com/lolipopins/airhub-remake/main/%2B1%20mog%20script",
+        url         = "https://raw.githubusercontent.com/lolipopins/airhub-remake/refs/heads/main/specific%20games/%2B1%20mog%20evolution",
         localPath   = "+1 mog script.lua",
     },
 }
