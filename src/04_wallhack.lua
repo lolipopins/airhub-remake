@@ -1,18 +1,3 @@
---// ============================================================================
---// AirHub — 04_wallhack.lua (patched 9 — Wood + all materials, named helpers)
---//
---// r9 changelog:
---//   [FIX-42] Wood IS in the whitelist (index 4) — see MATERIAL_SET below.
---//            Use H.WallHack.Functions.SetChinaHatMaterial("Wood")
---//            or  H.WallHack.Functions.Wood()
---//   [FIX-43] Named shortcut helpers auto-generated for every valid material:
---//            .Wood(), .Neon(), .Marble(), .Metal(), ... (lower/upper safe)
---//   [FIX-44] MATERIAL_SET for O(1) validation; MATERIAL_LOOKUP case-folded.
---//   [FIX-45] SurfaceAppearance + MaterialVariant stripped on the hat.
---//   [FIX-46] Shape only set when UseMesh == false (FileMesh owns geometry).
---//   [FIX-47] SetChinaHatMaterialDirect(EnumItem) for absolute control.
---//   [FIX-48] DebugHat prints the full ListValidMaterials() catalogue.
---// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 04_wallhack: core not loaded") return end
 if H.WallHack and H.WallHack._Loaded then return end
