@@ -1,5 +1,14 @@
 --// AirHub - 02_aimbot.lua
 --// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, Backtrack + Ghost targeting.
+--//
+--// FIXES applied:
+--//   * checkcaller() condition fixed in RayNew / Vector3New / CFrameHook
+--//     (was inverted → hooks only fired on our own script, not on game calls)
+--//   * PerformMagicBullet now saves/restores Desync Mode + RefreshOnShot
+--//   * PerformWallbang_MouseHit guards against missing LocalPlayer.GetMouse
+--//   * FOV circle now drawn in viewport coordinates (matches FOV check)
+--//   * GunHandler hook no longer blocks with WaitForShotPoint → uses sync check
+--//   * AutoScan delay increased to 5s so GunHandler can load
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -469,6 +478,24 @@ local function GetVisiblePointOnPart(origin, part)
 
     if IsPointVisible(origin, aimPos, params) then
         return aimPos
+    end
+    return nil
+end
+
+--// Non-blocking variant used inside hooks (GunHandler etc.) — никогда не yield'ит.
+local function TryGetVisiblePointOnPart(origin, part)
+    if not part or not part:IsA("BasePart") or not IsAlive(part) then return nil end
+    local aimPos = PredictPartPosition(part)
+    if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
+        return aimPos
+    end
+    local params = BuildRayParams(part.Parent)
+    if IsPointVisible(origin, aimPos, params) then
+        return aimPos
+    end
+    -- Fast-mode fallback: пробуем факт-позицию
+    if IsPointVisible(origin, part.Position, params) then
+        return part.Position
     end
     return nil
 end
@@ -1187,12 +1214,18 @@ local function PerformWallbang_MuzzleTeleport(targetPart, btn)
 end
 
 --// ==== MODE 6: MouseHit — spoof LocalPlayer:GetMouse() during shot ====
+--// FIX: guard against missing LocalPlayer.GetMouse
 local function PerformWallbang_MouseHit(targetPart, btn)
+    local oldGetMouse = LocalPlayer.GetMouse
+    if type(oldGetMouse) ~= "function" then
+        warn("[AirHub] Wallbang MouseHit: LocalPlayer.GetMouse is not a function")
+        return false
+    end
+
     local aimPos   = PredictPartPosition(targetPart)
     local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
     WB.HoldUntil = tick() + holdTime
 
-    local oldGetMouse = LocalPlayer.GetMouse
     local function fakeGetMouse()
         local realMouse = oldGetMouse(LocalPlayer)
         return setmetatable({}, {
@@ -1211,9 +1244,9 @@ local function PerformWallbang_MouseHit(targetPart, btn)
         })
     end
 
-    LocalPlayer.GetMouse = fakeGetMouse
+    pcall(function() LocalPlayer.GetMouse = fakeGetMouse end)
     FireClick(btn)
-    ScheduleHookRemoval(function() LocalPlayer.GetMouse = oldGetMouse end, holdTime)
+    ScheduleHookRemoval(function() pcall(function() LocalPlayer.GetMouse = oldGetMouse end) end, holdTime)
     return true
 end
 
@@ -1245,7 +1278,7 @@ local function PerformWallbang_ScreenPointToRay(targetPart, btn)
     if not ok then return false end
 
     FireClick(btn)
-    ScheduleHookRemoval(function() cam.ScreenPointToRay = old end, holdTime)
+    ScheduleHookRemoval(function() pcall(function() cam.ScreenPointToRay = old end) end, holdTime)
     return true
 end
 
@@ -1305,6 +1338,7 @@ local function PerformWallbang(targetPart, btn)
     return ok
 end
 
+--// ==== MagicBullet — FIX: save & restore Mode + RefreshOnShot ====
 local function PerformMagicBullet(targetPart, btn)
     if not Aimbot.Settings.TPAimEnabled or Aimbot.Settings.TPAimMethod ~= "MagicBullet" then return end
     if not targetPart then return end
@@ -1312,13 +1346,18 @@ local function PerformMagicBullet(targetPart, btn)
     SaveCurrentCFrame()
 
     local Hg = getgenv().AirHub
-    local desyncWasEnabled = false
-    if Hg and Hg.AntiAim and Hg.AntiAim.Desync then
-        desyncWasEnabled = Hg.AntiAim.Desync.Settings.Enabled
+    local desyncWasEnabled   = false
+    local desyncSavedMode    = nil
+    local desyncSavedRefresh = nil
+    if Hg and Hg.AntiAim and Hg.AntiAim.Desync and Hg.AntiAim.Desync.Settings then
+        local S = Hg.AntiAim.Desync.Settings
+        desyncWasEnabled   = S.Enabled
+        desyncSavedMode    = S.Mode
+        desyncSavedRefresh = S.RefreshOnShot
         if not desyncWasEnabled then
-            Hg.AntiAim.Desync.Settings.Enabled = true
-            Hg.AntiAim.Desync.Settings.Mode = "OldPosition"
-            Hg.AntiAim.Desync.Settings.RefreshOnShot = true
+            S.Enabled = true
+            S.Mode = "OldPosition"
+            S.RefreshOnShot = true
             if Hg.AntiAim.StartDesync then Hg.AntiAim.StartDesync() end
         end
     end
@@ -1331,8 +1370,11 @@ local function PerformMagicBullet(targetPart, btn)
     task.wait(0.02)
     RestoreCurrentCFrame()
 
-    if Hg and Hg.AntiAim and Hg.AntiAim.Desync and not desyncWasEnabled then
-        Hg.AntiAim.Desync.Settings.Enabled = false
+    if Hg and Hg.AntiAim and Hg.AntiAim.Desync and Hg.AntiAim.Desync.Settings and not desyncWasEnabled then
+        local S = Hg.AntiAim.Desync.Settings
+        S.Enabled = false
+        if desyncSavedMode    ~= nil then S.Mode = desyncSavedMode end
+        if desyncSavedRefresh ~= nil then S.RefreshOnShot = desyncSavedRefresh end
         if Hg.AntiAim.StopDesync then Hg.AntiAim.StopDesync() end
     end
 
@@ -1595,7 +1637,8 @@ local function SetupRayNewHook()
 
     local function handler(origin, direction)
         if not H.ShuttingDown and IsModeHooked("RayNew") then
-            if not (checkC and not checkC()) then
+            --// FIX: was `not (checkC and not checkC())` — inverted, broke the hook.
+            if not (checkC and checkC()) then
                 if InScanFor("RayNew") then
                     ReportHookCall("RayNew")
                     return RayNewOriginal(origin, direction)
@@ -1913,8 +1956,13 @@ local function SetupGunHandlerHook()
                and IsAlive(Hg.Aimbot.LockPartInstance) then
                 if p1 == LocalPlayer then
                     RefreshOldPositionIfNeeded()
-                    local pt = WaitForShotPoint(Hg.Aimbot.LockPartInstance)
-                    if pt then p4 = pt
+                    --// FIX: use non-blocking TryGetVisiblePointOnPart here.
+                    --// The old WaitForShotPoint yields (task.wait) up to 0.8s and
+                    --// can stall the game's shooting thread.
+                    local origin = workspace.CurrentCamera.CFrame.Position
+                    local pt = TryGetVisiblePointOnPart(origin, Hg.Aimbot.LockPartInstance)
+                    if pt then
+                        p4 = pt
                     elseif not Hg.Aimbot.Settings.WallCheck then
                         p4 = PredictPartPosition(Hg.Aimbot.LockPartInstance)
                     end
@@ -1951,7 +1999,8 @@ local function SetupCFrameHook()
 
     local function handler(at, lookAt, up)
         if not H.ShuttingDown and IsModeHooked("CFrameHook") then
-            if not (checkC and not checkC()) then
+            --// FIX: was `not (checkC and not checkC())` — inverted.
+            if not (checkC and checkC()) then
                 if InScanFor("CFrameHook") then
                     if typeof(at) == "Vector3" and typeof(lookAt) == "Vector3" then
                         ReportHookCall("CFrameHook")
@@ -2002,7 +2051,8 @@ local function SetupVector3NewHook()
 
     local function handler(x, y, z)
         if not H.ShuttingDown and IsModeHooked("Vector3New") then
-            if not (checkC and not checkC()) then
+            --// FIX: was `not (checkC and not checkC())` — inverted.
+            if not (checkC and checkC()) then
                 if type(x) == "number" and type(y) == "number" and type(z) == "number" then
                     local mag = math.sqrt(x*x + y*y + z*z)
                     if math.abs(mag - 1) < 0.25 then
@@ -2200,7 +2250,9 @@ local function LoadAimbot()
                 Aimbot.FOVCircle.Filled = false
                 Aimbot.FOVCircle.Transparency = 0.5
                 Aimbot.FOVCircle.Visible = Aimbot.FOVSettings.Visible
-                Aimbot.FOVCircle.Position = UserInputService:GetMouseLocation()
+                --// FIX: FOV circle must be drawn in viewport coordinates,
+                --// matching GetMousePos() and WorldToViewportPoint().
+                Aimbot.FOVCircle.Position = GetMousePos()
             else
                 Aimbot.FOVCircle.Visible = false
             end
@@ -2498,8 +2550,10 @@ task.delay(1, function()
     pcall(Diagnose)
 end)
 
+--// FIX: AutoScan delay increased from 3s to 5s so GunHandler module
+--// in ReplicatedStorage can finish replicating before the scan tests it.
 if Aimbot.Settings.AutoRunOnLoad and Aimbot.Settings.SilentAimMode == "Auto" then
-    task.delay(3, function()
+    task.delay(5, function()
         if H.Aimbot and H.Aimbot.RunAutoScan then
             H.Aimbot.RunAutoScan()
         end
