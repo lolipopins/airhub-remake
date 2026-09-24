@@ -13,13 +13,14 @@
 --//   • replaceHumanoid(BAC) — мягкая подмена Humanoid с авто-фиксом камеры
 --//     и перезапуском Animate (минимум побочек).
 --//   • Bypass list sorted alphabetically
+--//   • 11_quotas.lua loads ONLY when game.PlaceId == QUOTAS_PLACE_ID
 --// ============================================================================
 
 local AIRHUB_VERSIONS = {
     full = {
         id          = "full",
         label       = "Full",
-        description = "Modular build (12 modules from /src/)",
+        description = "Modular build (13 modules from /src/)",
         type        = "modules",
         repo        = "https://raw.githubusercontent.com/lolipopins/airhub-remake/main/src/",
         files       = {
@@ -35,6 +36,7 @@ local AIRHUB_VERSIONS = {
             "08_world.lua",
             "09_exploits.lua",
             "10_hud.lua",
+            "11_quotas.lua",
         },
     },
     lite = {
@@ -69,7 +71,6 @@ local AIRHUB_VERSIONS = {
         url         = "https://raw.githubusercontent.com/Exunys/AirHub/main/AirHub.lua",
         localPath   = "original.lua",
     },
-    --// NEW: Specific Game — "+1 mog script" from lolipopins/airhub-remake
     specific_game = {
         id          = "specific_game",
         label       = "Specific Game",
@@ -103,6 +104,11 @@ local CONFIG = {
     BLOCK_KICK      = true,
     --// PlaceId для автоопределения (если хочешь оставить авто-режим)
     SPECIFIC_PLACE_ID = 92648272637932,
+    --// 11_quotas.lua загружается ТОЛЬКО в этой игре (Arsenal).
+    --// В любой другой PlaceId файл даже не скачивается.
+    QUOTAS_PLACE_ID   = 286090429,
+    --// Имя модуля, который попадает под PlaceId-фильтр.
+    QUOTAS_FILE       = "11_quotas.lua",
 }
 
 --// ============================================================================
@@ -1490,30 +1496,49 @@ local function loadSingleFile(url, name, localFileName, localDirs)
     return true
 end
 
+--// Ключевая функция: решает, грузить ли файл в текущей игре.
+local function shouldLoadFile(file)
+    if file == CONFIG.QUOTAS_FILE then
+        local pid = game.PlaceId
+        if pid ~= CONFIG.QUOTAS_PLACE_ID then
+            return false, string.format(
+                "skipped (wrong place: %d, need %d)",
+                tonumber(pid) or -1, CONFIG.QUOTAS_PLACE_ID)
+        end
+    end
+    return true
+end
+
 local function loadModularVersion(version)
-    local loaded, failed = 0, 0
+    local loaded, failed, skipped = 0, 0, 0
     for _, file in ipairs(version.files) do
-        local ok, err = loadSingleFile(
-            version.repo .. file,
-            file,
-            file,
-            LOCAL_DIRS_MODULES
-        )
-        if ok then
-            loaded += 1
+        local ok, reason = shouldLoadFile(file)
+        if not ok then
+            skipped += 1
+            say(string.format("[AirHub] %s: %s", file, tostring(reason)))
         else
-            swarn("[AirHub] " .. file .. ": " .. tostring(err))
-            failed += 1
+            local loaded_ok, err = loadSingleFile(
+                version.repo .. file,
+                file,
+                file,
+                LOCAL_DIRS_MODULES
+            )
+            if loaded_ok then
+                loaded += 1
+            else
+                swarn("[AirHub] " .. file .. ": " .. tostring(err))
+                failed += 1
+            end
         end
         tick()
     end
-    if failed > 0 then
-        swarn(string.format("[AirHub] modules: %d/%d (failed: %d)",
-            loaded, #version.files, failed))
+    if failed > 0 or skipped > 0 then
+        swarn(string.format("[AirHub] modules: %d/%d (failed: %d, skipped: %d)",
+            loaded, #version.files, failed, skipped))
     else
         say(string.format("[AirHub] modules loaded: %d/%d", loaded, #version.files))
     end
-    return loaded, failed
+    return loaded, failed, skipped
 end
 
 local function loadAirHub(versionId)
@@ -1551,6 +1576,12 @@ local function isSpecificGame()
     return pid == CONFIG.SPECIFIC_PLACE_ID
 end
 
+local function isQuotasGame()
+    local ok, pid = pcall(function() return game.PlaceId end)
+    if not ok or type(pid) ~= "number" then return false end
+    return pid == CONFIG.QUOTAS_PLACE_ID
+end
+
 --// ============================================================================
 --// MAIN FLOW
 --// ============================================================================
@@ -1558,22 +1589,11 @@ local function startFlow()
     buildMenu(function(cfg)
         destroyMenu()
 
-        local versionId
-        --// Если хочешь автоопределение — раскомментируй блок ниже.
-        --// Сейчас всегда используется выбранная в меню версия.
-        --[[
-        if isSpecificGame() then
-            versionId = "specific_game"
-            say(string.format("[AirHub] detected PlaceId %d -> loading SPECIFIC GAME menu",
-                CONFIG.SPECIFIC_PLACE_ID))
-        else
-            versionId = cfg._version or "full"
-            say(string.format("[AirHub] user config applied | version = %s", versionId))
-        end
-        ]]
-
-        versionId = cfg._version or "full"
+        local versionId = cfg._version or "full"
         say(string.format("[AirHub] user config applied | version = %s", versionId))
+        say(string.format("[AirHub] PlaceId = %d | quotas module = %s",
+            tonumber(game.PlaceId) or -1,
+            isQuotasGame() and "ENABLED" or "DISABLED"))
 
         runSelectedBypasses(cfg)
 
@@ -1601,6 +1621,9 @@ pcall(function()
         versions               = AIRHUB_VERSIONS,
         isSpecificGame         = isSpecificGame,
         specificPlaceId        = CONFIG.SPECIFIC_PLACE_ID,
+        isQuotasGame           = isQuotasGame,
+        quotasPlaceId          = CONFIG.QUOTAS_PLACE_ID,
+        quotasFile             = CONFIG.QUOTAS_FILE,
     }
 end)
 
