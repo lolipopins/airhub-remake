@@ -7,6 +7,7 @@
 --//   • Kick Logger with reason-change detection
 --//   • All bypasses embedded, selectable from menu (OFF by default)
 --//   • Adonis AntiCheat bypass (Detected/Kill + debug.info shield)
+--//   • Humanoid Replace bypass (fixes Roblox camera on substitution)
 --//   • Bypass list sorted alphabetically
 -- ============================================================================
 local AIRHUB_VERSIONS = {
@@ -502,6 +503,108 @@ end
 --// BYPASS STEPS
 --// ============================================================================
 local Steps = {}
+
+--// ---- Humanoid Replace Bypass -----------------------------------------------
+--// Заменяет Humanoid на клон, сбрасывает Animate и пересоздаёт Animator.
+--// ФИКС КАМЕРЫ: после подмены принудительно перепривязывает
+--// workspace.CurrentCamera.CameraSubject к новому Humanoid, иначе
+--// камера Roblox теряет цель и «зависает».
+--// Используется как разово, так и через авто-хук на CharacterAdded.
+local function replaceHumanoid(character)
+    if not character then return nil end
+
+    local oldHumanoid = character:WaitForChild("Humanoid", 10)
+    if not oldHumanoid then return nil end
+
+    tick()
+
+    -- 1. Отключаем старый Animate
+    local animate = character:FindFirstChild("Animate")
+    if animate and animate:IsA("LocalScript") then
+        animate.Disabled = true
+    end
+
+    -- 2. Останавливаем треки на старом Animator
+    local oldAnimator = oldHumanoid:FindFirstChildOfClass("Animator")
+    if oldAnimator then
+        local ok, tracks = pcall(function() return oldAnimator:GetPlayingAnimationTracks() end)
+        if ok and type(tracks) == "table" then
+            for _, track in ipairs(tracks) do
+                pcall(function() track:Stop(0) end)
+            end
+        end
+    end
+
+    -- 3. Клонируем
+    oldHumanoid.Archivable = true
+    local okClone, newHumanoid = pcall(function() return oldHumanoid:Clone() end)
+    if not okClone or not newHumanoid then return nil end
+
+    -- 4. Подмена имён/родителя
+    oldHumanoid.Name = "_OldHumanoid"
+    newHumanoid.Name = "Humanoid"
+    newHumanoid.Parent = character
+
+    -- 5. Свежий Animator
+    local newAnimator = Instance.new("Animator")
+    newAnimator.Parent = newHumanoid
+
+    -- 6. Переносим статы
+    newHumanoid.WalkSpeed  = oldHumanoid.WalkSpeed
+    newHumanoid.JumpPower  = oldHumanoid.JumpPower
+    newHumanoid.JumpHeight = oldHumanoid.JumpHeight
+    newHumanoid.MaxHealth  = oldHumanoid.MaxHealth
+    newHumanoid.Health     = oldHumanoid.MaxHealth
+
+    -- 7. ФИКС КАМЕРЫ
+    local camera = workspace.CurrentCamera
+    if camera then
+        pcall(function()
+            camera.CameraType = Enum.CameraType.Custom
+            camera.CameraSubject = newHumanoid
+        end)
+    end
+
+    -- 8. Чистим старый гуманоид
+    pcall(function() oldHumanoid:Destroy() end)
+
+    return newHumanoid
+end
+
+--// Хук на респавн — ставится один раз, но с защитой от дублей.
+local function installHumanoidReplaceHook()
+    if Steps._humanoid_hook_installed then return true end
+    if not LP then return false, "no LocalPlayer" end
+
+    safe(function()
+        LP.CharacterAdded:Connect(function(character)
+            if not character then return end
+            task.spawn(function()
+                pcall(replaceHumanoid, character)
+            end)
+        end)
+    end)
+
+    Steps._humanoid_hook_installed = true
+    return true
+end
+
+Steps.humanoid_replace = function()
+    local character = LP and LP.Character
+    if not character then
+        return "no character (skip, hook will apply on spawn)"
+    end
+
+    local newH = replaceHumanoid(character)
+    installHumanoidReplaceHook()
+
+    if newH then
+        return "replaced + camera rebound"
+    end
+    return "replace failed (check humanoid)"
+end
+
+--// ---- Existing bypasses -----------------------------------------------------
 
 Steps.metamethod = function()
     local checks = { "checkcaller","getcallingscript","getfenv","setfenv","getreg","getgc","getconnections","hookfunction","newcclosure" }
@@ -1010,26 +1113,27 @@ end
 --// ============================================================================
 --// Список отсортирован по алфавиту (по label).
 local BYPASS_OPTIONS = {
-    { id = "adonis",        label = "Adonis AntiCheat Bypass", default = false },
-    { id = "anti_detect",   label = "Anti-Detection Shield",   default = false },
-    { id = "coroutine",     label = "Coroutine Bypass",        default = false },
-    { id = "debug",         label = "Debug Library Bypass",    default = false },
-    { id = "detour",        label = "Detour Bypass",           default = false },
-    { id = "environment",   label = "Environment Bypass",      default = false },
-    { id = "handshake",     label = "Handshake Bypass",        default = false },
-    { id = "hookcheck",     label = "Hook Check Bypass",       default = false },
-    { id = "integrity",     label = "Integrity Bypass",        default = false },
-    { id = "kick_logger",   label = "Kick Reason Logger",      default = false },
-    { id = "memory",        label = "Memory Bypass",           default = false },
-    { id = "metamethod",    label = "Metamethod Bypass",       default = false },
-    { id = "namecall",      label = "Namecall Bypass",         default = false },
-    { id = "namecall_inst", label = "NamecallInstance Bypass", default = false },
-    { id = "rate_limit",    label = "Rate Limit Bypass",       default = false },
-    { id = "sandbox",       label = "Sandbox Bypass",          default = false },
-    { id = "signature",     label = "Signature Bypass",        default = false },
-    { id = "thread_detect", label = "Thread Detection Bypass", default = false },
-    { id = "upvalue",       label = "Upvalue Bypass",          default = false },
-    { id = "vm",            label = "VM Check Bypass",         default = false },
+    { id = "adonis",           label = "Adonis AntiCheat Bypass", default = false },
+    { id = "anti_detect",      label = "Anti-Detection Shield",   default = false },
+    { id = "coroutine",        label = "Coroutine Bypass",        default = false },
+    { id = "debug",            label = "Debug Library Bypass",    default = false },
+    { id = "detour",           label = "Detour Bypass",           default = false },
+    { id = "environment",      label = "Environment Bypass",      default = false },
+    { id = "handshake",        label = "Handshake Bypass",        default = false },
+    { id = "hookcheck",        label = "Hook Check Bypass",       default = false },
+    { id = "humanoid_replace", label = "Humanoid Replace Bypass(BAC)", default = false },
+    { id = "integrity",        label = "Integrity Bypass",        default = false },
+    { id = "kick_logger",      label = "Kick Reason Logger",      default = false },
+    { id = "memory",           label = "Memory Bypass",           default = false },
+    { id = "metamethod",       label = "Metamethod Bypass",       default = false },
+    { id = "namecall",         label = "Namecall Bypass",         default = false },
+    { id = "namecall_inst",    label = "NamecallInstance Bypass", default = false },
+    { id = "rate_limit",       label = "Rate Limit Bypass",       default = false },
+    { id = "sandbox",          label = "Sandbox Bypass",          default = false },
+    { id = "signature",        label = "Signature Bypass",        default = false },
+    { id = "thread_detect",    label = "Thread Detection Bypass", default = false },
+    { id = "upvalue",          label = "Upvalue Bypass",          default = false },
+    { id = "vm",               label = "VM Check Bypass",         default = false },
 }
 
 local MenuGui, MenuState = nil, { selected = {}, done = false, version = "full" }
@@ -1428,12 +1532,14 @@ end
 
 pcall(function()
     GENV().AirHubLoader = {
-        getKickHistory = function() return KickLogger.events end,
-        installKickLogger = installAllKickHooks,
-        logKick = logKick,
-        resetKickTracking = resetKickTracking,
-        steps = Steps,
-        versions = AIRHUB_VERSIONS,
+        getKickHistory      = function() return KickLogger.events end,
+        installKickLogger   = installAllKickHooks,
+        logKick             = logKick,
+        resetKickTracking   = resetKickTracking,
+        replaceHumanoid     = replaceHumanoid,
+        installHumanoidHook = installHumanoidReplaceHook,
+        steps               = Steps,
+        versions            = AIRHUB_VERSIONS,
     }
 end)
 
