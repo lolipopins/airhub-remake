@@ -1,6 +1,22 @@
 --// ============================================================================
---// AirHub — 04_wallhack.lua (bulletproof build)
+--// AirHub — 04_wallhack.lua (bulletproof build — patched)
 --// H.WallHack schema is created FIRST so that 07a/07b never see it as missing.
+--//
+--// Patch notes (2026-09-24):
+--//   [FIX-1]  ReWrap loop uses a generation token; Restart no longer leaks
+--//            the old 30s-sleeping coroutine.
+--//   [FIX-2]  SelfESP.Enabled master flag is now respected everywhere.
+--//   [FIX-3]  ResetSettings mutates tables in-place (UI refs stay valid).
+--//   [FIX-4]  StartHUD resets FPS sampling window.
+--//   [FIX-5]  StopHUD / StopSelfESP force .Enabled = false.
+--//   [FIX-6]  Team check returns strict boolean (nil-safe).
+--//   [FIX-7]  Exit clears WHConnections table.
+--//   [FIX-8]  hudEnsureElements is atomic (no half-populated table).
+--//   [FIX-9]  tick() replaced with os.clock() / os.time() where applicable.
+--//   [FIX-10] GetNetworkPing() normalization.
+--//   [FIX-11] Added SetSelfESPEnabled / SetSelfESPChamsEnabled /
+--//            SetSelfESPChinaHatEnabled helpers.
+--//   [FIX-12] Added GetHUDEnabled / GetSelfESPEnabled helpers.
 --// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 04_wallhack: core not loaded") return end
@@ -58,8 +74,8 @@ WallHack.Visuals.SelfESP = WallHack.Visuals.SelfESP or {
 WallHack.Internal = WallHack.Internal or {
     HUD = {
         Elements = {}, Conn = nil, Frames = 0,
-        LastSample = tick(), CurrentFps = 0,
-        SessionStart = tick(), Visible = false,
+        LastSample = os.clock(), CurrentFps = 0,
+        SessionStart = os.clock(), Visible = false,
         W = 230, H = 84,
     },
     SelfESP = {
@@ -70,9 +86,43 @@ WallHack.Internal = WallHack.Internal or {
 WallHack.WrappedPlayers = WallHack.WrappedPlayers or {}
 WallHack.Functions      = WallHack.Functions      or {}
 
+--// Default snapshots (used by ResetSettings for in-place mutation).
+local DEFAULT_SETTINGS = {
+    Enabled = false, TeamCheck = false, AliveCheck = true,
+}
+local DEFAULT_BOX = {
+    Enabled = true, Type = 1,
+    Color = Color3.fromRGB(255, 255, 255), TargetColor = Color3.fromRGB(255, 0, 0),
+    Transparency = 0.7, Thickness = 1, Filled = false, Increase = 1,
+}
+local DEFAULT_GLOW = {
+    Enabled = true, Color = Color3.fromRGB(0, 255, 255), Transparency = 0.5, Mode = "Outline",
+}
+local DEFAULT_HUD = {
+    Enabled = false, Position = "TopLeft",
+    ShowPlayers = true, ShowFPS = true, ShowPing = true, ShowSession = true,
+    AccentColor = Color3.fromRGB(90, 140, 255),
+    BackColor = Color3.fromRGB(20, 20, 26),
+    TextColor = Color3.fromRGB(240, 240, 245),
+    MutedColor = Color3.fromRGB(150, 150, 165),
+    BackTransparency = 0.15,
+}
+local DEFAULT_SELFESP = {
+    Enabled = false,
+    Chams = {
+        Enabled = false, Mode = "Both",
+        FillColor = Color3.fromRGB(90, 140, 255), FillTransparency = 0.4,
+        OutlineColor = Color3.fromRGB(255, 255, 255), OutlineTransparency = 0.0,
+        AlwaysOnTop = true,
+    },
+    ChinaHat = {
+        Enabled = false, Color = Color3.fromRGB(255, 60, 60),
+        Material = "Neon", Size = 4, OffsetY = 1.8, Transparency = 0, Rotation = 0,
+    },
+}
+
 --// ---------------------------------------------------------------------------
---// 2) Now load dependencies. If anything is missing, install no-op stubs and
---//    keep going — the module itself is already usable.
+--// 2) Load dependencies. Schema is already usable even if this pcall fails.
 --// ---------------------------------------------------------------------------
 local okInit, errInit = pcall(function()
 
@@ -83,6 +133,33 @@ local okInit, errInit = pcall(function()
     local RunService    = Util.RunService
     local LocalPlayer   = Util.LocalPlayer
     local SanitizeColor = Util.SanitizeColor or function(c) return c end
+
+    --// -----------------------------------------------------------------------
+    --// Helpers
+    --// -----------------------------------------------------------------------
+    local function getPingMs()
+        -- Roblox has historically returned seconds; some builds return ms.
+        local ok, raw = pcall(function() return LocalPlayer:GetNetworkPing() end)
+        if not ok or type(raw) ~= "number" then return 0 end
+        -- If value looks like seconds (< 10), scale to ms. Otherwise assume ms.
+        if raw < 10 then return math.floor(raw * 1000 + 0.5) end
+        return math.floor(raw + 0.5)
+    end
+
+    local function applyDefaults(target, defaults)
+        -- Remove keys not in defaults, then copy defaults (in-place mutation).
+        for k in pairs(target) do
+            if defaults[k] == nil then target[k] = nil end
+        end
+        for k, v in pairs(defaults) do
+            if type(v) == "table" then
+                target[k] = target[k] or {}
+                applyDefaults(target[k], v)
+            else
+                target[k] = v
+            end
+        end
+    end
 
     --// -----------------------------------------------------------------------
     --// HUD internals
@@ -98,17 +175,24 @@ local okInit, errInit = pcall(function()
     end
 
     local function hudEnsureElements()
+        -- [FIX-8] Build atomically: create everything into locals first,
+        -- then publish to HUD.Elements only if all succeeded.
         local HUD = WallHack.Internal.HUD
-        if HUD.Elements.bg then return true end
+        if HUD.Elements.bg and HUD.Elements.accent and HUD.Elements.title
+           and HUD.Elements.subtitle and HUD.Elements.line1 and HUD.Elements.line2 then
+            return true
+        end
+
+        local S = WallHack.Visuals.HUDSettings
+        local built = {}
         local ok = pcall(function()
-            local S = WallHack.Visuals.HUDSettings
             local bg = Drawing.new("Square")
             bg.Filled = true; bg.Outline = false
             bg.Color = S.BackColor
             bg.Transparency = S.BackTransparency
             pcall(function() bg.Rounding = 8 end)
             bg.Visible = false
-            HUD.Elements.bg = bg
+            built.bg = bg
 
             local accent = Drawing.new("Square")
             accent.Filled = true; accent.Outline = false
@@ -116,13 +200,29 @@ local okInit, errInit = pcall(function()
             accent.Transparency = 0
             pcall(function() accent.Rounding = 4 end)
             accent.Visible = false
-            HUD.Elements.accent = accent
+            built.accent = accent
+
+            built.title    = hudNewText(16, 2)
+            built.subtitle = hudNewText(11, 1)
+            built.line1    = hudNewText(13, 2)
+            built.line2    = hudNewText(13, 2)
         end)
-        if not ok then return false end
-        HUD.Elements.title    = hudNewText(16, 2)
-        HUD.Elements.subtitle = hudNewText(11, 1)
-        HUD.Elements.line1    = hudNewText(13, 2)
-        HUD.Elements.line2    = hudNewText(13, 2)
+
+        if not ok then
+            -- Clean up anything we managed to create before failing.
+            for _, e in pairs(built) do
+                if e and e.Remove then pcall(function() e:Remove() end) end
+            end
+            return false
+        end
+
+        -- Publish atomically.
+        HUD.Elements.bg       = built.bg
+        HUD.Elements.accent   = built.accent
+        HUD.Elements.title    = built.title
+        HUD.Elements.subtitle = built.subtitle
+        HUD.Elements.line1    = built.line1
+        HUD.Elements.line2    = built.line2
         return true
     end
 
@@ -195,8 +295,12 @@ local okInit, errInit = pcall(function()
         subtitle.Position = Vector2.new(pos.X + paddingX + 66, pos.Y + 12)
 
         local parts1 = {}
-        if S.ShowPlayers then table.insert(parts1, string.format("Players  %d", #Players:GetPlayers())) end
-        if S.ShowFPS     then table.insert(parts1, string.format("FPS  %d", HUD.CurrentFps)) end
+        if S.ShowPlayers then
+            table.insert(parts1, string.format("Players  %d", #Players:GetPlayers()))
+        end
+        if S.ShowFPS then
+            table.insert(parts1, string.format("FPS  %d", HUD.CurrentFps))
+        end
         local line1 = HUD.Elements.line1
         line1.Text = table.concat(parts1, "     ")
         line1.Color = S.TextColor
@@ -204,11 +308,11 @@ local okInit, errInit = pcall(function()
 
         local parts2 = {}
         if S.ShowPing then
-            local ping = math.floor(LocalPlayer:GetNetworkPing() * 1000 + 0.5)
-            table.insert(parts2, string.format("Ping  %d ms", ping))
+            table.insert(parts2, string.format("Ping  %d ms", getPingMs()))
         end
         if S.ShowSession then
-            table.insert(parts2, string.format("Session  %s", hudFmtTime(tick() - HUD.SessionStart)))
+            table.insert(parts2,
+                string.format("Session  %s", hudFmtTime(os.clock() - HUD.SessionStart)))
         end
         local line2 = HUD.Elements.line2
         line2.Text = table.concat(parts2, "     ")
@@ -216,7 +320,7 @@ local okInit, errInit = pcall(function()
         line2.Position = Vector2.new(pos.X + paddingX, pos.Y + 58)
 
         HUD.Frames += 1
-        local now = tick()
+        local now = os.clock()
         if now - HUD.LastSample >= 1 then
             HUD.CurrentFps = math.floor(HUD.Frames / (now - HUD.LastSample) + 0.5)
             HUD.Frames = 0
@@ -227,13 +331,22 @@ local okInit, errInit = pcall(function()
     local function StartHUD()
         local HUD = WallHack.Internal.HUD
         if HUD.Conn then return end
-        HUD.SessionStart = tick()
+        -- [FIX-4] Reset sampling window so the first FPS read is sane.
+        HUD.SessionStart = os.clock()
+        HUD.LastSample   = os.clock()
+        HUD.Frames       = 0
+        HUD.CurrentFps   = 0
         HUD.Conn = RunService.RenderStepped:Connect(hudUpdate)
     end
 
     local function StopHUD()
         local HUD = WallHack.Internal.HUD
-        if HUD.Conn then pcall(function() HUD.Conn:Disconnect() end); HUD.Conn = nil end
+        -- [FIX-5] Force flag off for consistency.
+        WallHack.Visuals.HUDSettings.Enabled = false
+        if HUD.Conn then
+            pcall(function() HUD.Conn:Disconnect() end)
+            HUD.Conn = nil
+        end
         for _, e in pairs(HUD.Elements) do
             if e and e.Remove then pcall(function() e:Remove() end) end
         end
@@ -275,18 +388,27 @@ local okInit, errInit = pcall(function()
 
     local function removeChams()
         local Se = WallHack.Internal.SelfESP
-        if Se.Highlight then pcall(function() Se.Highlight:Destroy() end); Se.Highlight = nil end
+        if Se.Highlight then
+            pcall(function() Se.Highlight:Destroy() end)
+            Se.Highlight = nil
+        end
     end
 
     local function stopHatLoop()
         local Se = WallHack.Internal.SelfESP
-        if Se.HatConn then pcall(function() Se.HatConn:Disconnect() end); Se.HatConn = nil end
+        if Se.HatConn then
+            pcall(function() Se.HatConn:Disconnect() end)
+            Se.HatConn = nil
+        end
     end
 
     local function removeChinaHat()
         stopHatLoop()
         local Se = WallHack.Internal.SelfESP
-        if Se.HatPart then pcall(function() Se.HatPart:Destroy() end); Se.HatPart = nil end
+        if Se.HatPart then
+            pcall(function() Se.HatPart:Destroy() end)
+            Se.HatPart = nil
+        end
         Se.HatHead = nil
     end
 
@@ -346,25 +468,46 @@ local okInit, errInit = pcall(function()
     end
 
     local function refreshSelfESP()
+        -- [FIX-2] Respect the master flag.
+        local S = WallHack.Visuals.SelfESP
+        if not S.Enabled then
+            removeChams()
+            removeChinaHat()
+            return
+        end
         local char = LocalPlayer.Character
-        if not char then removeChams(); removeChinaHat(); return end
-        if WallHack.Visuals.SelfESP.Chams.Enabled    then applyChams(char) else removeChams()   end
-        if WallHack.Visuals.SelfESP.ChinaHat.Enabled then applyChinaHat()  else removeChinaHat() end
+        if not char then
+            removeChams()
+            removeChinaHat()
+            return
+        end
+        if S.Chams.Enabled    then applyChams(char)  else removeChams()    end
+        if S.ChinaHat.Enabled then applyChinaHat()   else removeChinaHat() end
     end
 
     local function StartSelfESP()
         local Se = WallHack.Internal.SelfESP
-        if Se.CharConn then return end
+        if Se.CharConn then
+            -- Already connected; just refresh.
+            if WallHack.Visuals.SelfESP.Enabled then refreshSelfESP() end
+            return
+        end
         Se.CharConn = LocalPlayer.CharacterAdded:Connect(function()
             task.wait(0.5)
+            if H.ShuttingDown then return end
             if WallHack.Visuals.SelfESP.Enabled then refreshSelfESP() end
         end)
-        refreshSelfESP()
+        if WallHack.Visuals.SelfESP.Enabled then refreshSelfESP() end
     end
 
     local function StopSelfESP()
         local Se = WallHack.Internal.SelfESP
-        if Se.CharConn then pcall(function() Se.CharConn:Disconnect() end); Se.CharConn = nil end
+        -- [FIX-5] Force flag off.
+        WallHack.Visuals.SelfESP.Enabled = false
+        if Se.CharConn then
+            pcall(function() Se.CharConn:Disconnect() end)
+            Se.CharConn = nil
+        end
         removeChams()
         removeChinaHat()
     end
@@ -375,62 +518,75 @@ local okInit, errInit = pcall(function()
     local function ApplyGlowForPlayer(plr)
         local data = WallHack.WrappedPlayers[plr.Name]
         if not data then return end
-        if WallHack.Settings.Enabled and WallHack.Visuals.GlowSettings.Enabled then
-            local char = plr.Character
-            local hum  = char and char:FindFirstChildOfClass("Humanoid")
-            if char and hum and hum.Health > 0 then
-                if not data.Glow or not data.Glow.Parent then
-                    if data.Glow then pcall(function() data.Glow:Destroy() end) end
-                    local highlight = Instance.new("Highlight")
-                    highlight.Name = "AirHub_Glow"
-                    highlight.Adornee = char
-                    highlight.Parent = char
-                    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                    data.Glow = highlight
-                end
-                data.Glow.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                local gs = WallHack.Visuals.GlowSettings
-                local safeColor = SanitizeColor(gs.Color)
-                local safeTrans = math.clamp(tonumber(gs.Transparency) or 0.5, 0, 1)
-                local mode = gs.Mode or "Outline"
-                if mode == "Outline" then
-                    data.Glow.FillTransparency = 1
-                    data.Glow.OutlineTransparency = safeTrans
-                    data.Glow.FillColor = safeColor
-                    data.Glow.OutlineColor = safeColor
-                elseif mode == "Fill" then
-                    data.Glow.FillTransparency = safeTrans
-                    data.Glow.OutlineTransparency = 1
-                    data.Glow.FillColor = safeColor
-                    data.Glow.OutlineColor = safeColor
-                elseif mode == "Both" then
-                    data.Glow.FillTransparency = safeTrans * 0.5
-                    data.Glow.OutlineTransparency = safeTrans * 0.5
-                    data.Glow.FillColor = safeColor
-                    data.Glow.OutlineColor = safeColor
-                elseif mode == "Pulse" then
-                    local pulse = (math.sin(tick() * 2) + 1) / 2
-                    local r = math.clamp(safeColor.R * (0.5 + pulse * 0.5), 0, 1)
-                    local g = math.clamp(safeColor.G * (0.5 + pulse * 0.5), 0, 1)
-                    local b = math.clamp(safeColor.B * (0.5 + pulse * 0.5), 0, 1)
-                    local pulsed = Color3.new(r, g, b)
-                    data.Glow.FillColor = pulsed
-                    data.Glow.OutlineColor = pulsed
-                    data.Glow.FillTransparency = safeTrans * (0.5 + pulse * 0.5)
-                    data.Glow.OutlineTransparency = safeTrans * (0.5 + pulse * 0.5)
-                else
-                    data.Glow.FillTransparency = 1
-                    data.Glow.OutlineTransparency = safeTrans
-                    data.Glow.FillColor = safeColor
-                    data.Glow.OutlineColor = safeColor
-                end
-            elseif data.Glow then
+
+        local shouldShow = WallHack.Settings.Enabled
+            and WallHack.Visuals.GlowSettings.Enabled
+
+        if not shouldShow then
+            if data.Glow then
                 pcall(function() data.Glow:Destroy() end)
                 data.Glow = nil
             end
-        elseif data.Glow then
-            pcall(function() data.Glow:Destroy() end)
-            data.Glow = nil
+            return
+        end
+
+        local char = plr.Character
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        if not (char and hum and hum.Health > 0) then
+            if data.Glow then
+                pcall(function() data.Glow:Destroy() end)
+                data.Glow = nil
+            end
+            return
+        end
+
+        if not data.Glow or not data.Glow.Parent then
+            if data.Glow then pcall(function() data.Glow:Destroy() end) end
+            local highlight = Instance.new("Highlight")
+            highlight.Name = "AirHub_Glow"
+            highlight.Adornee = char
+            highlight.Parent = char
+            highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            data.Glow = highlight
+        end
+
+        data.Glow.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+
+        local gs = WallHack.Visuals.GlowSettings
+        local safeColor = SanitizeColor(gs.Color)
+        local safeTrans = math.clamp(tonumber(gs.Transparency) or 0.5, 0, 1)
+        local mode = gs.Mode or "Outline"
+
+        if mode == "Outline" then
+            data.Glow.FillTransparency = 1
+            data.Glow.OutlineTransparency = safeTrans
+            data.Glow.FillColor = safeColor
+            data.Glow.OutlineColor = safeColor
+        elseif mode == "Fill" then
+            data.Glow.FillTransparency = safeTrans
+            data.Glow.OutlineTransparency = 1
+            data.Glow.FillColor = safeColor
+            data.Glow.OutlineColor = safeColor
+        elseif mode == "Both" then
+            data.Glow.FillTransparency = safeTrans * 0.5
+            data.Glow.OutlineTransparency = safeTrans * 0.5
+            data.Glow.FillColor = safeColor
+            data.Glow.OutlineColor = safeColor
+        elseif mode == "Pulse" then
+            local pulse = (math.sin(os.clock() * 2) + 1) / 2
+            local r = math.clamp(safeColor.R * (0.5 + pulse * 0.5), 0, 1)
+            local g = math.clamp(safeColor.G * (0.5 + pulse * 0.5), 0, 1)
+            local b = math.clamp(safeColor.B * (0.5 + pulse * 0.5), 0, 1)
+            local pulsed = Color3.new(r, g, b)
+            data.Glow.FillColor = pulsed
+            data.Glow.OutlineColor = pulsed
+            data.Glow.FillTransparency = safeTrans * (0.5 + pulse * 0.5)
+            data.Glow.OutlineTransparency = safeTrans * (0.5 + pulse * 0.5)
+        else
+            data.Glow.FillTransparency = 1
+            data.Glow.OutlineTransparency = safeTrans
+            data.Glow.FillColor = safeColor
+            data.Glow.OutlineColor = safeColor
         end
     end
 
@@ -464,48 +620,68 @@ local okInit, errInit = pcall(function()
                 return
             end
             local char = plr.Character
-            if not char or not char:FindFirstChild("HumanoidRootPart") or not char:FindFirstChild("Head") then
+            if not char
+               or not char:FindFirstChild("HumanoidRootPart")
+               or not char:FindFirstChild("Head") then
                 for _, v in pairs(t.Box) do v.Visible = false end
                 return
             end
-            local vec, onScreen = workspace.CurrentCamera:WorldToViewportPoint(char.HumanoidRootPart.Position)
+            local vec, onScreen = workspace.CurrentCamera:WorldToViewportPoint(
+                char.HumanoidRootPart.Position)
             if not onScreen or not t.Checks.Alive or not t.Checks.Team then
                 for _, v in pairs(t.Box) do v.Visible = false end
                 return
             end
+
             local isTarget = (H.Aimbot and H.Aimbot.Locked == plr)
-            local boxColor = isTarget and SanitizeColor(WallHack.Visuals.BoxSettings.TargetColor)
-                                     or SanitizeColor(WallHack.Visuals.BoxSettings.Color)
+            local boxColor = isTarget
+                and SanitizeColor(WallHack.Visuals.BoxSettings.TargetColor)
+                or  SanitizeColor(WallHack.Visuals.BoxSettings.Color)
+
             local hrpCF = char.HumanoidRootPart.CFrame
             local size  = char.HumanoidRootPart.Size * WallHack.Visuals.BoxSettings.Increase
-            local posTL = workspace.CurrentCamera:WorldToViewportPoint((hrpCF * CFrame.new( size.X,  size.Y, 0)).Position)
-            local posTR = workspace.CurrentCamera:WorldToViewportPoint((hrpCF * CFrame.new(-size.X,  size.Y, 0)).Position)
-            local posBL = workspace.CurrentCamera:WorldToViewportPoint((hrpCF * CFrame.new( size.X, -size.Y - 0.5, 0)).Position)
-            local posBR = workspace.CurrentCamera:WorldToViewportPoint((hrpCF * CFrame.new(-size.X, -size.Y - 0.5, 0)).Position)
+            local cam   = workspace.CurrentCamera
+            local posTL = cam:WorldToViewportPoint((hrpCF * CFrame.new( size.X,  size.Y, 0)).Position)
+            local posTR = cam:WorldToViewportPoint((hrpCF * CFrame.new(-size.X,  size.Y, 0)).Position)
+            local posBL = cam:WorldToViewportPoint((hrpCF * CFrame.new( size.X, -size.Y - 0.5, 0)).Position)
+            local posBR = cam:WorldToViewportPoint((hrpCF * CFrame.new(-size.X, -size.Y - 0.5, 0)).Position)
 
             if WallHack.Visuals.BoxSettings.Type == 2 then
                 t.Box.Square.Visible = true
-                for k, v in pairs(t.Box) do if k ~= "Square" then v.Visible = false end end
+                for k, v in pairs(t.Box) do
+                    if k ~= "Square" then v.Visible = false end
+                end
                 t.Box.Square.Thickness    = WallHack.Visuals.BoxSettings.Thickness
                 t.Box.Square.Color        = boxColor
                 t.Box.Square.Transparency = WallHack.Visuals.BoxSettings.Transparency
                 t.Box.Square.Filled       = WallHack.Visuals.BoxSettings.Filled
-                local headY = workspace.CurrentCamera:WorldToViewportPoint(char.Head.Position + Vector3.new(0, 0.5, 0)).Y
-                local legY  = workspace.CurrentCamera:WorldToViewportPoint(char.HumanoidRootPart.Position - Vector3.new(0, 3, 0)).Y
+                local headY = cam:WorldToViewportPoint(
+                    char.Head.Position + Vector3.new(0, 0.5, 0)).Y
+                local legY  = cam:WorldToViewportPoint(
+                    char.HumanoidRootPart.Position - Vector3.new(0, 3, 0)).Y
                 t.Box.Square.Size     = Vector2.new(2000 / vec.Z, headY - legY)
-                t.Box.Square.Position = Vector2.new(vec.X - t.Box.Square.Size.X / 2, vec.Y - t.Box.Square.Size.Y / 2)
+                t.Box.Square.Position = Vector2.new(
+                    vec.X - t.Box.Square.Size.X / 2,
+                    vec.Y - t.Box.Square.Size.Y / 2)
             else
                 t.Box.Square.Visible = false
-                for _, ln in pairs({ "TopLeftLine", "TopRightLine", "BottomLeftLine", "BottomRightLine" }) do
+                for _, ln in pairs({
+                    "TopLeftLine", "TopRightLine",
+                    "BottomLeftLine", "BottomRightLine"
+                }) do
                     t.Box[ln].Visible      = true
                     t.Box[ln].Thickness    = WallHack.Visuals.BoxSettings.Thickness
                     t.Box[ln].Transparency = WallHack.Visuals.BoxSettings.Transparency
                     t.Box[ln].Color        = boxColor
                 end
-                t.Box.TopLeftLine.From     = Vector2.new(posTL.X, posTL.Y); t.Box.TopLeftLine.To     = Vector2.new(posTR.X, posTR.Y)
-                t.Box.TopRightLine.From    = Vector2.new(posTR.X, posTR.Y); t.Box.TopRightLine.To    = Vector2.new(posBR.X, posBR.Y)
-                t.Box.BottomLeftLine.From  = Vector2.new(posBL.X, posBL.Y); t.Box.BottomLeftLine.To  = Vector2.new(posTL.X, posTL.Y)
-                t.Box.BottomRightLine.From = Vector2.new(posBR.X, posBR.Y); t.Box.BottomRightLine.To = Vector2.new(posBL.X, posBL.Y)
+                t.Box.TopLeftLine.From     = Vector2.new(posTL.X, posTL.Y)
+                t.Box.TopLeftLine.To       = Vector2.new(posTR.X, posTR.Y)
+                t.Box.TopRightLine.From    = Vector2.new(posTR.X, posTR.Y)
+                t.Box.TopRightLine.To      = Vector2.new(posBR.X, posBR.Y)
+                t.Box.BottomLeftLine.From  = Vector2.new(posBL.X, posBL.Y)
+                t.Box.BottomLeftLine.To    = Vector2.new(posTL.X, posTL.Y)
+                t.Box.BottomRightLine.From = Vector2.new(posBR.X, posBR.Y)
+                t.Box.BottomRightLine.To   = Vector2.new(posBL.X, posBL.Y)
             end
         end)
     end
@@ -517,14 +693,26 @@ local okInit, errInit = pcall(function()
             if H.ShuttingDown then return end
             local char = plr.Character
             local hum  = char and char:FindFirstChildOfClass("Humanoid")
+
             if char and hum then
-                t.Checks.Alive = WallHack.Settings.AliveCheck and hum.Health > 0 or not WallHack.Settings.AliveCheck
-                t.Checks.Team  = not WallHack.Settings.TeamCheck
-                    or (LocalPlayer.Team and plr.Team and LocalPlayer.Team ~= plr.Team)
+                if WallHack.Settings.AliveCheck then
+                    t.Checks.Alive = hum.Health > 0
+                else
+                    t.Checks.Alive = true
+                end
+
+                -- [FIX-6] Strict boolean, nil-safe.
+                if not WallHack.Settings.TeamCheck then
+                    t.Checks.Team = true
+                else
+                    local a, b = LocalPlayer.Team, plr.Team
+                    t.Checks.Team = (a ~= nil and b ~= nil and a ~= b) and true or false
+                end
             else
                 t.Checks.Alive = false
                 t.Checks.Team  = false
             end
+
             ApplyGlowForPlayer(plr)
         end)
     end
@@ -581,8 +769,12 @@ local okInit, errInit = pcall(function()
     local function UnWrap(plr)
         local v = WallHack.WrappedPlayers[plr.Name]
         if not v then return end
-        for _, c in pairs(v.Connections) do pcall(function() c:Disconnect() end) end
-        if v.CharacterAddedConn then pcall(function() v.CharacterAddedConn:Disconnect() end) end
+        for _, c in pairs(v.Connections) do
+            pcall(function() c:Disconnect() end)
+        end
+        if v.CharacterAddedConn then
+            pcall(function() v.CharacterAddedConn:Disconnect() end)
+        end
         for _, b in pairs(v.Box) do
             if b and b.Remove then pcall(function() b:Remove() end) end
         end
@@ -591,13 +783,15 @@ local okInit, errInit = pcall(function()
     end
 
     local WHConnections = {}
-    local ReWrapRunning = false
+
+    -- [FIX-1] Generation token instead of a boolean flag.
+    local ReWrapToken = 0
 
     local function StartReWrapLoop()
-        if ReWrapRunning then return end
-        ReWrapRunning = true
+        ReWrapToken += 1
+        local myToken = ReWrapToken
         task.spawn(function()
-            while ReWrapRunning and not H.ShuttingDown do
+            while myToken == ReWrapToken and not H.ShuttingDown do
                 for _, v in pairs(Players:GetPlayers()) do
                     if v ~= LocalPlayer then Wrap(v) end
                 end
@@ -622,8 +816,13 @@ local okInit, errInit = pcall(function()
     --// Public API
     --// -----------------------------------------------------------------------
     WallHack.Functions.Exit = function()
-        ReWrapRunning = false
-        for _, v in pairs(WHConnections) do pcall(function() v:Disconnect() end) end
+        -- [FIX-1] Invalidate the ReWrap loop by bumping the token.
+        ReWrapToken += 1
+        for _, v in pairs(WHConnections) do
+            pcall(function() v:Disconnect() end)
+        end
+        -- [FIX-7] Clear the connection table.
+        WHConnections = {}
         for _, v in pairs(Players:GetPlayers()) do
             if v ~= LocalPlayer then UnWrap(v) end
         end
@@ -632,43 +831,29 @@ local okInit, errInit = pcall(function()
     end
 
     WallHack.Functions.Restart = function()
-        ReWrapRunning = false
-        for _, v in pairs(WHConnections) do pcall(function() v:Disconnect() end) end
+        ReWrapToken += 1
+        for _, v in pairs(WHConnections) do
+            pcall(function() v:Disconnect() end)
+        end
+        WHConnections = {}
         LoadWH()
     end
 
     WallHack.Functions.ResetSettings = function()
-        WallHack.Settings = { Enabled = false, TeamCheck = false, AliveCheck = true }
-        WallHack.Visuals.BoxSettings = {
-            Enabled = true, Type = 1,
-            Color = Color3.fromRGB(255, 255, 255), TargetColor = Color3.fromRGB(255, 0, 0),
-            Transparency = 0.7, Thickness = 1, Filled = false, Increase = 1,
-        }
-        WallHack.Visuals.GlowSettings = {
-            Enabled = true, Color = Color3.fromRGB(0, 255, 255), Transparency = 0.5, Mode = "Outline",
-        }
-        WallHack.Visuals.HUDSettings = {
-            Enabled = false, Position = "TopLeft",
-            ShowPlayers = true, ShowFPS = true, ShowPing = true, ShowSession = true,
-            AccentColor = Color3.fromRGB(90, 140, 255),
-            BackColor = Color3.fromRGB(20, 20, 26),
-            TextColor = Color3.fromRGB(240, 240, 245),
-            MutedColor = Color3.fromRGB(150, 150, 165),
-            BackTransparency = 0.15,
-        }
-        WallHack.Visuals.SelfESP = {
-            Enabled = false,
-            Chams = {
-                Enabled = false, Mode = "Both",
-                FillColor = Color3.fromRGB(90, 140, 255), FillTransparency = 0.4,
-                OutlineColor = Color3.fromRGB(255, 255, 255), OutlineTransparency = 0.0,
-                AlwaysOnTop = true,
-            },
-            ChinaHat = {
-                Enabled = false, Color = Color3.fromRGB(255, 60, 60),
-                Material = "Neon", Size = 4, OffsetY = 1.8, Transparency = 0, Rotation = 0,
-            },
-        }
+        -- [FIX-3] In-place mutation so external references survive.
+        applyDefaults(WallHack.Settings,               DEFAULT_SETTINGS)
+        applyDefaults(WallHack.Visuals.BoxSettings,    DEFAULT_BOX)
+        applyDefaults(WallHack.Visuals.GlowSettings,   DEFAULT_GLOW)
+        applyDefaults(WallHack.Visuals.HUDSettings,    DEFAULT_HUD)
+        applyDefaults(WallHack.Visuals.SelfESP,        DEFAULT_SELFESP)
+
+        -- Reset runtime counters too.
+        local HUD = WallHack.Internal.HUD
+        HUD.SessionStart = os.clock()
+        HUD.LastSample   = os.clock()
+        HUD.Frames       = 0
+        HUD.CurrentFps   = 0
+
         ApplyGlowToAll()
         StopHUD()
         StopSelfESP()
@@ -676,14 +861,35 @@ local okInit, errInit = pcall(function()
 
     WallHack.Functions.StartHUD = StartHUD
     WallHack.Functions.StopHUD  = StopHUD
+
     WallHack.Functions.SetHUDEnabled = function(v)
-        WallHack.Visuals.HUDSettings.Enabled = v
+        WallHack.Visuals.HUDSettings.Enabled = v and true or false
         if v then StartHUD() else StopHUD() end
+    end
+    WallHack.Functions.GetHUDEnabled = function()
+        return WallHack.Visuals.HUDSettings.Enabled
     end
 
     WallHack.Functions.StartSelfESP   = StartSelfESP
     WallHack.Functions.StopSelfESP    = StopSelfESP
     WallHack.Functions.RefreshSelfESP = refreshSelfESP
+
+    -- [FIX-11] Granular setters so UI never has to touch internals directly.
+    WallHack.Functions.SetSelfESPEnabled = function(v)
+        WallHack.Visuals.SelfESP.Enabled = v and true or false
+        if v then StartSelfESP() else StopSelfESP() end
+    end
+    WallHack.Functions.SetSelfESPChamsEnabled = function(v)
+        WallHack.Visuals.SelfESP.Chams.Enabled = v and true or false
+        refreshSelfESP()
+    end
+    WallHack.Functions.SetSelfESPChinaHatEnabled = function(v)
+        WallHack.Visuals.SelfESP.ChinaHat.Enabled = v and true or false
+        refreshSelfESP()
+    end
+    WallHack.Functions.GetSelfESPEnabled = function()
+        return WallHack.Visuals.SelfESP.Enabled
+    end
 
     WallHack.ApplyGlowToAll     = ApplyGlowToAll
     WallHack.ApplyGlowForPlayer = ApplyGlowForPlayer
@@ -695,17 +901,22 @@ end)
 if not okInit then
     warn("[AirHub] 04_wallhack: init error → " .. tostring(errInit))
     local noop = function() end
-    WallHack.Functions.Exit            = WallHack.Functions.Exit            or noop
-    WallHack.Functions.Restart         = WallHack.Functions.Restart         or noop
-    WallHack.Functions.ResetSettings   = WallHack.Functions.ResetSettings   or noop
-    WallHack.Functions.StartHUD        = WallHack.Functions.StartHUD        or noop
-    WallHack.Functions.StopHUD         = WallHack.Functions.StopHUD         or noop
-    WallHack.Functions.SetHUDEnabled   = WallHack.Functions.SetHUDEnabled   or noop
-    WallHack.Functions.StartSelfESP    = WallHack.Functions.StartSelfESP    or noop
-    WallHack.Functions.StopSelfESP     = WallHack.Functions.StopSelfESP     or noop
-    WallHack.Functions.RefreshSelfESP  = WallHack.Functions.RefreshSelfESP  or noop
-    WallHack.ApplyGlowToAll            = WallHack.ApplyGlowToAll            or noop
-    WallHack.ApplyGlowForPlayer        = WallHack.ApplyGlowForPlayer        or noop
+    WallHack.Functions.Exit                       = WallHack.Functions.Exit                       or noop
+    WallHack.Functions.Restart                    = WallHack.Functions.Restart                    or noop
+    WallHack.Functions.ResetSettings              = WallHack.Functions.ResetSettings              or noop
+    WallHack.Functions.StartHUD                   = WallHack.Functions.StartHUD                   or noop
+    WallHack.Functions.StopHUD                    = WallHack.Functions.StopHUD                    or noop
+    WallHack.Functions.SetHUDEnabled              = WallHack.Functions.SetHUDEnabled              or noop
+    WallHack.Functions.GetHUDEnabled              = WallHack.Functions.GetHUDEnabled              or function() return false end
+    WallHack.Functions.StartSelfESP               = WallHack.Functions.StartSelfESP               or noop
+    WallHack.Functions.StopSelfESP                = WallHack.Functions.StopSelfESP                or noop
+    WallHack.Functions.RefreshSelfESP             = WallHack.Functions.RefreshSelfESP             or noop
+    WallHack.Functions.SetSelfESPEnabled          = WallHack.Functions.SetSelfESPEnabled          or noop
+    WallHack.Functions.SetSelfESPChamsEnabled     = WallHack.Functions.SetSelfESPChamsEnabled     or noop
+    WallHack.Functions.SetSelfESPChinaHatEnabled  = WallHack.Functions.SetSelfESPChinaHatEnabled  or noop
+    WallHack.Functions.GetSelfESPEnabled          = WallHack.Functions.GetSelfESPEnabled          or function() return false end
+    WallHack.ApplyGlowToAll                       = WallHack.ApplyGlowToAll                       or noop
+    WallHack.ApplyGlowForPlayer                   = WallHack.ApplyGlowForPlayer                   or noop
 end
 
 if okInit then
