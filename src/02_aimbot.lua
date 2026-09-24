@@ -132,6 +132,12 @@ local VISIBLE_PARTS = {
 --// ---------------------------------------------------------------------------
 --// Helpers
 --// ---------------------------------------------------------------------------
+
+--// TP Aim и Wallbang полностью игнорируют WallCheck
+local function ShouldBypassWallCheck()
+    return Aimbot.Settings.TPAimEnabled or Aimbot.Settings.WallbangEnabled
+end
+
 local function GetActualPartName(lockPart)
     if lockPart == "Torso" then
         return { "Torso", "UpperTorso", "LowerTorso" }
@@ -286,7 +292,10 @@ end
 
 local function GetVisiblePointOnPart(origin, part)
     if not part or not part:IsA("BasePart") then return nil end
-    if not Aimbot.Settings.WallCheck then return PredictPartPosition(part) end
+    --// WallCheck отключён ИЛИ включены TP/WB → игнорируем стены полностью
+    if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
+        return PredictPartPosition(part)
+    end
 
     local isNearest = (Aimbot.Settings.LockPart == "Nearest")
     local isPerfect = (Aimbot.Settings.WallCheckMode == "Perfect")
@@ -548,7 +557,8 @@ end
 
 local function WaitForShotPoint(targetPart)
     if not targetPart then return nil, false end
-    if not Aimbot.Settings.WallCheck then
+    --// TP/WB bypass — не ждём видимости
+    if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
         return PredictPartPosition(targetPart), true
     end
     local origin = GetCheckOrigin()
@@ -713,7 +723,6 @@ local function RestoreCurrentCFrame()
     return false
 end
 
---// Телепорт к цели + наведение камеры на цель
 local function TeleportToTarget(targetPart)
     local hrp = GetHRP()
     if not hrp or not targetPart then return false end
@@ -722,7 +731,6 @@ local function TeleportToTarget(targetPart)
     local offsetCF = targetCF * CFrame.new(0, 0, distance)
     hrp.CFrame = offsetCF
 
-    --// Наводим камеру на цель, чтобы выстрел шёл точно в target
     local cam = workspace.CurrentCamera
     if cam and targetPart.Parent then
         local aimPos = PredictPartPosition(targetPart)
@@ -734,7 +742,6 @@ local function TeleportToTarget(targetPart)
     return true
 end
 
---// Wallbang — RemotePatch
 local function PerformWallbang_RemotePatch(targetPart, btn)
     local hookf = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
@@ -770,7 +777,6 @@ local function PerformWallbang_RemotePatch(targetPart, btn)
     return true
 end
 
---// Wallbang — RayIgnore (правильный хук через __namecall, т.к. Raycast — метод)
 local function PerformWallbang_RayIgnore(targetPart, btn)
     local hookf     = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
@@ -806,7 +812,6 @@ local function PerformWallbang_RayIgnore(targetPart, btn)
     return true
 end
 
---// Wallbang — BulletTeleport
 local function PerformWallbang_BulletTeleport(targetPart, btn)
     local hrp = GetHRP()
     if not hrp then return false end
@@ -848,7 +853,6 @@ local function PerformWallbang(targetPart, btn)
     return ok
 end
 
---// TP Aim — MagicBullet
 local function PerformMagicBullet(targetPart, btn)
     if not Aimbot.Settings.TPAimEnabled or Aimbot.Settings.TPAimMethod ~= "MagicBullet" then return end
     if not targetPart then return end
@@ -894,7 +898,6 @@ local function PerformMagicBullet(targetPart, btn)
     end)
 end
 
---// TP Aim — InfiniteTP
 local function PerformInfiniteTP(targetPart, btn)
     if not Aimbot.Settings.TPAimEnabled or Aimbot.Settings.TPAimMethod ~= "InfiniteTP" then return end
     if not targetPart then return end
@@ -944,6 +947,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
     local startHealth = hum and hum.Health or 0
 
+    --// TP Aim — возвращаемся до WallCheck, полностью его игнорируем
     if Aimbot.Settings.TPAimEnabled then
         if Aimbot.Settings.TPAimMethod == "MagicBullet" then
             PerformMagicBullet(targetPart, btn)
@@ -952,6 +956,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         end
         return
     end
+    --// Wallbang — возвращаемся до WallCheck, полностью его игнорируем
     if Aimbot.Settings.WallbangEnabled then
         PerformWallbang(targetPart, btn)
         return
@@ -960,8 +965,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     RefreshOldPositionIfNeeded()
 
     local checkPoint, nowVisible = WaitForShotPoint(targetPart)
-    if Aimbot.Settings.WallCheck and not checkPoint
-       and not (Aimbot.Settings.TPAimEnabled or Aimbot.Settings.WallbangEnabled) then
+    if Aimbot.Settings.WallCheck and not checkPoint then
         return
     end
     if nowVisible ~= nil then wasVisible = nowVisible end
@@ -1792,7 +1796,7 @@ local function LoadAimbot()
             if Aimbot.Settings.SilentAim then
                 PerformSilentShot(targetPart, btn, nil)
             else
-                if Aimbot.Settings.WallCheck then
+                if Aimbot.Settings.WallCheck and not ShouldBypassWallCheck() then
                     local vp = WaitForShotPoint(targetPart)
                     if not vp then return end
                 end
@@ -1823,7 +1827,11 @@ local function LoadAimbot()
                 if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then CancelLock() return end
 
                 local visiblePoint, nowVisible = WaitForShotPoint(targetPart)
-                if Aimbot.Settings.WallCheck and not visiblePoint then CancelLock() return end
+                if Aimbot.Settings.WallCheck and not visiblePoint
+                   and not ShouldBypassWallCheck() then
+                    CancelLock()
+                    return
+                end
 
                 if Aimbot.Settings.AutoShoot.AutoStop.Enabled then
                     local char = LocalPlayer.Character
@@ -1904,6 +1912,7 @@ Aimbot.GetLockedCharacter    = GetLockedCharacter
 Aimbot.RunAutoScan           = RunAutoScan
 Aimbot.CancelAutoScan        = CancelAutoScan
 Aimbot.IsModeAvailable       = IsModeAvailable
+Aimbot.ShouldBypassWallCheck = ShouldBypassWallCheck
 
 Aimbot.PerformWallbang       = PerformWallbang
 Aimbot.PerformMagicBullet    = PerformMagicBullet
@@ -2012,6 +2021,7 @@ local function Diagnose()
         "PredictPartPosition", "MoveMouseAbs", "WorldToMouseVIM",
         "GetNPCCharacters", "GetLockedCharacter",
         "RunAutoScan", "CancelAutoScan", "IsModeAvailable",
+        "ShouldBypassWallCheck",
         "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
     }
     for _, name in ipairs(exports) do
