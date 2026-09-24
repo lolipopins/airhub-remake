@@ -1,19 +1,17 @@
 --// ============================================================================
---// AirHub — 04_wallhack.lua (patched 5 — ManaV2-style ChinaHat)
---// Schema created FIRST.
+--// AirHub — 04_wallhack.lua (patched 6 — material fix)
 --//
---// r5 changelog:
---//   [FIX-24] ChinaHat uses cone FileMesh (rbxassetid://1033714) = ManaV2 look.
---//            Ball fallback kept if mesh fails to render.
---//   [FIX-25] AutoRotate + RotateSpeed.
---//   [FIX-26] Rainbow + RainbowSpeed.
---//   [FIX-27] Size applies to Mesh.Scale, not Part.Size.
+--// r6 changelog:
+--//   [FIX-28] resolveMaterial(): pcall-safe enum resolver. No more silent
+--//            fallback / loop crash on invalid or lowercase material names.
+--//   [FIX-29] Loop uses cached resolved material — no Enum.Material[...] throws.
+--//   [FIX-30] SetChinaHatMaterial / GetChinaHatMaterial with warnings.
+--//   [FIX-31] ListValidMaterials() for UI dropdowns + transparency warnings.
 --// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 04_wallhack: core not loaded") return end
 if H.WallHack and H.WallHack._Loaded then return end
 
---// 1) Schema
 H.WallHack = H.WallHack or {}
 local WallHack = H.WallHack
 WallHack._Loaded = true
@@ -55,11 +53,8 @@ WallHack.Visuals.SelfESP = WallHack.Visuals.SelfESP or {
         Color   = Color3.fromRGB(255, 60, 60),
         Material = "Neon",
         Size = 4, OffsetY = 1.8, Transparency = 0, Rotation = 0,
-        -- [FIX-24] cone mesh look (ManaV2-style)
         UseMesh = true,
-        -- [FIX-25]
         AutoRotate = false, RotateSpeed = 90,
-        -- [FIX-26]
         Rainbow = false, RainbowSpeed = 0.5,
     },
 }
@@ -73,12 +68,12 @@ WallHack.Internal = WallHack.Internal or {
     SelfESP = {
         Highlight = nil, HatPart = nil, HatHead = nil,
         HatConn = nil, CharConn = nil, HatFolder = nil,
+        ResolvedMaterial = Enum.Material.Neon,   -- [FIX-29] cache
     },
 }
 WallHack.WrappedPlayers = WallHack.WrappedPlayers or {}
 WallHack.Functions      = WallHack.Functions      or {}
 
---// Defaults
 local DEFAULT_SETTINGS = { Enabled = false, TeamCheck = false, AliveCheck = true }
 local DEFAULT_BOX = {
     Enabled = true, Type = 1,
@@ -116,7 +111,6 @@ local DEFAULT_SELFESP = {
     },
 }
 
---// 2) Init
 local okInit, errInit = pcall(function()
 
     local Util = H.Util
@@ -127,6 +121,77 @@ local okInit, errInit = pcall(function()
     local LocalPlayer   = Util.LocalPlayer
     local SanitizeColor = Util.SanitizeColor or function(c) return c end
 
+    --// -----------------------------------------------------------------------
+    --// [FIX-31] Valid Part materials — subset of Enum.Material that works on
+    --// Parts. Excludes Terrain-only ones (Water, Air, LeafyGrass, ...).
+    --// Glass / ForceField ARE valid but need Transparency > 0 to be visible.
+    --// -----------------------------------------------------------------------
+    local VALID_PART_MATERIALS = {
+        "Plastic", "SmoothPlastic", "Neon", "Wood", "WoodPlanks",
+        "Marble", "Slate", "Concrete", "Granite", "Brick",
+        "Pebble", "Cobblestone", "Rock", "Sandstone", "Basalt",
+        "Limestone", "Pavement", "Asphalt", "Salt", "Mud", "Ground",
+        "Sand", "Fabric", "Grass", "Snow", "Glacier", "Ice",
+        "Metal", "CorrodedMetal", "DiamondPlate", "Foil",
+        "Glass", "ForceField",
+    }
+    local TRANSPARENCY_REQUIRED = { Glass = true, ForceField = true }
+
+    -- [FIX-28] Bulletproof enum resolver.
+    local function resolveMaterial(name)
+        if typeof(name) == "EnumItem" then
+            return name, true
+        end
+        if type(name) ~= "string" or name == "" then
+            return Enum.Material.Neon, false
+        end
+        -- Try exact.
+        local ok, m = pcall(function() return Enum.Material[name] end)
+        if ok and m then return m, true end
+        -- Try case-normalized match.
+        local lower = name:lower()
+        for _, validName in ipairs(VALID_PART_MATERIALS) do
+            if validName:lower() == lower then
+                local ok2, m2 = pcall(function() return Enum.Material[validName] end)
+                if ok2 and m2 then return m2, true end
+            end
+        end
+        return Enum.Material.Neon, false
+    end
+
+    local function setChinaHatMaterialInternal(name, silent)
+        local resolved, valid = resolveMaterial(name)
+        -- Reject Terrain-only materials (Ice/Glacier/Snow are valid on Parts;
+        -- Water/Air/etc. aren't in VALID_PART_MATERIALS so they won't resolve).
+        local nameStr = resolved.Name
+        local isAllowed = false
+        for _, n in ipairs(VALID_PART_MATERIALS) do
+            if n == nameStr then isAllowed = true; break end
+        end
+        if not isAllowed then
+            resolved = Enum.Material.Neon
+            valid = false
+        end
+
+        WallHack.Visuals.SelfESP.ChinaHat.Material = resolved.Name
+        WallHack.Internal.SelfESP.ResolvedMaterial = resolved
+
+        if not valid and not silent then
+            warn(string.format(
+                "[AirHub][ChinaHat] invalid Material '%s' → falling back to Neon. "..
+                "Use ListValidMaterials() to see allowed values.", tostring(name)))
+        end
+        if TRANSPARENCY_REQUIRED[resolved.Name]
+           and (WallHack.Visuals.SelfESP.ChinaHat.Transparency or 0) <= 0
+           and not silent then
+            warn(string.format(
+                "[AirHub][ChinaHat] Material '%s' is INVISIBLE when Transparency == 0. "..
+                "Set C.Transparency > 0 (e.g. 0.5) to see it.", resolved.Name))
+        end
+        return resolved
+    end
+
+    --// helpers --------------------------------------------------------------
     local function getPingMs()
         local ok, raw = pcall(function() return LocalPlayer:GetNetworkPing() end)
         if not ok or type(raw) ~= "number" then return 0 end
@@ -155,7 +220,6 @@ local okInit, errInit = pcall(function()
         t.Outline = true; t.Center = false; t.Visible = false
         return t
     end
-
     local function hudEnsureElements()
         local HUD = WallHack.Internal.HUD
         if HUD.Elements.bg and HUD.Elements.accent and HUD.Elements.title
@@ -170,13 +234,11 @@ local okInit, errInit = pcall(function()
             bg.Color = S.BackColor; bg.Transparency = S.BackTransparency
             pcall(function() bg.Rounding = 8 end)
             bg.Visible = false; built.bg = bg
-
             local accent = Drawing.new("Square")
             accent.Filled = true; accent.Outline = false
             accent.Color = S.AccentColor; accent.Transparency = 0
             pcall(function() accent.Rounding = 4 end)
             accent.Visible = false; built.accent = accent
-
             built.title = hudNewText(16, 2); built.subtitle = hudNewText(11, 1)
             built.line1 = hudNewText(13, 2); built.line2    = hudNewText(13, 2)
         end)
@@ -191,7 +253,6 @@ local okInit, errInit = pcall(function()
         HUD.Elements.line1 = built.line1; HUD.Elements.line2 = built.line2
         return true
     end
-
     local function hudHideAll()
         for _, e in pairs(WallHack.Internal.HUD.Elements) do
             pcall(function() e.Visible = false end)
@@ -202,7 +263,6 @@ local okInit, errInit = pcall(function()
             pcall(function() e.Visible = true end)
         end
     end
-
     local function hudGetPosition()
         local HUD = WallHack.Internal.HUD
         local vp = workspace.CurrentCamera.ViewportSize
@@ -214,7 +274,6 @@ local okInit, errInit = pcall(function()
         if pos == "BottomRight" then return Vector2.new(vp.X - HUD.W - pad, vp.Y - HUD.H - pad) end
         return Vector2.new(pad, pad)
     end
-
     local function hudFmtTime(sec)
         sec = math.floor(sec)
         local h = math.floor(sec / 3600)
@@ -224,7 +283,6 @@ local okInit, errInit = pcall(function()
         if m > 0 then return string.format("%dm %02ds", m, s) end
         return string.format("%ds", s)
     end
-
     local function hudUpdate()
         if H.ShuttingDown then return end
         local HUD = WallHack.Internal.HUD
@@ -235,32 +293,26 @@ local okInit, errInit = pcall(function()
         end
         if not hudEnsureElements() then return end
         if not HUD.Visible then hudShowAll(); HUD.Visible = true end
-
         local pos = hudGetPosition()
         local paddingX = 14
         local bg = HUD.Elements.bg
         bg.Size = Vector2.new(HUD.W, HUD.H); bg.Position = pos
         bg.Color = S.BackColor; bg.Transparency = S.BackTransparency
-
         local accent = HUD.Elements.accent
         accent.Size = Vector2.new(4, HUD.H); accent.Position = pos
         accent.Color = S.AccentColor
-
         local title = HUD.Elements.title
         title.Text = "AirHub"; title.Color = S.TextColor
         title.Position = Vector2.new(pos.X + paddingX, pos.Y + 7)
-
         local subtitle = HUD.Elements.subtitle
         subtitle.Text = "▸ connected"; subtitle.Color = S.MutedColor
         subtitle.Position = Vector2.new(pos.X + paddingX + 66, pos.Y + 12)
-
         local parts1 = {}
         if S.ShowPlayers then table.insert(parts1, string.format("Players  %d", #Players:GetPlayers())) end
         if S.ShowFPS     then table.insert(parts1, string.format("FPS  %d", HUD.CurrentFps)) end
         local line1 = HUD.Elements.line1
         line1.Text = table.concat(parts1, "     "); line1.Color = S.TextColor
         line1.Position = Vector2.new(pos.X + paddingX, pos.Y + 36)
-
         local parts2 = {}
         if S.ShowPing    then table.insert(parts2, string.format("Ping  %d ms", getPingMs())) end
         if S.ShowSession then table.insert(parts2,
@@ -268,7 +320,6 @@ local okInit, errInit = pcall(function()
         local line2 = HUD.Elements.line2
         line2.Text = table.concat(parts2, "     "); line2.Color = S.MutedColor
         line2.Position = Vector2.new(pos.X + paddingX, pos.Y + 58)
-
         HUD.Frames += 1
         local now = os.clock()
         if now - HUD.LastSample >= 1 then
@@ -276,7 +327,6 @@ local okInit, errInit = pcall(function()
             HUD.Frames = 0; HUD.LastSample = now
         end
     end
-
     local function StartHUD()
         local HUD = WallHack.Internal.HUD
         if HUD.Conn then return end
@@ -321,8 +371,7 @@ local okInit, errInit = pcall(function()
         if Se.Highlight then pcall(function() Se.Highlight:Destroy() end); Se.Highlight = nil end
     end
 
-    --// ChinaHat — ManaV2-style cone ----------------------------------------
-    -- [FIX-24] Classic cone mesh used by almost every exploit script.
+    --// ChinaHat -------------------------------------------------------------
     local HAT_CONE_MESH = "rbxassetid://1033714"
 
     local function getHatFolder()
@@ -339,9 +388,12 @@ local okInit, errInit = pcall(function()
 
     local function buildHat(head)
         local C = WallHack.Visuals.SelfESP.ChinaHat
+        -- [FIX-28] resolve material up front (never lets the loop crash)
+        local resolved = setChinaHatMaterialInternal(C.Material, true)
+
         local hat = Instance.new("Part")
         hat.Name = "AirHubChinaHat"
-        hat.Shape = Enum.PartType.Ball          -- safe primitive
+        hat.Shape = Enum.PartType.Ball
         hat.Size  = Vector3.new(1, 1, 1)
         hat.Anchored   = true
         hat.CanCollide = false
@@ -350,19 +402,18 @@ local okInit, errInit = pcall(function()
         hat.Massless   = true
         hat.CastShadow = false
         hat.Color      = C.Color
-        hat.Material   = Enum.Material[C.Material] or Enum.Material.Neon
+        hat.Material   = resolved
         hat.Transparency = C.Transparency
         hat.LocalTransparencyModifier = 0
         hat.CFrame = head.CFrame * CFrame.new(0, C.OffsetY, 0)
 
-        -- [FIX-24] cone mesh
         if C.UseMesh then
             local mesh = Instance.new("SpecialMesh")
             mesh.Name     = "AirHubHatMesh"
             mesh.MeshType = Enum.MeshType.FileMesh
             mesh.MeshId   = HAT_CONE_MESH
             mesh.Scale    = Vector3.new(C.Size, C.Size * 0.7, C.Size)
-            pcall(function() mesh.Parent = hat end)
+            mesh.Parent = hat
         end
 
         hat.Parent = getHatFolder()
@@ -382,21 +433,18 @@ local okInit, errInit = pcall(function()
         Se.HatHead = nil
     end
 
-    -- [FIX-25/26/27] self-heal + auto-rotate + rainbow + mesh-scale
     local function startHatLoop()
         local Se = WallHack.Internal.SelfESP
         if Se.HatConn then return end
         Se.HatConn = RunService.RenderStepped:Connect(function()
             if H.ShuttingDown then return end
 
-            -- refresh head ref
             if not Se.HatHead or not Se.HatHead.Parent then
                 local char = LocalPlayer.Character
                 local head = char and char:FindFirstChild("Head")
                 if head then Se.HatHead = head else return end
             end
 
-            -- rebuild if destroyed
             if not Se.HatPart or not Se.HatPart.Parent then
                 Se.HatPart = buildHat(Se.HatHead)
             end
@@ -405,7 +453,6 @@ local okInit, errInit = pcall(function()
             local head = Se.HatHead
             local C    = WallHack.Visuals.SelfESP.ChinaHat
 
-            -- [FIX-27] size goes through Mesh.Scale
             local mesh = hat:FindFirstChild("AirHubHatMesh")
             if C.UseMesh then
                 if not mesh then
@@ -418,17 +465,14 @@ local okInit, errInit = pcall(function()
                 local wantScale = Vector3.new(C.Size, C.Size * 0.7, C.Size)
                 if mesh.Scale ~= wantScale then mesh.Scale = wantScale end
             else
-                -- Ball fallback
                 if mesh then pcall(function() mesh:Destroy() end); mesh = nil end
                 local wantSize = Vector3.new(C.Size * 1.6, C.Size * 0.55, C.Size * 1.6)
                 if hat.Size ~= wantSize then hat.Size = wantSize end
             end
 
-            -- force visibility
             hat.LocalTransparencyModifier = 0
             hat.Transparency = C.Transparency
 
-            -- [FIX-26] rainbow color
             if C.Rainbow then
                 local hue = (os.clock() * (C.RainbowSpeed or 0.5)) % 1
                 hat.Color = Color3.fromHSV(hue, 1, 1)
@@ -436,12 +480,15 @@ local okInit, errInit = pcall(function()
                 hat.Color = C.Color
             end
 
-            if hat.Material ~= (Enum.Material[C.Material] or Enum.Material.Neon) then
-                hat.Material = Enum.Material[C.Material] or Enum.Material.Neon
+            -- [FIX-29] Use cached resolved material — never call Enum.Material[]
+            -- inside the loop (which could throw on bad input).
+            local SeResolved = Se.ResolvedMaterial or Enum.Material.Neon
+            if hat.Material ~= SeResolved then
+                hat.Material = SeResolved
             end
+
             if not hat.Anchored then hat.Anchored = true end
 
-            -- [FIX-25] rotation (auto or static)
             local angle
             if C.AutoRotate then
                 angle = (os.clock() * (C.RotateSpeed or 90)) % 360
@@ -460,6 +507,9 @@ local okInit, errInit = pcall(function()
         local head = char:FindFirstChild("Head")
         if not head then return end
         local Se = WallHack.Internal.SelfESP
+
+        -- Re-resolve material in case user changed C.Material while hat was off
+        setChinaHatMaterialInternal(WallHack.Visuals.SelfESP.ChinaHat.Material, true)
 
         if Se.HatPart and Se.HatPart.Parent then
             Se.HatHead = head; startHatLoop(); return
@@ -503,7 +553,10 @@ local okInit, errInit = pcall(function()
         if not hat then print("[AirHub][Hat] no HatPart"); return end
         local mesh = hat:FindFirstChild("AirHubHatMesh")
         print("[AirHub][Hat] ClassName: ", hat.ClassName)
-        print("[AirHub][Hat] Shape:     ", tostring(hat.Shape))
+        print("[AirHub][Hat] Material:  ", tostring(hat.Material),
+              " (schema = " .. tostring(WallHack.Visuals.SelfESP.ChinaHat.Material) .. ")")
+        print("[AirHub][Hat] Resolved:  ", tostring(Se.ResolvedMaterial))
+        print("[AirHub][Hat] Color:     ", tostring(hat.Color))
         print("[AirHub][Hat] Size:      ", tostring(hat.Size))
         print("[AirHub][Hat] Mesh:      ", mesh and ("FileMesh " .. mesh.MeshId) or "none")
         print("[AirHub][Hat] MeshScale: ", mesh and tostring(mesh.Scale) or "-")
@@ -615,7 +668,6 @@ local okInit, errInit = pcall(function()
             local posTR = cam:WorldToViewportPoint((hrpCF * CFrame.new(-size.X,  size.Y, 0)).Position)
             local posBL = cam:WorldToViewportPoint((hrpCF * CFrame.new( size.X, -size.Y - 0.5, 0)).Position)
             local posBR = cam:WorldToViewportPoint((hrpCF * CFrame.new(-size.X, -size.Y - 0.5, 0)).Position)
-
             if WallHack.Visuals.BoxSettings.Type == 2 then
                 t.Box.Square.Visible = true
                 for k, v in pairs(t.Box) do if k ~= "Square" then v.Visible = false end end
@@ -777,6 +829,7 @@ local okInit, errInit = pcall(function()
         local HUD = WallHack.Internal.HUD
         HUD.SessionStart = os.clock(); HUD.LastSample = os.clock()
         HUD.Frames = 0; HUD.CurrentFps = 0
+        setChinaHatMaterialInternal(WallHack.Visuals.SelfESP.ChinaHat.Material, true)
         ApplyGlowToAll(); StopHUD(); StopSelfESP()
     end
 
@@ -813,11 +866,28 @@ local okInit, errInit = pcall(function()
         return WallHack.Visuals.SelfESP.Enabled
     end
 
+    -- [FIX-30] Material setters with validation + warnings.
+    WallHack.Functions.SetChinaHatMaterial = function(name)
+        local resolved = setChinaHatMaterialInternal(name, false)
+        return resolved.Name
+    end
+    WallHack.Functions.GetChinaHatMaterial = function()
+        return WallHack.Internal.SelfESP.ResolvedMaterial
+    end
+    -- [FIX-31] Dropdown-ready list.
+    WallHack.Functions.ListValidMaterials = function()
+        local out = {}
+        for i, n in ipairs(VALID_PART_MATERIALS) do out[i] = n end
+        return out
+    end
+
+    -- Init material cache on load.
+    setChinaHatMaterialInternal(WallHack.Visuals.SelfESP.ChinaHat.Material, true)
+
     WallHack.ApplyGlowToAll     = ApplyGlowToAll
     WallHack.ApplyGlowForPlayer = ApplyGlowForPlayer
 end)
 
---// 3) Stub fallback
 if not okInit then
     warn("[AirHub] 04_wallhack: init error → " .. tostring(errInit))
     local noop = function() end
@@ -825,10 +895,12 @@ if not okInit then
         "Exit","Restart","ResetSettings","StartHUD","StopHUD","SetHUDEnabled",
         "StartSelfESP","StopSelfESP","RefreshSelfESP","DebugHat",
         "SetSelfESPEnabled","SetSelfESPChamsEnabled","SetSelfESPChinaHatEnabled",
-        "ApplyGlowToAll","ApplyGlowForPlayer",
+        "SetChinaHatMaterial","ApplyGlowToAll","ApplyGlowForPlayer",
     }) do WallHack.Functions[k] = WallHack.Functions[k] or noop end
-    WallHack.Functions.GetHUDEnabled     = WallHack.Functions.GetHUDEnabled     or function() return false end
-    WallHack.Functions.GetSelfESPEnabled = WallHack.Functions.GetSelfESPEnabled or function() return false end
+    WallHack.Functions.GetHUDEnabled       = WallHack.Functions.GetHUDEnabled       or function() return false end
+    WallHack.Functions.GetSelfESPEnabled   = WallHack.Functions.GetSelfESPEnabled   or function() return false end
+    WallHack.Functions.GetChinaHatMaterial = WallHack.Functions.GetChinaHatMaterial or function() return nil end
+    WallHack.Functions.ListValidMaterials  = WallHack.Functions.ListValidMaterials  or function() return {} end
 end
 
 print(okInit and "[AirHub] 04_wallhack: loaded OK" or "[AirHub] 04_wallhack: loaded in STUB mode")
