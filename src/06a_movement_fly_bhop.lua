@@ -1,5 +1,12 @@
 --// AirHub - 06a_movement_fly_bhop.lua
---// Fly + Bhop + Spider.
+--// Fly + Bhop + Spider + TargetOrbit.
+--//
+--// NEW: Fly.Settings.TargetOrbit — круговое движение (орбита) вокруг цели
+--// Aimbot'а через velocity. Скорость орбиты задаётся, радиус берётся из
+--// настроек (по умолчанию "недостающие стады" — разница между текущей
+--// дистанцией и целевым радиусом корректируется радиальной составляющей).
+--// Если цели нет — fallback на обычный флай (velocity по направлению
+--// movement keys).
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 06a: core not loaded"); return end
@@ -18,10 +25,22 @@ H.Fly = {
         Enabled = false, ToggleKey = "F", Toggle = false,
         Method = "BodyVelocity", Speed = 30, UpSpeed = 20,
         Smoothness = 0.5, UseKeys = true,
+
+        --// ==== Target Orbit ====
+        TargetOrbit = {
+            Enabled     = false,     --// включить орбиту вокруг цели Aimbot
+            OrbitSpeed  = 20,        --// тангенциальная скорость орбиты (studs/s)
+            Radius      = 15,        --// желаемый радиус орбиты (studs)
+            Height      = 0,         --// вертикальный сдвиг от target-позиции
+            Correction  = 3,         --// жёсткость радиальной коррекции
+            VerticalCorrection = 3,  --// жёсткость вертикальной коррекции
+            Clockwise   = true,      --// направление вращения
+            FallbackToFly = true,    --// если нет цели — обычный флай
+        },
     },
     Internal = {
         BodyVelocity = nil, LinearVelocity = nil, Attachment = nil,
-        Active = false, LastUpdate = 0,
+        Active = false, LastUpdate = 0, OrbitAngle = 0,
     },
 }
 local Fly = H.Fly
@@ -69,7 +88,6 @@ local function Fly_EnsureInstance(hrp)
         if not Fly.Internal.LinearVelocity or not Fly.Internal.LinearVelocity.Parent then
             local lv = Instance.new("LinearVelocity")
             lv.MaxForce = 9e9
-            --// FIXED: removed invalid `lv.VectorVectorVelocity` assignment
             lv.VectorVelocity = Vector3.new(0, 0, 0)
             lv.Attachment0 = Fly.Internal.Attachment
             lv.Parent = hrp
@@ -107,6 +125,105 @@ local function Fly_GetMoveDir()
     return moveDir
 end
 
+--// ---------------------------------------------------------------------------
+--// TARGET ORBIT
+--// ---------------------------------------------------------------------------
+
+--// Возвращает позицию текущей цели Aimbot (LockPart), либо nil.
+local function Fly_GetAimbotTargetPos()
+    local A = H.Aimbot
+    if not A then return nil end
+    local part = A.LockPartInstance
+    if part and part.Parent then
+        return part.Position
+    end
+    return nil
+end
+
+--// Клампление вектора до длины maxLen (без math.sign).
+local function Fly_ClampVec(v, maxLen)
+    local m = v.Magnitude
+    if m > maxLen and m > 0.0001 then
+        return v * (maxLen / m)
+    end
+    return v
+end
+
+--// Считает velocity для орбиты вокруг targetPos.
+--//   tangential   — вращение (по часовой / против) со скоростью OrbitSpeed
+--//   radial       — коррекция дистанции к Radius (те самые "недостающие стады")
+--//   vertical     — коррекция по Y к targetPos.Y + Height
+local function Fly_ComputeOrbitVelocity(hrp, targetPos)
+    local O = Fly.Settings.TargetOrbit
+    local orbitSpeed = O.OrbitSpeed or 20
+    local radius     = O.Radius     or 15
+    local height     = O.Height     or 0
+    local corr       = O.Correction or 3
+    local vCorr      = O.VerticalCorrection or 3
+
+    local toTarget = targetPos - hrp.Position
+    local horizontal = Vector3.new(toTarget.X, 0, toTarget.Z)
+    local dist = horizontal.Magnitude
+
+    local radialDir, tangentDir
+    if dist < 0.01 then
+        radialDir  = Vector3.new(1, 0, 0)
+        tangentDir = Vector3.new(0, 0, 1)
+    else
+        radialDir  = horizontal.Unit
+        --// тангенс: поворот radial на 90° вокруг Y
+        if O.Clockwise then
+            tangentDir = Vector3.new( radialDir.Z, 0, -radialDir.X)
+        else
+            tangentDir = Vector3.new(-radialDir.Z, 0,  radialDir.X)
+        end
+    end
+
+    --// касательная составляющая — сама орбита
+    local tangential = tangentDir * orbitSpeed
+
+    --// радиальная коррекция: сколько стадов НЕ ХВАТАЕТ до целевого радиуса
+    local radialError = dist - radius
+    local radial = radialDir * (radialError * corr)
+    --// ограничим радиальную составляющую, чтобы не вылетать с рывком
+    radial = Fly_ClampVec(radial, orbitSpeed)
+
+    --// вертикальная коррекция: тянемся к targetY
+    local targetY = targetPos.Y + height
+    local yVel = (targetY - hrp.Position.Y) * vCorr
+    if math.abs(yVel) > orbitSpeed then
+        yVel = (yVel > 0 and 1 or -1) * orbitSpeed
+    end
+
+    return tangential + radial + Vector3.new(0, yVel, 0)
+end
+
+--// Применяет velocity к HRP выбранным методом.
+local function Fly_ApplyVelocity(hrp, vel)
+    local S = Fly.Settings
+    local I = Fly.Internal
+    if S.Method == "BodyVelocity" then
+        if I.BodyVelocity then
+            I.BodyVelocity.Velocity = I.BodyVelocity.Velocity:Lerp(
+                vel, math.clamp(S.Smoothness, 0.01, 1))
+        end
+    elseif S.Method == "LinearVelocity" then
+        if I.LinearVelocity then
+            I.LinearVelocity.VectorVelocity = I.LinearVelocity.VectorVelocity:Lerp(
+                vel, math.clamp(S.Smoothness, 0.01, 1))
+        end
+    elseif S.Method == "Velocity" then
+        hrp.Velocity = vel
+    elseif S.Method == "CFrame" then
+        --// для CFrame используем дискретное смещение (dt посчитан в апдейте)
+        local now = tick()
+        local dt = now - (I.LastCFrameTick or now)
+        I.LastCFrameTick = now
+        if dt <= 0 or dt > 0.5 then dt = 1 / 60 end
+        hrp.CFrame = hrp.CFrame + (vel * dt)
+    end
+end
+
 local function Fly_Update()
     if H.ShuttingDown then return end
     local S = Fly.Settings
@@ -127,30 +244,39 @@ local function Fly_Update()
         return
     end
     Fly_EnsureInstance(hrp)
-    local moveDir = Fly_GetMoveDir()
-    local targetVel
-    if moveDir.Y ~= 0 then
-        targetVel = Vector3.new(moveDir.X * S.Speed, moveDir.Y * S.UpSpeed, moveDir.Z * S.Speed)
-    else
-        targetVel = Vector3.new(moveDir.X * S.Speed, 0, moveDir.Z * S.Speed)
+
+    local targetVel = nil
+
+    --// ==== TARGET ORBIT ====
+    local O = S.TargetOrbit
+    if O and O.Enabled then
+        local targetPos = Fly_GetAimbotTargetPos()
+        if targetPos then
+            targetVel = Fly_ComputeOrbitVelocity(hrp, targetPos)
+        elseif not O.FallbackToFly then
+            --// нет цели и fallback выключен — стоим на месте
+            targetVel = Vector3.new(0, 0, 0)
+        end
+        --// если fallback включён — targetVel остаётся nil и переходим к обычному флаю
     end
+
+    --// ==== ОБЫЧНЫЙ ФЛАЙ ====
+    if targetVel == nil then
+        local moveDir = Fly_GetMoveDir()
+        if moveDir.Y ~= 0 then
+            targetVel = Vector3.new(moveDir.X * S.Speed, moveDir.Y * S.UpSpeed, moveDir.Z * S.Speed)
+        else
+            targetVel = Vector3.new(moveDir.X * S.Speed, 0, moveDir.Z * S.Speed)
+        end
+    end
+
     local now = tick()
     local dt = now - I.LastUpdate
     if dt <= 0 or dt > 0.5 then dt = 1 / 60 end
     I.LastUpdate = now
-    if S.Method == "BodyVelocity" then
-        if I.BodyVelocity then
-            I.BodyVelocity.Velocity = I.BodyVelocity.Velocity:Lerp(targetVel, math.clamp(S.Smoothness, 0.01, 1))
-        end
-    elseif S.Method == "LinearVelocity" then
-        if I.LinearVelocity then
-            I.LinearVelocity.VectorVelocity = I.LinearVelocity.VectorVelocity:Lerp(targetVel, math.clamp(S.Smoothness, 0.01, 1))
-        end
-    elseif S.Method == "Velocity" then
-        hrp.Velocity = targetVel
-    elseif S.Method == "CFrame" then
-        hrp.CFrame = hrp.CFrame + (moveDir * S.Speed * dt)
-    end
+
+    Fly_ApplyVelocity(hrp, targetVel)
+
     local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
     if hum then hum.PlatformStand = true end
 end
@@ -200,6 +326,7 @@ Track(LocalPlayer.CharacterAdded:Connect(function()
     Fly_ClearInstances()
     Fly.Internal.Active = false
     Fly.Internal.LastUpdate = 0
+    Fly.Internal.OrbitAngle = 0
 end))
 
 Fly.Functions = {
@@ -207,10 +334,16 @@ Fly.Functions = {
         Fly.Settings = {
             Enabled = false, ToggleKey = "F", Toggle = false, Method = "BodyVelocity",
             Speed = 30, UpSpeed = 20, Smoothness = 0.5, UseKeys = true,
+            TargetOrbit = {
+                Enabled = false, OrbitSpeed = 20, Radius = 15, Height = 0,
+                Correction = 3, VerticalCorrection = 3, Clockwise = true,
+                FallbackToFly = true,
+            },
         }
         Fly_ClearInstances()
         Fly.Internal.Active = false
         Fly.Internal.LastUpdate = 0
+        Fly.Internal.OrbitAngle = 0
         local char = LocalPlayer.Character
         if char then
             local hum = char:FindFirstChildOfClass("Humanoid")
@@ -219,6 +352,8 @@ Fly.Functions = {
     end,
 }
 Fly.ClearInstances = Fly_ClearInstances
+Fly.GetAimbotTargetPos = Fly_GetAimbotTargetPos
+Fly.ComputeOrbitVelocity = Fly_ComputeOrbitVelocity
 
 H.Bhop = {
     Settings = {
