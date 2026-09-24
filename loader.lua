@@ -1,16 +1,3 @@
---// Features:
---//   • Supports FIVE AirHub versions (Full / Lite / Legacy / Original V2 / Original)
---//   • LOCAL PRIORITY: читает файлы из workspace (AirHub/src/...) если они есть,
---//     иначе качает по HTTP с GitHub. Так можно править модули локально
---//     без форка репозитория.
---//   • Version picker in the menu (5 buttons)
---//   • Kick Logger with reason-change detection
---//   • All bypasses embedded, selectable from menu (OFF by default)
---//   • Adonis AntiCheat bypass (Detected/Kill + debug.info shield)
---//   • replaceHumanoid(BAC) — мягкая подмена Humanoid с авто-фиксом камеры
---//     и перезапуском Animate (минимум побочек).
---//   • Bypass list sorted alphabetically
--- ============================================================================
 local AIRHUB_VERSIONS = {
     full = {
         id          = "full",
@@ -65,13 +52,22 @@ local AIRHUB_VERSIONS = {
         url         = "https://raw.githubusercontent.com/Exunys/AirHub/main/AirHub.lua",
         localPath   = "original.lua",
     },
+    --// NEW: custom menu for specific game 92648272637932
+    specific_game = {
+        id          = "specific_game",
+        label       = "Specific Game",
+        description = "Custom mod menu: Auto Mog / Auto Clicker / Noclip / Speed",
+        type        = "single",
+        url         = "https://raw.githubusercontent.com/lolipopins/airhub-remake/refs/heads/main/%2B1%20mog%20script",
+        localPath   = "+1 mog script.lua",
+    },
 }
 
 --// Порядок в UI (5 items - row 1: full, lite, legacy | row 2: original_v2, original)
+--// specific_game НЕ включён в меню — он подставляется автоматически по PlaceId.
 local AIRHUB_VERSION_ORDER = { "full", "lite", "legacy", "original_v2", "original" }
 
 --// Пробуем эти пути по порядку для локальных модулей и single-file версий.
---// Первый существующий файл побеждает. Если ничего нет — идём в HTTP.
 local LOCAL_DIRS_MODULES = {
     "AirHub/src/",
     "airhub/src/",
@@ -82,12 +78,15 @@ local LOCAL_DIRS_SINGLE = {
     "AirHub/",
     "airhub/",
     "",
+    ".",
 }
 
 local CONFIG = {
     MENU_TITLE      = "AirHub Loader",
     KICK_LOG_PREFIX = "[AirHub][KICK]",
     BLOCK_KICK      = true,
+    --// PlaceId, для которого подгружается specific_game
+    SPECIFIC_PLACE_ID = 92648272637932,
 }
 
 --// ============================================================================
@@ -504,28 +503,9 @@ end
 local Steps = {}
 
 --// ---- replaceHumanoid(BAC) --------------------------------------------------
---// Мягкая подмена Humanoid на клон. Сохраняем:
---//   • Animator (создаём свежий, чтобы animation pipeline запустился заново)
---//   • Animate (отключаем на время подмены и включаем обратно — он сам
---//     подхватит новый Humanoid/Animator; так анимации не отваливаются)
---//   • Camera (НЕ перепривязываем вслепую — наблюдаем и лечим только если
---//     subject указывает в никуда / на старый / на удалённый объект)
---//   • WalkSpeed / JumpPower / JumpHeight / Health / MaxHealth (снимок ДО)
---//
---// Гарантии «мягкости»:
---//   1) Ждём HumanoidRootPart — камера уже стабилизировалась.
---//   2) Старый Humanoid открепляется (Parent = nil), а НЕ удаляется сразу.
---//      Удаление отложено на 0.4 сек — модуль камеры и Animate успевают
---//      переключиться.
---//   3) Слабая таблица _replaced не даёт заменить один и тот же персонаж
---//      дважды (хук + ручной вызов — безопасно сосуществуют).
---//   4) Любая операция обёрнута в pcall — падение не рушит остальной пайплайн.
---// ============================================================================
 
 local _replaced = setmetatable({}, { __mode = "k" })
 
---// Мягкое перепривязывание камеры: срабатывает только если subject реально
---// потерян (nil / старый гуманоид / объект без Parent). Иначе — не трогаем.
 local function _fixCameraIfBroken(newHumanoid, oldHumanoid)
     local cam = workspace.CurrentCamera
     if not cam or not newHumanoid or not newHumanoid.Parent then return end
@@ -545,24 +525,21 @@ end
 
 local function replaceHumanoid(character)
     if not character or typeof(character) ~= "Instance" then return nil end
-    if _replaced[character] then return nil end  -- уже подменён ранее
+    if _replaced[character] then return nil end
 
     local oldHumanoid = character:WaitForChild("Humanoid", 10)
     if not oldHumanoid then return nil end
 
-    --// 1. Даём персонажу полностью собраться (камера уже смотрит на него)
     if not character.PrimaryPart then
         character:WaitForChild("HumanoidRootPart", 5)
     end
-    tick()  -- пропускаем кадр — плеер-модуль успевает инициализироваться
+    tick()
 
-    _replaced[character] = true  -- помечаем сразу, чтобы хук и ручной вызов не дублировались
+    _replaced[character] = true
 
     local okRun = pcall(function()
-        --// 2. Снимок Animate (позже перезапустим)
         local animate = character:FindFirstChild("Animate")
 
-        --// 3. Стопаем треки на СТАРОМ Animator, но его не трогаем
         local oldAnimator = oldHumanoid:FindFirstChildOfClass("Animator")
         if oldAnimator then
             pcall(function()
@@ -572,7 +549,6 @@ local function replaceHumanoid(character)
             end)
         end
 
-        --// 4. Снимок статов ДО открепления
         local stats = {
             WalkSpeed  = oldHumanoid.WalkSpeed,
             JumpPower  = oldHumanoid.JumpPower,
@@ -581,20 +557,16 @@ local function replaceHumanoid(character)
             Health     = oldHumanoid.Health,
         }
 
-        --// 5. Клонируем
         oldHumanoid.Archivable = true
         local okClone, newHumanoid = pcall(function() return oldHumanoid:Clone() end)
         if not okClone or not newHumanoid then
             error("clone failed")
         end
 
-        --// 6. Гасим Animate на время подмены (иначе он может дёрнуть
-        --//    уже мёртвый Animator и наплодить warning'ов)
         if animate then
             pcall(function() animate.Disabled = true end)
         end
 
-        --// 7. Открепляем старый (не удаляем!), ставим новый
         pcall(function()
             oldHumanoid.Name = "_OldHumanoid"
             oldHumanoid.Parent = nil
@@ -603,26 +575,21 @@ local function replaceHumanoid(character)
         newHumanoid.Name = "Humanoid"
         newHumanoid.Parent = character
 
-        --// 8. Свежий Animator для нового Humanoid
         local newAnimator = Instance.new("Animator")
         newAnimator.Parent = newHumanoid
 
-        --// 9. Статы (Health клампим, чтобы не улететь выше максимума)
         newHumanoid.WalkSpeed  = stats.WalkSpeed
         newHumanoid.JumpPower  = stats.JumpPower
         newHumanoid.JumpHeight = stats.JumpHeight
         newHumanoid.MaxHealth  = stats.MaxHealth
         newHumanoid.Health     = math.clamp(stats.Health, 0, stats.MaxHealth)
 
-        --// 10. Перезапускаем Animate — он сам найдёт новый Humanoid/Animator
         if animate then
             task.defer(function()
                 pcall(function() animate.Disabled = false end)
             end)
         end
 
-        --// 11. Лечим камеру в несколько точек времени — не спамим,
-        --//     а срабатываем только если сломалась
         _fixCameraIfBroken(newHumanoid, oldHumanoid)
         for _, d in ipairs({ 0.05, 0.15, 0.30, 0.50 }) do
             task.delay(d, function()
@@ -630,22 +597,19 @@ local function replaceHumanoid(character)
             end)
         end
 
-        --// 12. Уничтожаем старый только после того, как всё устоялось
         task.delay(0.4, function()
             pcall(function() oldHumanoid:Destroy() end)
         end)
     end)
 
     if not okRun then
-        _replaced[character] = nil  -- разрешаем повторную попытку
+        _replaced[character] = nil
         return nil
     end
 
     return character:FindFirstChild("Humanoid")
 end
 
---// Единственный коннект на CharacterAdded. Повторный вызов
---// installHumanoidReplaceHook не создаст второй хук.
 local _humanoid_hook_conn = nil
 
 local function installHumanoidReplaceHook()
@@ -1044,13 +1008,6 @@ end
 --// ============================================================================
 --// ADONIS ANTICHEAT BYPASS
 --// ============================================================================
---// Adonis держит детектор в GC-таблице со ссылками "Detected"/"Kill".
---//   1) Detected -> всегда возвращает true (флага нет)
---//   2) Kill     -> no-op (пусть думает, что убил)
---//   3) debug.info -> прячет подмену Detected от Adonis-чекера
---// Порядок важен: сначала опускаем identity до 2, чтобы getgc(true)
---// отдал нужные таблицы, потом поднимаем обратно.
---// ============================================================================
 
 local function _adonis_getGC()
     local getgc = getExec("getgc")
@@ -1090,7 +1047,6 @@ Steps.adonis = function()
         return "skipped (getgc missing)"
     end
 
-    -- Понижаем thread identity, чтобы GC-скан отдал античит-таблицы
     local saved_id = _adonis_getIdentity()
     _adonis_setIdentity(2)
 
@@ -1109,7 +1065,6 @@ Steps.adonis = function()
                 if typeof(DetectFunc) == "function" and not Detected then
                     Detected = DetectFunc
                     local ok_hook = pcall(hookfunction, Detected, function(Action, Info, NoCrash)
-                        -- Всегда говорим "чисто" — Adonis не флагает
                         return true
                     end)
                     if ok_hook then
@@ -1125,7 +1080,7 @@ Steps.adonis = function()
                    and not Kill then
                     Kill = KillFunc
                     local ok_hook = pcall(hookfunction, Kill, function(Info)
-                        -- no-op: пусть Adonis думает, что убил
+                        -- no-op
                     end)
                     if ok_hook then
                         table.insert(hooked, "Kill")
@@ -1142,7 +1097,6 @@ Steps.adonis = function()
         return "scan failed: " .. tostring(scan_err)
     end
 
-    -- Хукаем debug.info, чтобы Adonis не увидел подмену Detected
     if Detected and getrenv then
         local ok_env, renv = pcall(getrenv)
         if ok_env and type(renv) == "table" and type(renv.debug) == "table" then
@@ -1151,7 +1105,6 @@ Steps.adonis = function()
                 local wrapped = function(...)
                     local LevelOrFunc = ...
                     if LevelOrFunc == Detected then
-                        -- Заставляем Adonis подавиться yield'ом
                         return coroutine.yield(coroutine.running())
                     end
                     return oldInfo(...)
@@ -1167,7 +1120,6 @@ Steps.adonis = function()
         end
     end
 
-    -- Восстанавливаем thread identity
     _adonis_setIdentity(saved_id or 7)
 
     if #hooked == 0 then
@@ -1181,7 +1133,6 @@ end
 --// ============================================================================
 --// MENU
 --// ============================================================================
---// Список отсортирован по алфавиту (по label).
 local BYPASS_OPTIONS = {
     { id = "adonis",           label = "Adonis AntiCheat Bypass",   default = false },
     { id = "anti_detect",      label = "Anti-Detection Shield",     default = false },
@@ -1499,7 +1450,6 @@ end
 local function loadSingleFile(url, name, localFileName, localDirs)
     local src, source
 
-    --// 1) Try LOCAL first (readfile in workspace)
     if localFileName then
         local localSrc, localPath = tryReadLocal(localFileName, localDirs or LOCAL_DIRS_MODULES)
         if localSrc then
@@ -1508,7 +1458,6 @@ local function loadSingleFile(url, name, localFileName, localDirs)
         end
     end
 
-    --// 2) Fall back to HTTP
     if not src then
         src = httpGet(url)
         source = "HTTP:" .. tostring(url)
@@ -1578,13 +1527,33 @@ local function loadAirHub(versionId)
 end
 
 --// ============================================================================
+--// SPECIFIC GAME AUTO-DETECT
+--// ============================================================================
+--// Если игрок в игре с PlaceId = 92648272637932 — грузим наш кастомный
+--// мод-меню (Auto Mog / Auto Clicker / Noclip / Speed).
+--// Иначе — AirHub Full.
+local function isSpecificGame()
+    local ok, pid = pcall(function() return game.PlaceId end)
+    if not ok or type(pid) ~= "number" then return false end
+    return pid == CONFIG.SPECIFIC_PLACE_ID
+end
+
+--// ============================================================================
 --// MAIN FLOW
 --// ============================================================================
 local function startFlow()
     buildMenu(function(cfg)
         destroyMenu()
-        local versionId = cfg._version or "full"
-        say(string.format("[AirHub] user config applied | version = %s", versionId))
+
+        local versionId
+        if isSpecificGame() then
+            versionId = "specific_game"
+            say(string.format("[AirHub] detected PlaceId %d -> loading SPECIFIC GAME menu",
+                CONFIG.SPECIFIC_PLACE_ID))
+        else
+            versionId = cfg._version or "full"
+            say(string.format("[AirHub] user config applied | version = %s", versionId))
+        end
 
         runSelectedBypasses(cfg)
 
@@ -1606,10 +1575,12 @@ pcall(function()
         installKickLogger      = installAllKickHooks,
         logKick                = logKick,
         resetKickTracking      = resetKickTracking,
-        replaceHumanoid        = replaceHumanoid,           -- replaceHumanoid(BAC)
+        replaceHumanoid        = replaceHumanoid,
         installReplaceHook     = installHumanoidReplaceHook,
         steps                  = Steps,
         versions               = AIRHUB_VERSIONS,
+        isSpecificGame         = isSpecificGame,
+        specificPlaceId        = CONFIG.SPECIFIC_PLACE_ID,
     }
 end)
 
