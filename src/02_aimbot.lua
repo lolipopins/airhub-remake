@@ -60,9 +60,6 @@ H.Aimbot = {
         PredictionTime = 0.15,
         TargetNPCs    = false,
         NPCNameFilter = "",
-
-        --// NEW: target update rate. 120 is plenty for human reaction speeds.
-        --// Higher values waste CPU at 240+ FPS with no benefit.
         AimbotHz = 120,
 
         AutoShoot = {
@@ -106,10 +103,9 @@ H.Aimbot = {
     Locked      = nil,
     LockPartInstance = nil,
     Internal    = {
-        TargetAccum  = 0,       --// for throttling target selection
-        FovAccum     = 0,       --// for throttling FOV circle
-        LastHookState = {},     --// mode -> true/false (installed or not)
-        LastManageKey = nil,    --// hash of current desired hook state
+        TargetAccum  = 0,
+        FovAccum     = 0,
+        LastManageKey = nil,
     },
 
     AutoDetect = {
@@ -140,10 +136,6 @@ local VISIBLE_PARTS = {
     "Head", "HumanoidRootPart", "UpperTorso", "LowerTorso",
     "Torso", "Left Arm", "Right Arm",
 }
-
---// ---------------------------------------------------------------------------
---// Helpers
---// ---------------------------------------------------------------------------
 
 local function ShouldBypassWallCheck()
     return Aimbot.Settings.TPAimEnabled or Aimbot.Settings.WallbangEnabled
@@ -733,9 +725,6 @@ local function GetEffectiveMode()
     return m
 end
 
---// Hook lifecycle: hooks stay INSTALLED while mode is selected + SilentAim on.
---// They only REDIRECT while Running (trigger key held). This is the fix for
---// high-fps races where the hook couldn't install between keypress and shot.
 local function IsModeHooked(mode)
     if Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode == mode then
         return Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim
@@ -745,7 +734,6 @@ local function IsModeHooked(mode)
        and GetEffectiveMode() == mode
 end
 
---// Whether the hook should actually redirect the call
 local function ShouldRedirect(mode)
     if Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode == mode then
         return true
@@ -753,7 +741,6 @@ local function ShouldRedirect(mode)
     return IsModeHooked(mode) and Running
 end
 
---// Backwards-compat: some code paths still call IsModeActive.
 local function IsModeActive(mode)
     return IsModeHooked(mode)
 end
@@ -1173,7 +1160,6 @@ local function SetupRayHook()
             if not ShouldRedirect("RayHook") then
                 return oldRayIndex(t, k)
             end
-            --// Fast path: use cached LockPartInstance set by the throttled loop
             local target = Aimbot.LockPartInstance
             if target then
                 local origin = oldRayIndex(t, 'Origin')
@@ -1666,10 +1652,7 @@ task.spawn(function()
     end
 end)
 
---// ManageHooks — only rebuilds hook state when something actually changed.
---// At 240 FPS this saves ~230 no-op checks per second.
 local function ManageHooks()
-    local m = GetEffectiveMode()
     local autoScanMode = Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode or nil
     local desired = {}
 
@@ -1686,7 +1669,6 @@ local function ManageHooks()
     desired.CFrameHook       = want("CFrameHook")
     desired.Vector3New       = want("Vector3New")
 
-    --// early-out if nothing changed since last frame
     local key = table.concat({
         tostring(desired.RayHook),
         tostring(desired.RayNew),
@@ -1744,7 +1726,7 @@ local function RunAutoScan()
                     warn("[AutoScan] Testing " .. mode .. " (" .. tostring(Aimbot.Settings.AutoTestDuration) .. "s)...")
                     Aimbot.AutoDetect.TestMode      = mode
                     Aimbot.AutoDetect.HookCallCount = 0
-                    Aimbot.Internal.LastManageKey = nil  --// force ManageHooks to run
+                    Aimbot.Internal.LastManageKey = nil
 
                     task.wait(0.15)
 
@@ -1807,7 +1789,11 @@ local function LoadAimbot()
         local dt = math.min(0.033, now - lastDelta)
         lastDelta = now
 
-        --// FOV circle — throttle to 60 Hz (no reason to update faster)
+        --// guard against nil accumulators (may happen if a handler set them incorrectly)
+        if type(Aimbot.Internal.FovAccum) ~= "number" then Aimbot.Internal.FovAccum = 0 end
+        if type(Aimbot.Internal.TargetAccum) ~= "number" then Aimbot.Internal.TargetAccum = 0 end
+
+        --// FOV circle at 60 Hz
         Aimbot.Internal.FovAccum = Aimbot.Internal.FovAccum + dt
         if Aimbot.Internal.FovAccum >= (1 / 60) then
             Aimbot.Internal.FovAccum = 0
@@ -1823,8 +1809,7 @@ local function LoadAimbot()
             end
         end
 
-        --// Target selection — throttled to AimbotHz (default 120). At 240+ FPS
-        --// this halves or quarters CPU spent on target selection.
+        --// target selection at AimbotHz
         local hz = math.max(30, math.min(1000, Aimbot.Settings.AimbotHz or 120))
         local interval = 1 / hz
         Aimbot.Internal.TargetAccum = Aimbot.Internal.TargetAccum + dt
@@ -1846,7 +1831,7 @@ local function LoadAimbot()
                                 workspace.CurrentCamera.CFrame = CFrame.new(workspace.CurrentCamera.CFrame.Position, targetPos)
                             else
                                 local targetCF = CFrame.new(workspace.CurrentCamera.CFrame.Position, targetPos)
-                                local smoothFactor = 1 - math.exp(-Aimbot.Settings.AimSmoothingSpeed * (1 / hz))
+                                local smoothFactor = 1 - math.exp(-Aimbot.Settings.AimSmoothingSpeed * interval)
                                 workspace.CurrentCamera.CFrame = workspace.CurrentCamera.CFrame:Lerp(targetCF, smoothFactor)
                             end
                         end
@@ -1855,7 +1840,6 @@ local function LoadAimbot()
             end
         end
 
-        --// ManageHooks — cheap thanks to LastManageKey cache
         ManageHooks()
     end))
 
@@ -1877,8 +1861,8 @@ local function LoadAimbot()
             else
                 Running = true
             end
-            --// force one immediate target refresh so the very first shot uses fresh data
-            Aimbot.Internal.TargetAccum = interval
+            --// force immediate target refresh next frame (no dependency on local scope)
+            Aimbot.Internal.TargetAccum = 999
         end
     end))
 
