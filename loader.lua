@@ -13,7 +13,8 @@
 --//   • replaceHumanoid(BAC) — мягкая подмена Humanoid с авто-фиксом камеры
 --//     и перезапуском Animate (минимум побочек).
 --//   • Bypass list sorted alphabetically
---//   • 11_quotas.lua loads ONLY when game.PlaceId == QUOTAS_PLACE_ID
+--//   • "arsenal extra tab" loads ONLY when game.PlaceId == ARSENAL_PLACE_ID
+--//   • sanitizeSource(): ловит HTTP 404 / HTML-ответы ДО loadstring
 --// ============================================================================
 
 local AIRHUB_VERSIONS = {
@@ -36,7 +37,7 @@ local AIRHUB_VERSIONS = {
             "08_world.lua",
             "09_exploits.lua",
             "10_hud.lua",
-            "11_quotas.lua",
+            "arsenal extra tab",   -- ← переименованный 11_quotas.lua
         },
     },
     lite = {
@@ -81,10 +82,8 @@ local AIRHUB_VERSIONS = {
     },
 }
 
---// Порядок в UI: row 1: full, lite, legacy | row 2: original_v2, original | row 3: specific_game
 local AIRHUB_VERSION_ORDER = { "full", "lite", "legacy", "original_v2", "original", "specific_game" }
 
---// Пробуем эти пути по порядку для локальных модулей и single-file версий.
 local LOCAL_DIRS_MODULES = {
     "AirHub/src/",
     "airhub/src/",
@@ -102,13 +101,11 @@ local CONFIG = {
     MENU_TITLE      = "AirHub Loader",
     KICK_LOG_PREFIX = "[AirHub][KICK]",
     BLOCK_KICK      = true,
-    --// PlaceId для автоопределения (если хочешь оставить авто-режим)
     SPECIFIC_PLACE_ID = 92648272637932,
-    --// 11_quotas.lua загружается ТОЛЬКО в этой игре (Arsenal).
-    --// В любой другой PlaceId файл даже не скачивается.
-    QUOTAS_PLACE_ID   = 286090429,
-    --// Имя модуля, который попадает под PlaceId-фильтр.
-    QUOTAS_FILE       = "11_quotas.lua",
+    --// "arsenal extra tab" загружается ТОЛЬКО в этой игре (Arsenal).
+    ARSENAL_PLACE_ID  = 286090429,
+    --// Имя файла-модуля (без .lua) для PlaceId-фильтра.
+    ARSENAL_FILE      = "arsenal extra tab",
 }
 
 --// ============================================================================
@@ -185,6 +182,41 @@ local function httpGet(url)
         if ok and type(res) == "string" and #res > 0 then return res end
     end
     return nil
+end
+
+--// Проверяет, что источник — реальный Lua, а не 404-страница.
+local function sanitizeSource(src)
+    if type(src) ~= "string" or #src == 0 then
+        return nil, "empty source"
+    end
+
+    local trimmed = src:gsub("^%s+", "")
+    local head = trimmed:sub(1, 200)
+    local lowerHead = head:lower()
+
+    if lowerHead:find("^404: not found", 1, true)
+       or lowerHead:find("^404 not found", 1, true)
+       or lowerHead:find("^<!doctype html", 1, true)
+       or lowerHead:find("^<html", 1, true)
+       or lowerHead:find("this repository is empty", 1, true)
+       or lowerHead:find("page not found", 1, true)
+       or lowerHead:find("\"message\":\"not found\"", 1, true)
+    then
+        return nil, "HTTP 404 / not found (file missing on remote?)"
+    end
+
+    local looksLikeLua = lowerHead:find("local ", 1, true)
+        or lowerHead:find("--", 1, true)
+        or lowerHead:find("return", 1, true)
+        or lowerHead:find("if ", 1, true)
+        or lowerHead:find("getgenv", 1, true)
+        or lowerHead:find("warn(", 1, true)
+
+    if not looksLikeLua then
+        return nil, "response does not look like Lua source"
+    end
+
+    return src
 end
 
 local function tryReadLocal(filename, dirs)
@@ -1485,25 +1517,36 @@ local function loadSingleFile(url, name, localFileName, localDirs)
         source = "HTTP:" .. tostring(url)
     end
 
-    if not src then return false, "no source (local + http both failed)" end
+    if not src then
+        return false, "no source (local + http both failed)"
+    end
 
-    local chunk, err = compile(src, name or "airhub_file")
-    if not chunk then return false, "compile [" .. source .. "]: " .. tostring(err) end
+    --// Ловим 404-страницы от GitHub ДО loadstring.
+    local cleanSrc, sanErr = sanitizeSource(src)
+    if not cleanSrc then
+        return false, string.format("bad source [%s]: %s", source, tostring(sanErr))
+    end
+
+    local chunk, err = compile(cleanSrc, name or "airhub_file")
+    if not chunk then
+        return false, "compile [" .. source .. "]: " .. tostring(err)
+    end
     local ok, rerr = pcall(chunk)
-    if not ok then return false, "runtime [" .. source .. "]: " .. tostring(rerr) end
+    if not ok then
+        return false, "runtime [" .. source .. "]: " .. tostring(rerr)
+    end
 
     say("[AirHub]  loaded " .. tostring(name) .. "  <-  " .. source)
     return true
 end
 
---// Ключевая функция: решает, грузить ли файл в текущей игре.
 local function shouldLoadFile(file)
-    if file == CONFIG.QUOTAS_FILE then
+    if file == CONFIG.ARSENAL_FILE then
         local pid = game.PlaceId
-        if pid ~= CONFIG.QUOTAS_PLACE_ID then
+        if pid ~= CONFIG.ARSENAL_PLACE_ID then
             return false, string.format(
                 "skipped (wrong place: %d, need %d)",
-                tonumber(pid) or -1, CONFIG.QUOTAS_PLACE_ID)
+                tonumber(pid) or -1, CONFIG.ARSENAL_PLACE_ID)
         end
     end
     return true
@@ -1517,8 +1560,10 @@ local function loadModularVersion(version)
             skipped += 1
             say(string.format("[AirHub] %s: %s", file, tostring(reason)))
         else
+            --// URL-encode пробелы для HTTP-запроса
+            local urlFile = file:gsub(" ", "%%20")
             local loaded_ok, err = loadSingleFile(
-                version.repo .. file,
+                version.repo .. urlFile,
                 file,
                 file,
                 LOCAL_DIRS_MODULES
@@ -1576,10 +1621,10 @@ local function isSpecificGame()
     return pid == CONFIG.SPECIFIC_PLACE_ID
 end
 
-local function isQuotasGame()
+local function isArsenalGame()
     local ok, pid = pcall(function() return game.PlaceId end)
     if not ok or type(pid) ~= "number" then return false end
-    return pid == CONFIG.QUOTAS_PLACE_ID
+    return pid == CONFIG.ARSENAL_PLACE_ID
 end
 
 --// ============================================================================
@@ -1591,9 +1636,9 @@ local function startFlow()
 
         local versionId = cfg._version or "full"
         say(string.format("[AirHub] user config applied | version = %s", versionId))
-        say(string.format("[AirHub] PlaceId = %d | quotas module = %s",
+        say(string.format("[AirHub] PlaceId = %d | arsenal extra tab = %s",
             tonumber(game.PlaceId) or -1,
-            isQuotasGame() and "ENABLED" or "DISABLED"))
+            isArsenalGame() and "ENABLED" or "DISABLED"))
 
         runSelectedBypasses(cfg)
 
@@ -1621,9 +1666,10 @@ pcall(function()
         versions               = AIRHUB_VERSIONS,
         isSpecificGame         = isSpecificGame,
         specificPlaceId        = CONFIG.SPECIFIC_PLACE_ID,
-        isQuotasGame           = isQuotasGame,
-        quotasPlaceId          = CONFIG.QUOTAS_PLACE_ID,
-        quotasFile             = CONFIG.QUOTAS_FILE,
+        isArsenalGame          = isArsenalGame,
+        arsenalPlaceId         = CONFIG.ARSENAL_PLACE_ID,
+        arsenalFile            = CONFIG.ARSENAL_FILE,
+        sanitizeSource         = sanitizeSource,
     }
 end)
 
