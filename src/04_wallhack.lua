@@ -1,12 +1,11 @@
 --// ============================================================================
---// AirHub — 04_wallhack.lua (patched 6 — material fix)
+--// AirHub — 04_wallhack.lua (patched 7 — live material watching)
 --//
---// r6 changelog:
---//   [FIX-28] resolveMaterial(): pcall-safe enum resolver. No more silent
---//            fallback / loop crash on invalid or lowercase material names.
---//   [FIX-29] Loop uses cached resolved material — no Enum.Material[...] throws.
---//   [FIX-30] SetChinaHatMaterial / GetChinaHatMaterial with warnings.
---//   [FIX-31] ListValidMaterials() for UI dropdowns + transparency warnings.
+--// r7 changelog:
+--//   [FIX-32] Loop watches C.Material every frame; re-resolves on change.
+--//            Direct assignment C.Material = "Wood" now works instantly.
+--//   [FIX-33] ForceMaterialRefresh() public helper.
+--//   [FIX-34] LastSchemaMaterial tracking to detect schema-side changes.
 --// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 04_wallhack: core not loaded") return end
@@ -19,7 +18,6 @@ WallHack._Loaded = true
 WallHack.Settings = WallHack.Settings or {
     Enabled = false, TeamCheck = false, AliveCheck = true,
 }
-
 WallHack.Visuals = WallHack.Visuals or {}
 WallHack.Visuals.BoxSettings = WallHack.Visuals.BoxSettings or {
     Enabled = true, Type = 1,
@@ -68,7 +66,8 @@ WallHack.Internal = WallHack.Internal or {
     SelfESP = {
         Highlight = nil, HatPart = nil, HatHead = nil,
         HatConn = nil, CharConn = nil, HatFolder = nil,
-        ResolvedMaterial = Enum.Material.Neon,   -- [FIX-29] cache
+        ResolvedMaterial = Enum.Material.Neon,
+        LastSchemaMaterial = nil,           -- [FIX-34]
     },
 }
 WallHack.WrappedPlayers = WallHack.WrappedPlayers or {}
@@ -121,11 +120,6 @@ local okInit, errInit = pcall(function()
     local LocalPlayer   = Util.LocalPlayer
     local SanitizeColor = Util.SanitizeColor or function(c) return c end
 
-    --// -----------------------------------------------------------------------
-    --// [FIX-31] Valid Part materials — subset of Enum.Material that works on
-    --// Parts. Excludes Terrain-only ones (Water, Air, LeafyGrass, ...).
-    --// Glass / ForceField ARE valid but need Transparency > 0 to be visible.
-    --// -----------------------------------------------------------------------
     local VALID_PART_MATERIALS = {
         "Plastic", "SmoothPlastic", "Neon", "Wood", "WoodPlanks",
         "Marble", "Slate", "Concrete", "Granite", "Brick",
@@ -135,34 +129,24 @@ local okInit, errInit = pcall(function()
         "Metal", "CorrodedMetal", "DiamondPlate", "Foil",
         "Glass", "ForceField",
     }
-    local TRANSPARENCY_REQUIRED = { Glass = true, ForceField = true }
 
-    -- [FIX-28] Bulletproof enum resolver.
     local function resolveMaterial(name)
-        if typeof(name) == "EnumItem" then
-            return name, true
-        end
-        if type(name) ~= "string" or name == "" then
-            return Enum.Material.Neon, false
-        end
-        -- Try exact.
+        if typeof(name) == "EnumItem" then return name end
+        if type(name) ~= "string" or name == "" then return Enum.Material.Neon end
         local ok, m = pcall(function() return Enum.Material[name] end)
-        if ok and m then return m, true end
-        -- Try case-normalized match.
+        if ok and m then return m end
         local lower = name:lower()
-        for _, validName in ipairs(VALID_PART_MATERIALS) do
-            if validName:lower() == lower then
-                local ok2, m2 = pcall(function() return Enum.Material[validName] end)
-                if ok2 and m2 then return m2, true end
+        for _, v in ipairs(VALID_PART_MATERIALS) do
+            if v:lower() == lower then
+                local ok2, m2 = pcall(function() return Enum.Material[v] end)
+                if ok2 and m2 then return m2 end
             end
         end
-        return Enum.Material.Neon, false
+        return Enum.Material.Neon
     end
 
     local function setChinaHatMaterialInternal(name, silent)
-        local resolved, valid = resolveMaterial(name)
-        -- Reject Terrain-only materials (Ice/Glacier/Snow are valid on Parts;
-        -- Water/Air/etc. aren't in VALID_PART_MATERIALS so they won't resolve).
+        local resolved = resolveMaterial(name)
         local nameStr = resolved.Name
         local isAllowed = false
         for _, n in ipairs(VALID_PART_MATERIALS) do
@@ -170,28 +154,17 @@ local okInit, errInit = pcall(function()
         end
         if not isAllowed then
             resolved = Enum.Material.Neon
-            valid = false
+            if not silent then
+                warn(string.format(
+                    "[AirHub][ChinaHat] invalid Material '%s' → Neon. "..
+                    "ListValidMaterials() shows allowed values.", tostring(name)))
+            end
         end
-
         WallHack.Visuals.SelfESP.ChinaHat.Material = resolved.Name
         WallHack.Internal.SelfESP.ResolvedMaterial = resolved
-
-        if not valid and not silent then
-            warn(string.format(
-                "[AirHub][ChinaHat] invalid Material '%s' → falling back to Neon. "..
-                "Use ListValidMaterials() to see allowed values.", tostring(name)))
-        end
-        if TRANSPARENCY_REQUIRED[resolved.Name]
-           and (WallHack.Visuals.SelfESP.ChinaHat.Transparency or 0) <= 0
-           and not silent then
-            warn(string.format(
-                "[AirHub][ChinaHat] Material '%s' is INVISIBLE when Transparency == 0. "..
-                "Set C.Transparency > 0 (e.g. 0.5) to see it.", resolved.Name))
-        end
         return resolved
     end
 
-    --// helpers --------------------------------------------------------------
     local function getPingMs()
         local ok, raw = pcall(function() return LocalPlayer:GetNetworkPing() end)
         if not ok or type(raw) ~= "number" then return 0 end
@@ -213,7 +186,7 @@ local okInit, errInit = pcall(function()
         end
     end
 
-    --// HUD ------------------------------------------------------------------
+    --// HUD
     local function hudNewText(size, font)
         local t = Drawing.new("Text")
         t.Font = font or 2; t.Size = size or 14
@@ -344,7 +317,7 @@ local okInit, errInit = pcall(function()
         HUD.Elements = {}; HUD.Visible = false
     end
 
-    --// Chams ----------------------------------------------------------------
+    --// Chams
     local function applyChamsProps(hl)
         local C = WallHack.Visuals.SelfESP.Chams
         hl.FillColor = C.FillColor; hl.OutlineColor = C.OutlineColor
@@ -371,7 +344,7 @@ local okInit, errInit = pcall(function()
         if Se.Highlight then pcall(function() Se.Highlight:Destroy() end); Se.Highlight = nil end
     end
 
-    --// ChinaHat -------------------------------------------------------------
+    --// ChinaHat
     local HAT_CONE_MESH = "rbxassetid://1033714"
 
     local function getHatFolder()
@@ -388,8 +361,8 @@ local okInit, errInit = pcall(function()
 
     local function buildHat(head)
         local C = WallHack.Visuals.SelfESP.ChinaHat
-        -- [FIX-28] resolve material up front (never lets the loop crash)
         local resolved = setChinaHatMaterialInternal(C.Material, true)
+        WallHack.Internal.SelfESP.LastSchemaMaterial = C.Material   -- [FIX-34]
 
         local hat = Instance.new("Part")
         hat.Name = "AirHubChinaHat"
@@ -453,6 +426,13 @@ local okInit, errInit = pcall(function()
             local head = Se.HatHead
             local C    = WallHack.Visuals.SelfESP.ChinaHat
 
+            -- [FIX-32] Watch schema-side material. Any change → re-resolve.
+            if Se.LastSchemaMaterial ~= C.Material then
+                setChinaHatMaterialInternal(C.Material, true)
+                Se.LastSchemaMaterial = C.Material
+            end
+
+            -- mesh / size
             local mesh = hat:FindFirstChild("AirHubHatMesh")
             if C.UseMesh then
                 if not mesh then
@@ -470,9 +450,11 @@ local okInit, errInit = pcall(function()
                 if hat.Size ~= wantSize then hat.Size = wantSize end
             end
 
+            -- visibility
             hat.LocalTransparencyModifier = 0
             hat.Transparency = C.Transparency
 
+            -- color
             if C.Rainbow then
                 local hue = (os.clock() * (C.RainbowSpeed or 0.5)) % 1
                 hat.Color = Color3.fromHSV(hue, 1, 1)
@@ -480,11 +462,10 @@ local okInit, errInit = pcall(function()
                 hat.Color = C.Color
             end
 
-            -- [FIX-29] Use cached resolved material — never call Enum.Material[]
-            -- inside the loop (which could throw on bad input).
-            local SeResolved = Se.ResolvedMaterial or Enum.Material.Neon
-            if hat.Material ~= SeResolved then
-                hat.Material = SeResolved
+            -- material (uses freshly resolved cache from FIX-32 watcher)
+            local resolved = Se.ResolvedMaterial or Enum.Material.Neon
+            if hat.Material ~= resolved then
+                hat.Material = resolved
             end
 
             if not hat.Anchored then hat.Anchored = true end
@@ -507,9 +488,6 @@ local okInit, errInit = pcall(function()
         local head = char:FindFirstChild("Head")
         if not head then return end
         local Se = WallHack.Internal.SelfESP
-
-        -- Re-resolve material in case user changed C.Material while hat was off
-        setChinaHatMaterialInternal(WallHack.Visuals.SelfESP.ChinaHat.Material, true)
 
         if Se.HatPart and Se.HatPart.Parent then
             Se.HatHead = head; startHatLoop(); return
@@ -547,27 +525,34 @@ local okInit, errInit = pcall(function()
         removeChams(); removeChinaHat()
     end
 
+    -- [FIX-33] Force re-resolve from schema.
+    local function ForceMaterialRefresh()
+        local Se = WallHack.Internal.SelfESP
+        local C  = WallHack.Visuals.SelfESP.ChinaHat
+        setChinaHatMaterialInternal(C.Material, false)
+        Se.LastSchemaMaterial = C.Material
+        if Se.HatPart then
+            Se.HatPart.Material = Se.ResolvedMaterial
+        end
+        return Se.ResolvedMaterial.Name
+    end
+
     local function DebugHat()
         local Se = WallHack.Internal.SelfESP
         local hat = Se.HatPart
         if not hat then print("[AirHub][Hat] no HatPart"); return end
         local mesh = hat:FindFirstChild("AirHubHatMesh")
-        print("[AirHub][Hat] ClassName: ", hat.ClassName)
-        print("[AirHub][Hat] Material:  ", tostring(hat.Material),
-              " (schema = " .. tostring(WallHack.Visuals.SelfESP.ChinaHat.Material) .. ")")
-        print("[AirHub][Hat] Resolved:  ", tostring(Se.ResolvedMaterial))
-        print("[AirHub][Hat] Color:     ", tostring(hat.Color))
-        print("[AirHub][Hat] Size:      ", tostring(hat.Size))
-        print("[AirHub][Hat] Mesh:      ", mesh and ("FileMesh " .. mesh.MeshId) or "none")
-        print("[AirHub][Hat] MeshScale: ", mesh and tostring(mesh.Scale) or "-")
-        print("[AirHub][Hat] Position:  ", tostring(hat.Position))
-        print("[AirHub][Hat] Parent:    ", tostring(hat.Parent))
-        print("[AirHub][Hat] Transp:    ", hat.Transparency)
-        print("[AirHub][Hat] LTM:       ", hat.LocalTransparencyModifier)
-        print("[AirHub][Hat] CamDist:   ", (hat.Position - workspace.CurrentCamera.CFrame.Position).Magnitude)
+        print("[AirHub][Hat] Schema.Material:  ", tostring(WallHack.Visuals.SelfESP.ChinaHat.Material))
+        print("[AirHub][Hat] LastSchemaMat:    ", tostring(Se.LastSchemaMaterial))
+        print("[AirHub][Hat] ResolvedMaterial: ", tostring(Se.ResolvedMaterial))
+        print("[AirHub][Hat] Part.Material:    ", tostring(hat.Material))
+        print("[AirHub][Hat] Mesh:             ", mesh and ("FileMesh " .. mesh.MeshId) or "none")
+        print("[AirHub][Hat] MeshScale:        ", mesh and tostring(mesh.Scale) or "-")
+        print("[AirHub][Hat] Transp:           ", hat.Transparency)
+        print("[AirHub][Hat] LTM:              ", hat.LocalTransparencyModifier)
     end
 
-    --// Glow -----------------------------------------------------------------
+    --// Glow
     local function ApplyGlowForPlayer(plr)
         local data = WallHack.WrappedPlayers[plr.Name]
         if not data then return end
@@ -627,7 +612,7 @@ local okInit, errInit = pcall(function()
         end
     end
 
-    --// Boxes ----------------------------------------------------------------
+    --// Boxes
     local function AddBox(plr)
         local t = WallHack.WrappedPlayers[plr.Name]
         if not t then return end
@@ -804,7 +789,7 @@ local okInit, errInit = pcall(function()
     end
     LoadWH()
 
-    --// Public API -----------------------------------------------------------
+    --// Public API
     WallHack.Functions.Exit = function()
         ReWrapToken += 1
         for _, v in pairs(WHConnections) do pcall(function() v:Disconnect() end) end
@@ -829,7 +814,7 @@ local okInit, errInit = pcall(function()
         local HUD = WallHack.Internal.HUD
         HUD.SessionStart = os.clock(); HUD.LastSample = os.clock()
         HUD.Frames = 0; HUD.CurrentFps = 0
-        setChinaHatMaterialInternal(WallHack.Visuals.SelfESP.ChinaHat.Material, true)
+        ForceMaterialRefresh()
         ApplyGlowToAll(); StopHUD(); StopSelfESP()
     end
 
@@ -866,23 +851,28 @@ local okInit, errInit = pcall(function()
         return WallHack.Visuals.SelfESP.Enabled
     end
 
-    -- [FIX-30] Material setters with validation + warnings.
     WallHack.Functions.SetChinaHatMaterial = function(name)
         local resolved = setChinaHatMaterialInternal(name, false)
+        WallHack.Internal.SelfESP.LastSchemaMaterial =
+            WallHack.Visuals.SelfESP.ChinaHat.Material
+        if WallHack.Internal.SelfESP.HatPart then
+            WallHack.Internal.SelfESP.HatPart.Material = resolved
+        end
         return resolved.Name
     end
     WallHack.Functions.GetChinaHatMaterial = function()
         return WallHack.Internal.SelfESP.ResolvedMaterial
     end
-    -- [FIX-31] Dropdown-ready list.
     WallHack.Functions.ListValidMaterials = function()
         local out = {}
         for i, n in ipairs(VALID_PART_MATERIALS) do out[i] = n end
         return out
     end
+    WallHack.Functions.ForceMaterialRefresh = ForceMaterialRefresh   -- [FIX-33]
 
-    -- Init material cache on load.
     setChinaHatMaterialInternal(WallHack.Visuals.SelfESP.ChinaHat.Material, true)
+    WallHack.Internal.SelfESP.LastSchemaMaterial =
+        WallHack.Visuals.SelfESP.ChinaHat.Material
 
     WallHack.ApplyGlowToAll     = ApplyGlowToAll
     WallHack.ApplyGlowForPlayer = ApplyGlowForPlayer
@@ -895,7 +885,8 @@ if not okInit then
         "Exit","Restart","ResetSettings","StartHUD","StopHUD","SetHUDEnabled",
         "StartSelfESP","StopSelfESP","RefreshSelfESP","DebugHat",
         "SetSelfESPEnabled","SetSelfESPChamsEnabled","SetSelfESPChinaHatEnabled",
-        "SetChinaHatMaterial","ApplyGlowToAll","ApplyGlowForPlayer",
+        "SetChinaHatMaterial","ForceMaterialRefresh",
+        "ApplyGlowToAll","ApplyGlowForPlayer",
     }) do WallHack.Functions[k] = WallHack.Functions[k] or noop end
     WallHack.Functions.GetHUDEnabled       = WallHack.Functions.GetHUDEnabled       or function() return false end
     WallHack.Functions.GetSelfESPEnabled   = WallHack.Functions.GetSelfESPEnabled   or function() return false end
