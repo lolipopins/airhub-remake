@@ -107,7 +107,7 @@ H.Aimbot = {
         TargetAccum  = 0,
         FovAccum     = 0,
         LastManageKey = nil,
-        LockedGhost  = nil,   --// currently locked ghost (Model) if target is a ghost
+        LockedGhost  = nil,
     },
 
     AutoDetect = {
@@ -155,6 +155,13 @@ local function IsBacktrackEnabled()
     return true
 end
 
+--// Проверка что Instance не разрушен и его можно использовать
+local function IsAlive(inst)
+    if not inst then return false end
+    local ok, parent = pcall(function() return inst.Parent end)
+    return ok and parent ~= nil
+end
+
 local function ResolveOwnerCharacter(character)
     if not character then return nil end
     if character:GetAttribute("AirHub_Ghost") then
@@ -179,7 +186,6 @@ local function ResolveOwnerPlayer(character)
     return Players:GetPlayerFromCharacter(character)
 end
 
---// Ghost targeting is now tied to UseBacktrack (no separate toggle).
 local function GetBacktrackGhostTargets()
     if not Aimbot.Settings.UseBacktrack then return {} end
     if not IsBacktrackEnabled() then return {} end
@@ -218,9 +224,9 @@ end
 
 local function PredictPartPosition(part)
     if not part then return Vector3.new(0, 0, 0) end
+    if not IsAlive(part) then return Vector3.new(0, 0, 0) end
 
-    --// Ghost: no backtrack needed, already at the backtrack position
-    if part.Parent and part.Parent:GetAttribute("AirHub_Ghost") then
+    if part.Parent:GetAttribute("AirHub_Ghost") then
         return part.Position
     end
 
@@ -333,8 +339,13 @@ local function GetLockedCharacter()
     local L = Aimbot.Locked
     if not L then return nil end
     if typeof(L) == "Instance" and L:IsA("Player") then
-        if Aimbot.Internal.LockedGhost and Aimbot.Internal.LockedGhost.Parent then
+        --// ghost priority, but only if still alive
+        if Aimbot.Internal.LockedGhost and IsAlive(Aimbot.Internal.LockedGhost) then
             return Aimbot.Internal.LockedGhost
+        end
+        --// ghost died — fall back to real character
+        if Aimbot.Internal.LockedGhost then
+            Aimbot.Internal.LockedGhost = nil
         end
         return L.Character
     end
@@ -365,6 +376,7 @@ local function IsPointVisible(origin, pt, params)
 end
 
 local function GetVisiblePoint_Fast(origin, part)
+    if not IsAlive(part) then return nil end
     local params = BuildRayParams(part.Parent)
     local predicted = PredictPartPosition(part)
     if IsPointVisible(origin, predicted, params) then return predicted end
@@ -373,6 +385,7 @@ local function GetVisiblePoint_Fast(origin, part)
 end
 
 local function GetNearestVisibleMultipoint(origin, part, refScreen)
+    if not IsAlive(part) then return nil end
     local params = BuildRayParams(part.Parent)
     local pts = GetMultipoints(part)
     local bestPt, bestDist = nil, math.huge
@@ -402,7 +415,8 @@ local function GetClosestMultipointToMouse(part, refScreen)
 end
 
 local function GetVisiblePointOnPart(origin, part)
-    if not part or not part:IsA("BasePart") then return nil end
+    --// safety: part destroyed → bail out
+    if not part or not part:IsA("BasePart") or not IsAlive(part) then return nil end
 
     local aimPos = PredictPartPosition(part)
 
@@ -496,6 +510,7 @@ end
 local function IsTargetValid(character, player)
     if not character then return false end
     if character == LocalPlayer.Character then return false end
+    if not IsAlive(character) then return false end
 
     local isGhost = character:GetAttribute("AirHub_Ghost") == true
 
@@ -549,7 +564,7 @@ local function LockedTargetStillInFOV()
     if Aimbot.Settings.IgnoreFOV then return true end
     if not Aimbot.FOVSettings.Enabled then return true end
     local part = Aimbot.LockPartInstance
-    if not part or not part.Parent then return true end
+    if not part or not IsAlive(part) then return true end
     local point = PredictPartPosition(part)
     local vec, on = workspace.CurrentCamera:WorldToViewportPoint(point)
     if not on then return false end
@@ -638,7 +653,7 @@ local function GetClosestPlayer()
                     end
                 end
             end
-            if targetPart then
+            if targetPart and IsAlive(targetPart) then
                 local point = GetVisiblePointOnPart(origin, targetPart) or PredictPartPosition(targetPart)
                 local vec, on = workspace.CurrentCamera:WorldToViewportPoint(point)
                 local dist
@@ -735,7 +750,7 @@ local function RefreshOldPositionIfNeeded()
 end
 
 local function WaitForShotPoint(targetPart)
-    if not targetPart then return nil, false end
+    if not targetPart or not IsAlive(targetPart) then return nil, false end
     if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
         return PredictPartPosition(targetPart), true
     end
@@ -746,6 +761,7 @@ local function WaitForShotPoint(targetPart)
     local deadline = tick() + (H.DELAY_SHOT_TIMEOUT or 0.1)
     while tick() < deadline and not H.ShuttingDown do
         task.wait(0.005)
+        if not IsAlive(targetPart) then return nil, false end
         pt = GetVisiblePointOnPart(GetCheckOrigin(), targetPart)
         if pt then return pt, true end
     end
@@ -1124,7 +1140,7 @@ end
 
 local function PerformSilentShot(targetPart, btn, wasVisible)
     if not Aimbot.Settings.SilentAim then return end
-    if not targetPart then return end
+    if not targetPart or not IsAlive(targetPart) then return end
 
     local targetChar = targetPart.Parent
     if not targetChar then return end
@@ -1304,7 +1320,7 @@ local function SetupRayHook()
                 return oldRayIndex(t, k)
             end
             local target = Aimbot.LockPartInstance
-            if target then
+            if target and IsAlive(target) then
                 local origin = oldRayIndex(t, 'Origin')
                 local vp = GetVisiblePointOnPart(origin, target)
                 if vp then return (vp - origin).Unit
@@ -1349,7 +1365,7 @@ local function SetupRayNewHook()
                     return RayNewOriginal(origin, direction)
                 end
                 local target = Aimbot.LockPartInstance
-                if target then
+                if target and IsAlive(target) then
                     local aimPos = PredictPartPosition(target)
                     local dir = aimPos - origin
                     if dir.Magnitude > 0.001 then
@@ -1404,7 +1420,7 @@ local function SetupVector3UnitHook()
                     return V3_oldIndex(self, k)
                 end
                 local target = Aimbot.LockPartInstance
-                if target then
+                if target and IsAlive(target) then
                     local aimPos = PredictPartPosition(target)
                     local camPos = workspace.CurrentCamera.CFrame.Position
                     local dir = aimPos - camPos
@@ -1449,7 +1465,7 @@ local function SetupScreenPointToRayHook()
                 return SPR_Original(self, x, y)
             end
             local target = Aimbot.LockPartInstance
-            if target then
+            if target and IsAlive(target) then
                 local aimPos = PredictPartPosition(target)
                 local camPos = self.CFrame.Position
                 local dir = aimPos - camPos
@@ -1481,7 +1497,7 @@ local originalGetMouse = nil
 
 local function GetMouseSpoof()
     local target = Aimbot.LockPartInstance
-    if not target then return nil end
+    if not target or not IsAlive(target) then return nil end
     local origin = GetCheckOrigin()
     local vp = GetVisiblePointOnPart(origin, target)
     if vp then return vp end
@@ -1523,7 +1539,7 @@ local function SetupMouseHook()
                             return realMouse[k]
                         end
                         local target = Aimbot.LockPartInstance
-                        if target then
+                        if target and IsAlive(target) then
                             local aimPos = GetMouseSpoof() or PredictPartPosition(target)
                             if k == "Hit" then return aimPos end
                             if k == "UnitRay" then
@@ -1583,7 +1599,7 @@ local function SetupFireServerHook()
                 end
 
                 local target = Aimbot.LockPartInstance
-                if target then
+                if target and IsAlive(target) then
                     local aimPos = GetMouseSpoof() or PredictPartPosition(target)
                     local camPos = workspace.CurrentCamera.CFrame.Position
                     local correctDir = (aimPos - camPos)
@@ -1654,7 +1670,8 @@ local function SetupGunHandlerHook()
             if not ShouldRedirect("GunHandler") then
                 return GunHandlerOldShoot(p1, p2, p3, p4, p5, p6, p7, p8)
             end
-            if Hg.Aimbot.Locked and Hg.Aimbot.LockPartInstance then
+            if Hg.Aimbot.Locked and Hg.Aimbot.LockPartInstance
+               and IsAlive(Hg.Aimbot.LockPartInstance) then
                 if p1 == LocalPlayer then
                     RefreshOldPositionIfNeeded()
                     local pt = WaitForShotPoint(Hg.Aimbot.LockPartInstance)
@@ -1706,7 +1723,7 @@ local function SetupCFrameHook()
                     return CFrameHookOriginal(at, lookAt, up)
                 end
                 local target = Aimbot.LockPartInstance
-                if target and typeof(at) == "Vector3" then
+                if target and IsAlive(target) and typeof(at) == "Vector3" then
                     local aimPos = PredictPartPosition(target)
                     if typeof(up) == "Vector3" then
                         return CFrameHookOriginal(at, aimPos, up)
@@ -1758,7 +1775,7 @@ local function SetupVector3NewHook()
                             return Vector3NewOriginal(x, y, z)
                         end
                         local target = Aimbot.LockPartInstance
-                        if target then
+                        if target and IsAlive(target) then
                             local aimPos = PredictPartPosition(target)
                             local camPos = workspace.CurrentCamera.CFrame.Position
                             local dir = aimPos - camPos
@@ -1959,7 +1976,7 @@ local function LoadAimbot()
             if Aimbot.Settings.Enabled and Running then
                 GetClosestPlayer()
                 Aimbot.FOVCircle.Color = Color3.fromRGB(255, 255, 255)
-                if Aimbot.Locked and Aimbot.LockPartInstance then
+                if Aimbot.Locked and Aimbot.LockPartInstance and IsAlive(Aimbot.LockPartInstance) then
                     local targetPart = Aimbot.LockPartInstance
                     local origin = GetCheckOrigin()
                     local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
@@ -2037,7 +2054,7 @@ local function LoadAimbot()
         if Aimbot.Settings.AutoShoot.Enabled then return end
 
         local targetPart = Aimbot.LockPartInstance
-        if targetPart then
+        if targetPart and IsAlive(targetPart) then
             if Aimbot.Settings.SilentAim then
                 PerformSilentShot(targetPart, btn, nil)
             else
@@ -2066,7 +2083,7 @@ local function LoadAimbot()
                 if nowt - LastShotTime < Aimbot.Settings.AutoShoot.FireRate then return end
 
                 local targetPart = Aimbot.LockPartInstance
-                if not targetPart then return end
+                if not targetPart or not IsAlive(targetPart) then CancelLock() return end
                 local targetChar = targetPart.Parent
                 if not targetChar then return end
                 local hum = targetChar:FindFirstChildOfClass("Humanoid")
@@ -2119,7 +2136,7 @@ Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     local kc = Util.SafeKeyCode(key)
     if kc and inp.KeyCode == kc then
         Aimbot.TPAimInternal.KeyHeld = true
-        if Aimbot.LockPartInstance then
+        if Aimbot.LockPartInstance and IsAlive(Aimbot.LockPartInstance) then
             PerformInfiniteTP(Aimbot.LockPartInstance, 0)
         end
     end
