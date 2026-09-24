@@ -61,6 +61,7 @@ H.Aimbot = {
         TargetNPCs    = false,
         NPCNameFilter = "",
         AimbotHz = 120,
+        IgnoreGameProcessed = true,  --// NEW: trigger key fires even if game consumes input
 
         AutoShoot = {
             Enabled = false,
@@ -1789,11 +1790,9 @@ local function LoadAimbot()
         local dt = math.min(0.033, now - lastDelta)
         lastDelta = now
 
-        --// guard against nil accumulators (may happen if a handler set them incorrectly)
         if type(Aimbot.Internal.FovAccum) ~= "number" then Aimbot.Internal.FovAccum = 0 end
         if type(Aimbot.Internal.TargetAccum) ~= "number" then Aimbot.Internal.TargetAccum = 0 end
 
-        --// FOV circle at 60 Hz
         Aimbot.Internal.FovAccum = Aimbot.Internal.FovAccum + dt
         if Aimbot.Internal.FovAccum >= (1 / 60) then
             Aimbot.Internal.FovAccum = 0
@@ -1809,7 +1808,6 @@ local function LoadAimbot()
             end
         end
 
-        --// target selection at AimbotHz
         local hz = math.max(30, math.min(1000, Aimbot.Settings.AimbotHz or 120))
         local interval = 1 / hz
         Aimbot.Internal.TargetAccum = Aimbot.Internal.TargetAccum + dt
@@ -1843,8 +1841,12 @@ local function LoadAimbot()
         ManageHooks()
     end))
 
+    --// TRIGGER KEY — ignores gpe (games consume RMB for ADS etc.)
     Track(UserInputService.InputBegan:Connect(function(inp, gpe)
-        if gpe or Typing then return end
+        if Typing then return end
+        --// if IgnoreGameProcessed is false, respect gpe
+        if not Aimbot.Settings.IgnoreGameProcessed and gpe then return end
+
         local triggerKey = Aimbot.Settings.TriggerKey
         local keyPressed = false
         if inp.UserInputType == Enum.UserInputType.Keyboard then
@@ -1861,7 +1863,7 @@ local function LoadAimbot()
             else
                 Running = true
             end
-            --// force immediate target refresh next frame (no dependency on local scope)
+            --// force target refresh on next frame
             Aimbot.Internal.TargetAccum = 999
         end
     end))
@@ -1883,6 +1885,7 @@ local function LoadAimbot()
         end
     end))
 
+    --// SHOOT handler — respects gpe (don't shoot when clicking UI)
     Track(UserInputService.InputBegan:Connect(function(inp, gpe)
         if gpe or Typing then return end
         if not Aimbot.Settings.Enabled then return end
@@ -1973,7 +1976,7 @@ Track(UserInputService.TextBoxFocused:Connect(function() Typing = true end))
 Track(UserInputService.TextBoxFocusReleased:Connect(function() Typing = false end))
 
 Track(UserInputService.InputBegan:Connect(function(inp, gpe)
-    if gpe or Typing then return end
+    if Typing then return end
     if not Aimbot.Settings.TPAimEnabled then return end
     if Aimbot.Settings.TPAimMethod ~= "InfiniteTP" then return end
     local key = Aimbot.Settings.TPAimKey or "E"
@@ -2154,6 +2157,7 @@ local function Diagnose()
         T(S.TPAimDistance ~= nil,            "TPAimDistance", tostring(S.TPAimDistance))
         T(S.WallbangDistance ~= nil,         "WallbangDistance", tostring(S.WallbangDistance))
         T(S.AimbotHz ~= nil,                 "AimbotHz", tostring(S.AimbotHz))
+        T(S.IgnoreGameProcessed ~= nil,      "IgnoreGameProcessed", tostring(S.IgnoreGameProcessed))
     end
 
     warn("-- AntiAim dependency --")
