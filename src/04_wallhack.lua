@@ -113,11 +113,35 @@ local okInit, errInit = pcall(function()
     local SanitizeColor = Util.SanitizeColor or function(c) return c end
 
     --// ------------------------------------------------------------------------
+    --// Team check из Aimbot — единый источник правил.
+    --// Возвращает true, если plr считается врагом по настройкам Aimbot.
+    --// Если Aimbot не загружен / TeamCheck выключен → все считаются врагами.
+    --// ------------------------------------------------------------------------
+    local function IsEnemyByAimbot(plr)
+        if not plr or plr == LocalPlayer then return false end
+        local A = H.Aimbot
+        if not A or not A.Settings or not A.Settings.TeamCheck then return true end
+        local tc = A.Settings.TeamCheck
+        if not tc.Enabled then return true end
+        local lt, tt = LocalPlayer.Team, plr.Team
+        local mode = tc.Mode or "Enemies"
+        if mode == "All" then return true end
+        if mode == "Enemies" then
+            if lt and tt and lt == tt then return false end
+            if (not lt or not tt) and not tc.TreatNeutralAsEnemy then return false end
+            return true
+        elseif mode == "Allies" then
+            return (lt ~= nil and tt ~= nil and lt == tt) and true or false
+        elseif mode == "IgnoreNeutrals" then
+            if not lt or not tt then return false end
+            return lt ~= tt
+        end
+        return true
+    end
+
+    --// ------------------------------------------------------------------------
     --// Material handling
     --// ------------------------------------------------------------------------
-    -- NOTE: "Wood" is at index 4. If your build lists materials elsewhere and
-    -- Wood is missing, it's that OTHER list — this file supports Wood natively.
-
     local VALID_PART_MATERIALS = {
         "Plastic", "SmoothPlastic", "Neon", "Wood", "WoodPlanks",
         "Marble", "Slate", "Concrete", "Granite", "Brick",
@@ -128,11 +152,9 @@ local okInit, errInit = pcall(function()
         "Glass", "ForceField",
     }
 
-    -- O(1) validation set (exact-name).
     local MATERIAL_SET = {}
     for _, n in ipairs(VALID_PART_MATERIALS) do MATERIAL_SET[n] = true end
 
-    -- Case-insensitive name → canonical name.
     local MATERIAL_LOOKUP = {}
     do
         local ok, items = pcall(function() return Enum.Material:GetEnumItems() end)
@@ -166,7 +188,6 @@ local okInit, errInit = pcall(function()
         return Enum.Material.Neon
     end
 
-    -- [FIX-45] Wipe anything that could visually override the base material.
     local function stripMaterialOverrides(part)
         if not part then return end
         local mv = part:FindFirstChildOfClass("MaterialVariant")
@@ -175,7 +196,6 @@ local okInit, errInit = pcall(function()
         if sa then pcall(function() sa:Destroy() end) end
     end
 
-    -- [FIX-45 / FIX-38] Centralized material application.
     local function applyMaterialToPart(part, materialEnum)
         if not part or not part.Parent then return end
         if not materialEnum or typeof(materialEnum) ~= "EnumItem" then return end
@@ -191,7 +211,6 @@ local okInit, errInit = pcall(function()
         end
     end
 
-    -- Applies to schema + cache + live part. Returns resolved Enum.Material.
     local function setChinaHatMaterialInternal(name, silent)
         local resolved = resolveMaterial(name)
         local nameStr  = resolved.Name
@@ -216,7 +235,6 @@ local okInit, errInit = pcall(function()
         return resolved
     end
 
-    -- [FIX-47] Direct EnumItem setter (bypasses string coercion entirely).
     local function setChinaHatMaterialDirect(enumItem)
         if typeof(enumItem) ~= "EnumItem" or enumItem.EnumType ~= Enum.Material then
             warn("[AirHub][ChinaHat] SetChinaHatMaterialDirect expects an Enum.Material")
@@ -428,9 +446,6 @@ local okInit, errInit = pcall(function()
 
         local hat = Instance.new("Part")
         hat.Name = "AirHubChinaHat"
-        -- [FIX-46] Only force a primitive Shape when we're NOT using a FileMesh.
-        -- FileMesh owns the geometry, so leaving Shape alone avoids UV weirdness
-        -- that can make Wood/Marble/Slate look flat.
         if not C.UseMesh then
             hat.Shape = Enum.PartType.Ball
         end
@@ -497,7 +512,6 @@ local okInit, errInit = pcall(function()
             local head = Se.HatHead
             local C    = WallHack.Visuals.SelfESP.ChinaHat
 
-            -- Schema watcher: re-resolve + apply on any change.
             if Se.LastSchemaMaterial ~= C.Material then
                 local newResolved = setChinaHatMaterialInternal(C.Material, true)
                 Se.LastSchemaMaterial = C.Material
@@ -507,7 +521,6 @@ local okInit, errInit = pcall(function()
                 end
             end
 
-            -- mesh / size
             local mesh = hat:FindFirstChild("AirHubHatMesh")
             if C.UseMesh then
                 if not mesh then
@@ -779,15 +792,21 @@ local okInit, errInit = pcall(function()
             local char = plr.Character
             local hum  = char and char:FindFirstChildOfClass("Humanoid")
             if char and hum then
-                if WallHack.Settings.AliveCheck then t.Checks.Alive = hum.Health > 0
-                else t.Checks.Alive = true end
-                if not WallHack.Settings.TeamCheck then t.Checks.Team = true
+                if WallHack.Settings.AliveCheck then
+                    t.Checks.Alive = hum.Health > 0
                 else
-                    local a, b = LocalPlayer.Team, plr.Team
-                    t.Checks.Team = (a ~= nil and b ~= nil and a ~= b) and true or false
+                    t.Checks.Alive = true
+                end
+
+                if not WallHack.Settings.TeamCheck then
+                    t.Checks.Team = true
+                else
+                    --// ← Team check берётся ИЗ AIMBOT (single source of truth)
+                    t.Checks.Team = IsEnemyByAimbot(plr)
                 end
             else
-                t.Checks.Alive = false; t.Checks.Team = false
+                t.Checks.Alive = false
+                t.Checks.Team = false
             end
             ApplyGlowForPlayer(plr)
         end)
@@ -940,7 +959,7 @@ local okInit, errInit = pcall(function()
             WallHack.Visuals.SelfESP.ChinaHat.Material
         return resolved.Name
     end
-    WallHack.Functions.SetChinaHatMaterialDirect = setChinaHatMaterialDirect   -- [FIX-47]
+    WallHack.Functions.SetChinaHatMaterialDirect = setChinaHatMaterialDirect
     WallHack.Functions.GetChinaHatMaterial = function()
         return WallHack.Internal.SelfESP.ResolvedMaterial
     end
@@ -951,15 +970,12 @@ local okInit, errInit = pcall(function()
     end
     WallHack.Functions.ForceMaterialRefresh = ForceMaterialRefresh
 
-    -- [FIX-43] Named shortcuts: H.WallHack.Functions.Wood(), .Neon(), .Marble()...
-    -- Each one returns the applied material name.
     for _, materialName in ipairs(VALID_PART_MATERIALS) do
         WallHack.Functions[materialName] = function()
             return WallHack.Functions.SetChinaHatMaterial(materialName)
         end
     end
 
-    -- Bootstrap caches.
     setChinaHatMaterialInternal(WallHack.Visuals.SelfESP.ChinaHat.Material, true)
     WallHack.Internal.SelfESP.LastSchemaMaterial =
         WallHack.Visuals.SelfESP.ChinaHat.Material
