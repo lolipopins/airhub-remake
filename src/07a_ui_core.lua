@@ -344,6 +344,7 @@ task.delay(math.random(1, 3), function()
         if Aimbot.FOVSettings then Aimbot.FOVSettings[key] = val end
     end
 
+    --// ==== Main ====
     local secA = H._UI.AimbotTab:CreateSection({ Name = "Main" })
     secA:AddToggle({ Name = "Enabled", Value = AS.Enabled or false,
         Callback = function(v) aSet("Enabled", v) end })
@@ -366,11 +367,15 @@ task.delay(math.random(1, 3), function()
     secA:AddSlider({ Name = "Smoothing Speed", Value = AS.AimSmoothingSpeed or 6,
         Min = 1, Max = 20,
         Callback = function(v) aSet("AimSmoothingSpeed", v) end })
+    secA:AddSlider({ Name = "Aimbot Update Rate (Hz)", Value = AS.AimbotHz or 120,
+        Min = 30, Max = 500,
+        Callback = function(v) aSet("AimbotHz", v) end })
     secA:AddToggle({ Name = "Target NPCs (rigs/dummies)", Value = AS.TargetNPCs or false,
         Callback = function(v) aSet("TargetNPCs", v) end })
     secA:AddTextbox({ Name = "NPC name filter (optional, substring)", Value = AS.NPCNameFilter or "",
         Callback = function(v) aSet("NPCNameFilter", v) end })
 
+    --// ==== Prediction ====
     local predSec = H._UI.AimbotTab:CreateSection({ Name = "Prediction" })
     predSec:AddToggle({ Name = "Enabled", Value = AS.PredictionEnabled or false,
         Callback = function(v) aSet("PredictionEnabled", v) end })
@@ -384,6 +389,7 @@ task.delay(math.random(1, 3), function()
         Min = 0.01, Max = 0.5, Decimals = 2,
         Callback = function(v) aSet("PredictionTime", v) end })
 
+    --// ==== Visibility ====
     local secW = H._UI.AimbotTab:CreateSection({ Name = "Visibility", Side = "Right" })
     secW:AddToggle({ Name = "WallCheck", Value = AS.WallCheck or false,
         Callback = function(v) aSet("WallCheck", v) end })
@@ -429,6 +435,9 @@ task.delay(math.random(1, 3), function()
         List = silentAimModes,
         Callback = function(v)
             aSet("SilentAimMode", v)
+            --// force re-manage on next frame
+            if Aimbot.Internal then Aimbot.Internal.LastManageKey = nil end
+
             if v ~= "RayHook"          and Aimbot.RemoveRayHook         then pcall(Aimbot.RemoveRayHook)         end
             if v ~= "RayNew"           and Aimbot.RemoveRayNewHook      then pcall(Aimbot.RemoveRayNewHook)      end
             if v ~= "Vector3Unit"      and Aimbot.RemoveVector3UnitHook then pcall(Aimbot.RemoveVector3UnitHook) end
