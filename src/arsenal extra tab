@@ -80,7 +80,7 @@ local function BuildNameTag(plr)
     if not head then return end
 
     local gui = Instance.new("BillboardGui")
-    gui.Name          = "AirHub_Quotas_NameTag"
+    gui.Name          = "AirHub_Arsenal_NameTag"
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     gui.AlwaysOnTop   = true
     gui.LightInfluence = 1
