@@ -9,6 +9,13 @@
 --//   * FOV circle now drawn in viewport coordinates (matches FOV check)
 --//   * GunHandler hook no longer blocks with WaitForShotPoint → uses sync check
 --//   * AutoScan delay increased to 5s so GunHandler can load
+--//   * NEW: DisableDesyncDuringShot() — временно выключает AntiAim.Desync
+--//     (останавливает render-step смещение) на время выстрела, чтобы
+--//     исходящий пакет шёл с реальной позиции. Восстанавливает состояние
+--//     через task.delay. Применено к Wallbang, Silent Aim (hook/mouse/camera
+--//     режимы), ручному клику и AutoShoot. PerformMagicBullet НАМЕРЕННО
+--//     оставлен на обычном FireClick — там Desync включается, чтобы скрыть
+--//     телепорт.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -482,7 +489,7 @@ local function GetVisiblePointOnPart(origin, part)
     return nil
 end
 
---// Non-blocking variant used inside hooks (GunHandler etc.) — никогда не yield'ит.
+--// Non-blocking variant used inside hooks (GunHandler etc.) — never yields.
 local function TryGetVisiblePointOnPart(origin, part)
     if not part or not part:IsA("BasePart") or not IsAlive(part) then return nil end
     local aimPos = PredictPartPosition(part)
@@ -493,7 +500,6 @@ local function TryGetVisiblePointOnPart(origin, part)
     if IsPointVisible(origin, aimPos, params) then
         return aimPos
     end
-    -- Fast-mode fallback: пробуем факт-позицию
     if IsPointVisible(origin, part.Position, params) then
         return part.Position
     end
@@ -781,6 +787,53 @@ local function RefreshOldPositionIfNeeded()
     d.Internal.PendingRefresh = false
 end
 
+--// ---------------------------------------------------------------------------
+--// DISABLE DESYNC DURING SHOT
+--// ---------------------------------------------------------------------------
+--// Временно выключает AntiAim.Desync (останавливает render-step смещение),
+--// чтобы исходящий выстрел считался от РЕАЛЬНОЙ позиции. Возвращает
+--// idempotent restore-функцию, либо nil если AntiAim не загружен.
+local function DisableDesyncDuringShot()
+    local Hg = getgenv().AirHub
+    if not Hg or not Hg.AntiAim or not Hg.AntiAim.Desync then return nil end
+    local D = Hg.AntiAim.Desync
+    local S = D.Settings
+    if not S then return nil end
+
+    local saved = {
+        WasEnabled    = S.Enabled,
+        Mode          = S.Mode,
+        RefreshOnShot = S.RefreshOnShot,
+    }
+
+    if S.Enabled then
+        S.Enabled = false
+        if Hg.AntiAim.StopDesync then
+            pcall(Hg.AntiAim.StopDesync)
+        end
+    end
+
+    local restored = false
+    return function()
+        if restored then return end
+        restored = true
+
+        local Hg2 = getgenv().AirHub
+        if not Hg2 or not Hg2.AntiAim or not Hg2.AntiAim.Desync then return end
+        local D2 = Hg2.AntiAim.Desync
+        local S2 = D2.Settings
+        if not S2 then return end
+
+        S2.Enabled = saved.WasEnabled
+        if saved.Mode          ~= nil then S2.Mode          = saved.Mode          end
+        if saved.RefreshOnShot ~= nil then S2.RefreshOnShot = saved.RefreshOnShot end
+
+        if saved.WasEnabled and Hg2.AntiAim.StartDesync then
+            pcall(Hg2.AntiAim.StartDesync)
+        end
+    end
+end
+
 local function WaitForShotPoint(targetPart)
     if not targetPart or not IsAlive(targetPart) then return nil, false end
     if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
@@ -986,6 +1039,16 @@ local function FireClick(btn)
     VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
 end
 
+--// FireClick with Desync temporarily disabled so the shot leaves from the
+--// real position; Desync restored on a short timer.
+local function FireClickNoDesync(btn, restoreDelay)
+    local restore = DisableDesyncDuringShot()
+    FireClick(btn)
+    if restore then
+        task.delay(restoreDelay or 0.25, restore)
+    end
+end
+
 --// Schedule hook removal after HoldTime (+small slack)
 local function ScheduleHookRemoval(restoreFn, holdTime)
     task.delay((holdTime or Aimbot.Settings.WallbangHoldTime or 0.1) + 0.05, function()
@@ -1026,7 +1089,7 @@ local function PerformWallbang_RemotePatch(targetPart, btn)
         return original(self, ...)
     end))
 
-    FireClick(btn)
+    FireClickNoDesync(btn, holdTime + 0.05)
     ScheduleHookRemoval(function() hookf(game, "__namecall", original) end, holdTime)
     return true
 end
@@ -1086,7 +1149,7 @@ local function PerformWallbang_RemotePatchFull(targetPart, btn)
         return original(self, ...)
     end))
 
-    FireClick(btn)
+    FireClickNoDesync(btn, holdTime + 0.05)
     ScheduleHookRemoval(function() hookf(game, "__namecall", original) end, holdTime)
     return true
 end
@@ -1129,7 +1192,7 @@ local function PerformWallbang_RayIgnore(targetPart, btn)
         return original(self, ...)
     end))
 
-    FireClick(btn)
+    FireClickNoDesync(btn, holdTime + 0.05)
     ScheduleHookRemoval(function() hookf(game, "__namecall", original) end, holdTime)
     return true
 end
@@ -1163,7 +1226,7 @@ local function PerformWallbang_RayNewHook(targetPart, btn)
     local ok = pcall(function() Ray.new = handler end)
     if not ok then return false end
 
-    FireClick(btn)
+    FireClickNoDesync(btn, holdTime + 0.05)
     ScheduleHookRemoval(function() Ray.new = old end, holdTime)
     return true
 end
@@ -1208,13 +1271,12 @@ local function PerformWallbang_MuzzleTeleport(targetPart, btn)
         return original(self, ...)
     end))
 
-    FireClick(btn)
+    FireClickNoDesync(btn, holdTime + 0.05)
     ScheduleHookRemoval(function() hookf(game, "__namecall", original) end, holdTime)
     return true
 end
 
 --// ==== MODE 6: MouseHit — spoof LocalPlayer:GetMouse() during shot ====
---// FIX: guard against missing LocalPlayer.GetMouse
 local function PerformWallbang_MouseHit(targetPart, btn)
     local oldGetMouse = LocalPlayer.GetMouse
     if type(oldGetMouse) ~= "function" then
@@ -1245,7 +1307,7 @@ local function PerformWallbang_MouseHit(targetPart, btn)
     end
 
     pcall(function() LocalPlayer.GetMouse = fakeGetMouse end)
-    FireClick(btn)
+    FireClickNoDesync(btn, holdTime + 0.05)
     ScheduleHookRemoval(function() pcall(function() LocalPlayer.GetMouse = oldGetMouse end) end, holdTime)
     return true
 end
@@ -1277,7 +1339,7 @@ local function PerformWallbang_ScreenPointToRay(targetPart, btn)
     local ok = pcall(function() cam.ScreenPointToRay = handler end)
     if not ok then return false end
 
-    FireClick(btn)
+    FireClickNoDesync(btn, holdTime + 0.05)
     ScheduleHookRemoval(function() pcall(function() cam.ScreenPointToRay = old end) end, holdTime)
     return true
 end
@@ -1291,7 +1353,7 @@ local function PerformWallbang_CameraTP(targetPart, btn)
     local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
 
     cam.CFrame = CFrame.lookAt(cam.CFrame.Position, aimPos)
-    FireClick(btn)
+    FireClickNoDesync(btn, holdTime + 0.05)
     task.wait(math.min(holdTime, 0.05))
     cam.CFrame = oldCF
     return true
@@ -1338,7 +1400,7 @@ local function PerformWallbang(targetPart, btn)
     return ok
 end
 
---// ==== MagicBullet — FIX: save & restore Mode + RefreshOnShot ====
+--// ==== MagicBullet — НАМЕРЕННО включает Desync (скрывает телепорт) ====
 local function PerformMagicBullet(targetPart, btn)
     if not Aimbot.Settings.TPAimEnabled or Aimbot.Settings.TPAimMethod ~= "MagicBullet" then return end
     if not targetPart then return end
@@ -1365,6 +1427,7 @@ local function PerformMagicBullet(targetPart, btn)
     TeleportToTarget(targetPart)
     task.wait(0.01)
 
+    --// NOTE: обычный FireClick — здесь Desync ДОЛЖЕН быть включён.
     FireClick(btn)
 
     task.wait(0.02)
@@ -1467,8 +1530,15 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 
     RefreshOldPositionIfNeeded()
 
+    --// Отключаем Desync на время выстрела, чтобы пакет ушёл с реальной позиции.
+    local restoreDesync = DisableDesyncDuringShot()
+    if restoreDesync then
+        task.delay(0.25, restoreDesync)
+    end
+
     local checkPoint, nowVisible = WaitForShotPoint(targetPart)
     if Aimbot.Settings.WallCheck and not checkPoint then
+        if restoreDesync then restoreDesync() end
         return
     end
     if nowVisible ~= nil then wasVisible = nowVisible end
@@ -1481,10 +1551,16 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
             local origin = workspace.CurrentCamera.CFrame.Position
             visiblePoint = GetVisiblePointOnPart(origin, targetPart)
         end
-        if not visiblePoint then return end
+        if not visiblePoint then
+            if restoreDesync then restoreDesync() end
+            return
+        end
 
         local targetX, targetY = WorldToMouseVIM(visiblePoint)
-        if not targetX then return end
+        if not targetX then
+            if restoreDesync then restoreDesync() end
+            return
+        end
 
         local oldBehavior = UserInputService.MouseBehavior
         local oldIcon     = UserInputService.MouseIconEnabled
@@ -1522,10 +1598,16 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
             local origin = workspace.CurrentCamera.CFrame.Position
             visiblePoint = GetVisiblePointOnPart(origin, targetPart)
         end
-        if not visiblePoint then return end
+        if not visiblePoint then
+            if restoreDesync then restoreDesync() end
+            return
+        end
 
         local targetX, targetY = WorldToMouseVIM(visiblePoint)
-        if not targetX then return end
+        if not targetX then
+            if restoreDesync then restoreDesync() end
+            return
+        end
         local curMouse = UserInputService:GetMouseLocation()
         local oldX = math.floor(curMouse.X)
         local oldY = math.floor(curMouse.Y)
@@ -1550,7 +1632,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
        or mode == "Vector3Unit" or mode == "ScreenPointToRay"
        or mode == "FireServer"
        or mode == "CFrameHook" or mode == "Vector3New" then
-        FireClick(btn)
+        FireClickNoDesync(btn, 0.25)
         task.delay(0.15, function()
             LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
         end)
@@ -1559,12 +1641,15 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 
     local origin = workspace.CurrentCamera.CFrame.Position
     local visiblePoint = checkPoint or GetVisiblePointOnPart(origin, targetPart)
-    if not visiblePoint then return end
+    if not visiblePoint then
+        if restoreDesync then restoreDesync() end
+        return
+    end
     local oldCF = workspace.CurrentCamera.CFrame
     workspace.CurrentCamera.CFrame = CFrame.new(oldCF.Position, visiblePoint)
 
     local ok = pcall(function()
-        FireClick(btn)
+        FireClickNoDesync(btn, 0.25)
     end)
     workspace.CurrentCamera.CFrame = oldCF
     if not ok then HandleError("Camera silent shot input failed") end
@@ -1637,7 +1722,6 @@ local function SetupRayNewHook()
 
     local function handler(origin, direction)
         if not H.ShuttingDown and IsModeHooked("RayNew") then
-            --// FIX: was `not (checkC and not checkC())` — inverted, broke the hook.
             if not (checkC and checkC()) then
                 if InScanFor("RayNew") then
                     ReportHookCall("RayNew")
@@ -1956,9 +2040,6 @@ local function SetupGunHandlerHook()
                and IsAlive(Hg.Aimbot.LockPartInstance) then
                 if p1 == LocalPlayer then
                     RefreshOldPositionIfNeeded()
-                    --// FIX: use non-blocking TryGetVisiblePointOnPart here.
-                    --// The old WaitForShotPoint yields (task.wait) up to 0.8s and
-                    --// can stall the game's shooting thread.
                     local origin = workspace.CurrentCamera.CFrame.Position
                     local pt = TryGetVisiblePointOnPart(origin, Hg.Aimbot.LockPartInstance)
                     if pt then
@@ -1999,7 +2080,6 @@ local function SetupCFrameHook()
 
     local function handler(at, lookAt, up)
         if not H.ShuttingDown and IsModeHooked("CFrameHook") then
-            --// FIX: was `not (checkC and not checkC())` — inverted.
             if not (checkC and checkC()) then
                 if InScanFor("CFrameHook") then
                     if typeof(at) == "Vector3" and typeof(lookAt) == "Vector3" then
@@ -2051,7 +2131,6 @@ local function SetupVector3NewHook()
 
     local function handler(x, y, z)
         if not H.ShuttingDown and IsModeHooked("Vector3New") then
-            --// FIX: was `not (checkC and not checkC())` — inverted.
             if not (checkC and checkC()) then
                 if type(x) == "number" and type(y) == "number" and type(z) == "number" then
                     local mag = math.sqrt(x*x + y*y + z*z)
@@ -2250,8 +2329,6 @@ local function LoadAimbot()
                 Aimbot.FOVCircle.Filled = false
                 Aimbot.FOVCircle.Transparency = 0.5
                 Aimbot.FOVCircle.Visible = Aimbot.FOVSettings.Visible
-                --// FIX: FOV circle must be drawn in viewport coordinates,
-                --// matching GetMousePos() and WorldToViewportPoint().
                 Aimbot.FOVCircle.Position = GetMousePos()
             else
                 Aimbot.FOVCircle.Visible = false
@@ -2355,7 +2432,8 @@ local function LoadAimbot()
                     if not vp then return end
                 end
                 RefreshOldPositionIfNeeded()
-                FireClick(btn)
+                --// Manual click path: disable Desync for the shot.
+                FireClickNoDesync(btn, 0.25)
             end
         end
     end))
@@ -2402,7 +2480,7 @@ local function LoadAimbot()
                     PerformSilentShot(targetPart, shootBtn, nowVisible)
                 else
                     RefreshOldPositionIfNeeded()
-                    FireClick(shootBtn)
+                    FireClickNoDesync(shootBtn, 0.25)
                 end
                 LastShotTime = nowt
             end, HandleError)
@@ -2468,9 +2546,11 @@ Aimbot.GetBacktrackGhostTargets = GetBacktrackGhostTargets
 Aimbot.ResolveOwnerCharacter = ResolveOwnerCharacter
 Aimbot.ResolveOwnerPlayer    = ResolveOwnerPlayer
 
-Aimbot.PerformWallbang       = PerformWallbang
-Aimbot.PerformMagicBullet    = PerformMagicBullet
-Aimbot.PerformInfiniteTP     = PerformInfiniteTP
+Aimbot.PerformWallbang          = PerformWallbang
+Aimbot.PerformMagicBullet       = PerformMagicBullet
+Aimbot.PerformInfiniteTP        = PerformInfiniteTP
+Aimbot.DisableDesyncDuringShot  = DisableDesyncDuringShot
+Aimbot.FireClickNoDesync        = FireClickNoDesync
 
 --// ---------------------------------------------------------------------------
 --// DIAGNOSTICS
@@ -2531,7 +2611,8 @@ local function Diagnose()
                       "RunAutoScan", "IsModeAvailable", "ShouldBypassWallCheck",
                       "IsBacktrackEnabled", "IsModeHooked", "ShouldRedirect",
                       "GetBacktrackGhostTargets", "ResolveOwnerCharacter", "ResolveOwnerPlayer",
-                      "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP" }
+                      "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
+                      "DisableDesyncDuringShot", "FireClickNoDesync" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
     end
@@ -2550,8 +2631,6 @@ task.delay(1, function()
     pcall(Diagnose)
 end)
 
---// FIX: AutoScan delay increased from 3s to 5s so GunHandler module
---// in ReplicatedStorage can finish replicating before the scan tests it.
 if Aimbot.Settings.AutoRunOnLoad and Aimbot.Settings.SilentAimMode == "Auto" then
     task.delay(5, function()
         if H.Aimbot and H.Aimbot.RunAutoScan then
