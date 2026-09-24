@@ -94,7 +94,7 @@ H.Aimbot = {
         TPAimDistance    = 5,
         TPAimReturnOnKill = true,
 
-        --// Backtrack integration (real RakNet)
+        --// Backtrack integration (position-history based)
         UseBacktrack     = false,
     },
     FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
@@ -144,7 +144,11 @@ local function IsBacktrackEnabled()
     if not Aimbot.Settings.UseBacktrack then return false end
     if not H.Exploits then return false end
     if not H.Exploits.Settings or not H.Exploits.Settings.BacktrackEnabled then return false end
-    if not H.Exploits.Functions or not H.Exploits.Functions.GetBacktrackCFrame then return false end
+    if not H.Exploits.Functions then return false end
+    if not H.Exploits.Functions.GetBacktrackCFrame
+       and not H.Exploits.Functions.GetBacktrackCFrameSmart then
+        return false
+    end
     return true
 end
 
@@ -162,24 +166,30 @@ end
 local function PredictPartPosition(part)
     if not part then return Vector3.new(0, 0, 0) end
 
-    --// ==== REAL RAKNET BACKTRACK ====
-    --// Если аимбот использует backtrack и Exploits хранит историю,
-    --// возвращаем позицию врага с задержкой `BacktrackTime`.
-    --// Это синхронизировано с FakeLag (исходящие FireServer задерживаются
-    --// на то же время) → сервер в lag compensation отматывает мир к этой
-    --// самой позиции → выстрел регистрируется.
+    --// ==== Backtrack (position-history based, no packet delay) ====
+    --// Использует smart-версию: если враг слишком быстро двигался,
+    --// возвращает nil → падаем на текущую позицию.
     if Aimbot.Settings.UseBacktrack
        and H.Exploits
        and H.Exploits.Settings
        and H.Exploits.Settings.BacktrackEnabled
-       and H.Exploits.Functions
-       and H.Exploits.Functions.GetBacktrackCFrame then
+       and H.Exploits.Functions then
         local pl = Players:GetPlayerFromCharacter(part.Parent)
         if pl then
-            local btCF = H.Exploits.Functions.GetBacktrackCFrame(
-                pl,
-                H.Exploits.Settings.BacktrackTime
-            )
+            local hitboxGuess = math.max(part.Size.X, part.Size.Y, part.Size.Z) * 0.5
+            local btCF = nil
+            if H.Exploits.Functions.GetBacktrackCFrameSmart then
+                btCF = H.Exploits.Functions.GetBacktrackCFrameSmart(
+                    pl,
+                    H.Exploits.Settings.BacktrackTime,
+                    hitboxGuess
+                )
+            elseif H.Exploits.Functions.GetBacktrackCFrame then
+                btCF = H.Exploits.Functions.GetBacktrackCFrame(
+                    pl,
+                    H.Exploits.Settings.BacktrackTime
+                )
+            end
             if btCF then
                 return btCF.Position
             end
@@ -992,8 +1002,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     local startHealth = hum and hum.Health or 0
 
     --// Backtrack уже применяется внутри PredictPartPosition —
-    --// здесь ничего подменять не нужно. Просто стреляем в актуальную
-    --// (backtrack-сдвинутую) позицию.
+    --// здесь ничего подменять не нужно.
 
     --// TP Aim — возвращаемся до WallCheck, полностью его игнорируем
     if Aimbot.Settings.TPAimEnabled then
@@ -2118,6 +2127,8 @@ local function Diagnose()
         T(Ex.Functions ~= nil,               "Exploits.Functions")
         T(type(Ex.Functions.GetBacktrackCFrame) == "function",
                                               "Exploits.GetBacktrackCFrame")
+        T(type(Ex.Functions.GetBacktrackCFrameSmart) == "function",
+                                              "Exploits.GetBacktrackCFrameSmart")
     end
 
     warn("==========================================================")
