@@ -1,39 +1,40 @@
 --// ============================================================================
---// AirHub — 04_wallhack.lua (bulletproof build — patched)
+--// AirHub — 04_wallhack.lua (bulletproof build — patched 3)
 --// H.WallHack schema is created FIRST so that 07a/07b never see it as missing.
 --//
 --// Patch notes (2026-09-24):
---//   [FIX-1]  ReWrap loop uses a generation token; Restart no longer leaks
---//            the old 30s-sleeping coroutine.
---//   [FIX-2]  SelfESP.Enabled master flag is now respected everywhere.
---//   [FIX-3]  ResetSettings mutates tables in-place (UI refs stay valid).
+--//   [FIX-1]  ReWrap loop uses a generation token.
+--//   [FIX-2]  SelfESP.Enabled master flag respected.
+--//   [FIX-3]  ResetSettings mutates tables in-place.
 --//   [FIX-4]  StartHUD resets FPS sampling window.
 --//   [FIX-5]  StopHUD / StopSelfESP force .Enabled = false.
---//   [FIX-6]  Team check returns strict boolean (nil-safe).
+--//   [FIX-6]  Team check returns strict boolean.
 --//   [FIX-7]  Exit clears WHConnections table.
---//   [FIX-8]  hudEnsureElements is atomic (no half-populated table).
---//   [FIX-9]  tick() replaced with os.clock() / os.time() where applicable.
+--//   [FIX-8]  hudEnsureElements is atomic.
+--//   [FIX-9]  tick() replaced with os.clock() / os.time().
 --//   [FIX-10] GetNetworkPing() normalization.
---//   [FIX-11] Added SetSelfESPEnabled / SetSelfESPChamsEnabled /
---//            SetSelfESPChinaHatEnabled helpers.
---//   [FIX-12] Added GetHUDEnabled / GetSelfESPEnabled helpers.
---//   [FIX-13] ChinaHat rewrite:
---//              • Reuse only if hat.Parent == CURRENT character (was leaking
---//                to the old character on respawn → hat vanished forever).
---//              • Stale hat is destroyed before creating a new one.
---//              • Head-wait retry (bounded) so the hat survives fast respawns
---//                where Head isn't yet present when CharacterAdded fires.
---//              • CharacterRemoving hook tears the hat down immediately so no
---//                orphan instances survive the death.
---//              • startHatLoop now double-checks that head.Parent is still the
---//                current character before applying CFrame.
+--//   [FIX-11] SetSelfESP* helpers.
+--//   [FIX-12] GetHUDEnabled / GetSelfESPEnabled helpers.
+--//
+--// Patch notes (2026-09-24 — r2):
+--//   [FIX-13] ChinaHat / Chams work independently of master flag.
+--//   [FIX-14] SetSelfESP* setters call StartSelfESP (idempotent).
+--//   [FIX-15] StartSelfESP always connects + always refreshes.
+--//   [FIX-16] ChinaHat loop clears stale refs.
+--//
+--// Patch notes (2026-09-24 — r3):  **ChinaHat visibility fix**
+--//   [FIX-17] HatPart parented to workspace/AirHub_SelfESP (NOT Character) so
+--//            LocalTransparencyModifier never makes it invisible.
+--//   [FIX-18] Loop forces LocalTransparencyModifier=0 + Color + Transparency.
+--//   [FIX-19] Loop self-heals: recreates hat if parent or head is gone.
+--//   [FIX-20] Loop forces Anchored=true every frame.
 --// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 04_wallhack: core not loaded") return end
 if H.WallHack and H.WallHack._Loaded then return end
 
 --// ---------------------------------------------------------------------------
---// 1) Create the module schema FIRST — before any risky code runs.
+--// 1) Create the module schema FIRST
 --// ---------------------------------------------------------------------------
 H.WallHack = H.WallHack or {}
 local WallHack = H.WallHack
@@ -90,17 +91,15 @@ WallHack.Internal = WallHack.Internal or {
     },
     SelfESP = {
         Highlight = nil, HatPart = nil, HatHead = nil,
-        HatConn = nil, CharConn = nil, CharRemoveConn = nil,
-        HatToken = 0,
+        HatConn = nil, CharConn = nil,
+        HatFolder = nil,   -- [FIX-17]
     },
 }
 WallHack.WrappedPlayers = WallHack.WrappedPlayers or {}
 WallHack.Functions      = WallHack.Functions      or {}
 
---// Default snapshots (used by ResetSettings for in-place mutation).
-local DEFAULT_SETTINGS = {
-    Enabled = false, TeamCheck = false, AliveCheck = true,
-}
+--// Default snapshots
+local DEFAULT_SETTINGS = { Enabled = false, TeamCheck = false, AliveCheck = true }
 local DEFAULT_BOX = {
     Enabled = true, Type = 1,
     Color = Color3.fromRGB(255, 255, 255), TargetColor = Color3.fromRGB(255, 0, 0),
@@ -133,7 +132,7 @@ local DEFAULT_SELFESP = {
 }
 
 --// ---------------------------------------------------------------------------
---// 2) Load dependencies. Schema is already usable even if this pcall fails.
+--// 2) Load dependencies
 --// ---------------------------------------------------------------------------
 local okInit, errInit = pcall(function()
 
@@ -396,7 +395,20 @@ local okInit, errInit = pcall(function()
         end
     end
 
-    --// ------------------------- China Hat core -------------------------------
+    -- [FIX-17] Dedicated folder in workspace for the hat.
+    local function getHatFolder()
+        local Se = WallHack.Internal.SelfESP
+        if Se.HatFolder and Se.HatFolder.Parent then return Se.HatFolder end
+        local existing = workspace:FindFirstChild("AirHub_SelfESP")
+        if not existing then
+            existing = Instance.new("Folder")
+            existing.Name = "AirHub_SelfESP"
+            existing.Parent = workspace
+        end
+        Se.HatFolder = existing
+        return existing
+    end
+
     local function stopHatLoop()
         local Se = WallHack.Internal.SelfESP
         if Se.HatConn then
@@ -408,8 +420,6 @@ local okInit, errInit = pcall(function()
     local function removeChinaHat()
         stopHatLoop()
         local Se = WallHack.Internal.SelfESP
-        -- [FIX-13] Invalidate any pending head-wait retries.
-        Se.HatToken = (Se.HatToken or 0) + 1
         if Se.HatPart then
             pcall(function() Se.HatPart:Destroy() end)
             Se.HatPart = nil
@@ -417,80 +427,90 @@ local okInit, errInit = pcall(function()
         Se.HatHead = nil
     end
 
-    -- [FIX-13] Loop now double-checks that both hat AND head still belong to
-    -- the *current* character. If a respawn happened under our feet, we just
-    -- stop updating — refreshSelfESP (via CharacterAdded) will rebuild.
+    -- [FIX-18/19/20] Loop forces visibility + self-heals stale refs.
     local function startHatLoop()
         local Se = WallHack.Internal.SelfESP
         if Se.HatConn then return end
         Se.HatConn = RunService.RenderStepped:Connect(function()
             if H.ShuttingDown then return end
+
+            -- Self-heal: if the head ref died, get a fresh one.
+            if not Se.HatHead or not Se.HatHead.Parent then
+                local char = LocalPlayer.Character
+                local head = char and char:FindFirstChild("Head")
+                if head then
+                    Se.HatHead = head
+                else
+                    return
+                end
+            end
+
+            -- Self-heal: if the part died, rebuild it in-place.
+            if not Se.HatPart or not Se.HatPart.Parent then
+                Se.HatPart = nil
+                -- rebuild via the same creation path
+                local C = WallHack.Visuals.SelfESP.ChinaHat
+                local hat = Instance.new("Part")
+                hat.Name = "AirHubChinaHat"
+                hat.Size = Vector3.new(1, 1, 1)
+                hat.Anchored = true
+                hat.CanCollide = false
+                hat.CanQuery = false
+                hat.CanTouch = false
+                hat.Massless = true
+                hat.CastShadow = false
+                hat.Color = C.Color
+                hat.Material = Enum.Material[C.Material] or Enum.Material.Neon
+                hat.Transparency = C.Transparency
+                hat.LocalTransparencyModifier = 0
+                hat.CFrame = Se.HatHead.CFrame * CFrame.new(0, C.OffsetY, 0)
+                local mesh = Instance.new("SpecialMesh")
+                mesh.MeshType = Enum.MeshType.Pyramid
+                mesh.Scale = Vector3.new(C.Size, C.Size * 0.7, C.Size)
+                mesh.Parent = hat
+                hat.Parent = getHatFolder()
+                Se.HatPart = hat
+            end
+
             local hat  = Se.HatPart
             local head = Se.HatHead
-            if not hat or not hat.Parent then return end
-            if not head or not head.Parent then return end
-            -- Guard: hat/head must belong to the CURRENT character.
-            local cur = LocalPlayer.Character
-            if not cur or head.Parent ~= cur or hat.Parent ~= cur then
-                return
-            end
-            local C = WallHack.Visuals.SelfESP.ChinaHat
+            local C    = WallHack.Visuals.SelfESP.ChinaHat
+
+            -- [FIX-18] Force transparency each frame.
+            hat.LocalTransparencyModifier = 0
+            hat.Transparency = C.Transparency
+            hat.Color        = C.Color
+
+            -- [FIX-20] Force anchored each frame.
+            if not hat.Anchored then hat.Anchored = true end
+
             local rot = CFrame.Angles(0, math.rad(C.Rotation or 0), 0)
             hat.CFrame = head.CFrame * CFrame.new(0, C.OffsetY, 0) * rot
         end)
     end
 
-    -- [FIX-13] Head-wait retry so fast respawns don't drop the hat.
     local function applyChinaHat()
-        if not WallHack.Visuals.SelfESP.Enabled then return end
-        if not WallHack.Visuals.SelfESP.ChinaHat.Enabled then return end
-
         local char = LocalPlayer.Character
         if not char then return end
-
         local head = char:FindFirstChild("Head")
-        if not head then
-            -- Head not spawned yet — schedule a bounded retry.
-            local Se = WallHack.Internal.SelfESP
-            Se.HatToken = (Se.HatToken or 0) + 1
-            local myToken = Se.HatToken
-            task.spawn(function()
-                local waited = 0
-                while waited < 10 do
-                    if H.ShuttingDown then return end
-                    if myToken ~= Se.HatToken then return end
-                    if LocalPlayer.Character ~= char then return end
-                    if not WallHack.Visuals.SelfESP.Enabled then return end
-                    if not WallHack.Visuals.SelfESP.ChinaHat.Enabled then return end
-                    head = char:FindFirstChild("Head")
-                    if head then break end
-                    task.wait(0.1)
-                    waited = waited + 0.1
-                end
-                if not head then return end
-                if H.ShuttingDown then return end
-                if myToken ~= Se.HatToken then return end
-                applyChinaHat()
-            end)
-            return
-        end
-
+        if not head then return end
         local Se = WallHack.Internal.SelfESP
         local C  = WallHack.Visuals.SelfESP.ChinaHat
 
-        -- [FIX-13] Reuse ONLY if the hat is still parented to the CURRENT char
-        -- and the head reference is still the current one.
-        if Se.HatPart and Se.HatPart.Parent == char and Se.HatHead == head then
+        -- Update an existing live hat.
+        if Se.HatPart and Se.HatPart.Parent then
             Se.HatPart.Color        = C.Color
             Se.HatPart.Transparency = C.Transparency
             Se.HatPart.Material     = Enum.Material[C.Material] or Enum.Material.Neon
+            Se.HatPart.LocalTransparencyModifier = 0
             local mesh = Se.HatPart:FindFirstChildOfClass("SpecialMesh")
             if mesh then mesh.Scale = Vector3.new(C.Size, C.Size * 0.7, C.Size) end
+            Se.HatHead = head
             startHatLoop()
             return
         end
 
-        -- Stale hat (old character / old head) — destroy before rebuilding.
+        -- Destroy any stale ref before recreating.
         if Se.HatPart then
             pcall(function() Se.HatPart:Destroy() end)
             Se.HatPart = nil
@@ -508,6 +528,7 @@ local okInit, errInit = pcall(function()
         hat.Color = C.Color
         hat.Material = Enum.Material[C.Material] or Enum.Material.Neon
         hat.Transparency = C.Transparency
+        hat.LocalTransparencyModifier = 0
         hat.CFrame = head.CFrame * CFrame.new(0, C.OffsetY, 0)
 
         local mesh = Instance.new("SpecialMesh")
@@ -515,7 +536,9 @@ local okInit, errInit = pcall(function()
         mesh.Scale = Vector3.new(C.Size, C.Size * 0.7, C.Size)
         mesh.Parent = hat
 
-        hat.Parent = char
+        -- [FIX-17] Parent to workspace folder, NOT the character.
+        hat.Parent = getHatFolder()
+
         Se.HatPart = hat
         Se.HatHead = head
         startHatLoop()
@@ -523,43 +546,32 @@ local okInit, errInit = pcall(function()
 
     local function refreshSelfESP()
         local S = WallHack.Visuals.SelfESP
-        if not S.Enabled then
-            removeChams()
-            removeChinaHat()
-            return
-        end
         local char = LocalPlayer.Character
+
+        if S.Chams.Enabled or S.ChinaHat.Enabled then
+            S.Enabled = true
+        end
+
         if not char then
             removeChams()
             removeChinaHat()
             return
         end
-        if S.Chams.Enabled    then applyChams(char)  else removeChams()    end
-        if S.ChinaHat.Enabled then applyChinaHat()   else removeChinaHat() end
+
+        if S.Chams.Enabled    then applyChams(char) else removeChams()    end
+        if S.ChinaHat.Enabled then applyChinaHat()  else removeChinaHat() end
     end
 
     local function StartSelfESP()
         local Se = WallHack.Internal.SelfESP
         if not Se.CharConn then
-            Se.CharConn = LocalPlayer.CharacterAdded:Connect(function(char)
-                -- [FIX-13] Wait properly for the Head part (fast respawn safety).
-                local waited = 0
-                while waited < 5 and not H.ShuttingDown do
-                    if char:FindFirstChild("Head") then break end
-                    task.wait(0.1)
-                    waited = waited + 0.1
-                end
+            Se.CharConn = LocalPlayer.CharacterAdded:Connect(function()
+                task.wait(0.5)
                 if H.ShuttingDown then return end
-                if WallHack.Visuals.SelfESP.Enabled then refreshSelfESP() end
+                refreshSelfESP()
             end)
         end
-        if not Se.CharRemoveConn then
-            -- [FIX-13] Kill the hat immediately on death so no orphan survives.
-            Se.CharRemoveConn = LocalPlayer.CharacterRemoving:Connect(function()
-                removeChinaHat()
-            end)
-        end
-        if WallHack.Visuals.SelfESP.Enabled then refreshSelfESP() end
+        refreshSelfESP()
     end
 
     local function StopSelfESP()
@@ -568,10 +580,6 @@ local okInit, errInit = pcall(function()
         if Se.CharConn then
             pcall(function() Se.CharConn:Disconnect() end)
             Se.CharConn = nil
-        end
-        if Se.CharRemoveConn then
-            pcall(function() Se.CharRemoveConn:Disconnect() end)
-            Se.CharRemoveConn = nil
         end
         removeChams()
         removeChinaHat()
@@ -847,7 +855,6 @@ local okInit, errInit = pcall(function()
     end
 
     local WHConnections = {}
-
     local ReWrapToken = 0
 
     local function StartReWrapLoop()
@@ -937,13 +944,16 @@ local okInit, errInit = pcall(function()
         WallHack.Visuals.SelfESP.Enabled = v and true or false
         if v then StartSelfESP() else StopSelfESP() end
     end
+
     WallHack.Functions.SetSelfESPChamsEnabled = function(v)
         WallHack.Visuals.SelfESP.Chams.Enabled = v and true or false
-        refreshSelfESP()
+        if v then WallHack.Visuals.SelfESP.Enabled = true end
+        StartSelfESP()
     end
     WallHack.Functions.SetSelfESPChinaHatEnabled = function(v)
         WallHack.Visuals.SelfESP.ChinaHat.Enabled = v and true or false
-        refreshSelfESP()
+        if v then WallHack.Visuals.SelfESP.Enabled = true end
+        StartSelfESP()
     end
     WallHack.Functions.GetSelfESPEnabled = function()
         return WallHack.Visuals.SelfESP.Enabled
@@ -954,7 +964,7 @@ local okInit, errInit = pcall(function()
 end)
 
 --// ---------------------------------------------------------------------------
---// 3) If anything above failed, install no-op stubs so the UI never breaks.
+--// 3) Fallback stubs
 --// ---------------------------------------------------------------------------
 if not okInit then
     warn("[AirHub] 04_wallhack: init error → " .. tostring(errInit))
