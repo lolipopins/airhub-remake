@@ -1,5 +1,5 @@
 --// AirHub - 02_aimbot.lua
---// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, diagnostics.
+--// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, Backtrack, diagnostics.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -93,6 +93,9 @@ H.Aimbot = {
         TPAimKey         = "E",
         TPAimDistance    = 5,
         TPAimReturnOnKill = true,
+
+        --// Backtrack integration
+        UseBacktrack     = false,
     },
     FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
     FOVCircle   = Drawing.new("Circle"),
@@ -133,9 +136,16 @@ local VISIBLE_PARTS = {
 --// Helpers
 --// ---------------------------------------------------------------------------
 
---// TP Aim и Wallbang полностью игнорируют WallCheck
 local function ShouldBypassWallCheck()
     return Aimbot.Settings.TPAimEnabled or Aimbot.Settings.WallbangEnabled
+end
+
+local function IsBacktrackEnabled()
+    if not Aimbot.Settings.UseBacktrack then return false end
+    if not H.Exploits then return false end
+    if not H.Exploits.Settings or not H.Exploits.Settings.BacktrackEnabled then return false end
+    if not H.Exploits.Functions or not H.Exploits.Functions.GetBacktrackCFrame then return false end
+    return true
 end
 
 local function GetActualPartName(lockPart)
@@ -292,7 +302,13 @@ end
 
 local function GetVisiblePointOnPart(origin, part)
     if not part or not part:IsA("BasePart") then return nil end
-    --// WallCheck отключён ИЛИ включены TP/WB → игнорируем стены полностью
+
+    --// Backtrack активен → стены игнорируем полностью
+    if IsBacktrackEnabled() then
+        return PredictPartPosition(part)
+    end
+
+    --// WallCheck отключён ИЛИ включены TP/WB → стены игнорируем
     if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
         return PredictPartPosition(part)
     end
@@ -557,7 +573,10 @@ end
 
 local function WaitForShotPoint(targetPart)
     if not targetPart then return nil, false end
-    --// TP/WB bypass — не ждём видимости
+    --// Backtrack / TP / WB bypass — не ждём видимости
+    if IsBacktrackEnabled() then
+        return PredictPartPosition(targetPart), true
+    end
     if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
         return PredictPartPosition(targetPart), true
     end
@@ -931,7 +950,7 @@ local function PerformInfiniteTP(targetPart, btn)
 end
 
 --// ---------------------------------------------------------------------------
---// PerformSilentShot
+--// PerformSilentShot (с Backtrack)
 --// ---------------------------------------------------------------------------
 
 local function PerformSilentShot(targetPart, btn, wasVisible)
@@ -947,6 +966,36 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
     local startHealth = hum and hum.Health or 0
 
+    --// ==== Backtrack: подменяем targetPart на backtrack-позицию ====
+    local btProxyPart = nil
+    if IsBacktrackEnabled() and targetPlayer then
+        local btCF = H.Exploits.Functions.GetBacktrackCFrame(
+            targetPlayer,
+            H.Exploits.Settings.BacktrackTime
+        )
+        if btCF then
+            btProxyPart = Instance.new("Part")
+            btProxyPart.Size = targetPart.Size
+            btProxyPart.CFrame = btCF
+            btProxyPart.CanCollide = false
+            btProxyPart.Anchored = true
+            btProxyPart.Transparency = 1
+            btProxyPart.Massless = true
+            btProxyPart.CanQuery = false
+            btProxyPart.CanTouch = false
+            btProxyPart.Parent = workspace
+            targetPart = btProxyPart
+        end
+    end
+
+    local function CleanupBT()
+        if btProxyPart and btProxyPart.Parent then
+            task.delay(0.2, function()
+                if btProxyPart and btProxyPart.Parent then btProxyPart:Destroy() end
+            end)
+        end
+    end
+
     --// TP Aim — возвращаемся до WallCheck, полностью его игнорируем
     if Aimbot.Settings.TPAimEnabled then
         if Aimbot.Settings.TPAimMethod == "MagicBullet" then
@@ -954,11 +1003,13 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         else
             PerformInfiniteTP(targetPart, btn)
         end
+        CleanupBT()
         return
     end
     --// Wallbang — возвращаемся до WallCheck, полностью его игнорируем
     if Aimbot.Settings.WallbangEnabled then
         PerformWallbang(targetPart, btn)
+        CleanupBT()
         return
     end
 
@@ -966,6 +1017,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 
     local checkPoint, nowVisible = WaitForShotPoint(targetPart)
     if Aimbot.Settings.WallCheck and not checkPoint then
+        CleanupBT()
         return
     end
     if nowVisible ~= nil then wasVisible = nowVisible end
@@ -978,10 +1030,16 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
             local origin = workspace.CurrentCamera.CFrame.Position
             visiblePoint = GetVisiblePointOnPart(origin, targetPart)
         end
-        if not visiblePoint then return end
+        if not visiblePoint then
+            CleanupBT()
+            return
+        end
 
         local targetX, targetY = WorldToMouseVIM(visiblePoint)
-        if not targetX then return end
+        if not targetX then
+            CleanupBT()
+            return
+        end
 
         local oldBehavior = UserInputService.MouseBehavior
         local oldIcon     = UserInputService.MouseIconEnabled
@@ -1007,6 +1065,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
             UserInputService.MouseIconEnabled = oldIcon
         end)
 
+        CleanupBT()
         task.delay(0.15, function()
             LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
         end)
@@ -1019,10 +1078,16 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
             local origin = workspace.CurrentCamera.CFrame.Position
             visiblePoint = GetVisiblePointOnPart(origin, targetPart)
         end
-        if not visiblePoint then return end
+        if not visiblePoint then
+            CleanupBT()
+            return
+        end
 
         local targetX, targetY = WorldToMouseVIM(visiblePoint)
-        if not targetX then return end
+        if not targetX then
+            CleanupBT()
+            return
+        end
         local curMouse = UserInputService:GetMouseLocation()
         local oldX = math.floor(curMouse.X)
         local oldY = math.floor(curMouse.Y)
@@ -1036,6 +1101,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         end)
         if not ok then HandleError("Mouse silent shot failed") end
 
+        CleanupBT()
         task.delay(0.15, function()
             LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
         end)
@@ -1051,6 +1117,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
         task.wait(0.001)
         VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+        CleanupBT()
         task.delay(0.15, function()
             LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
         end)
@@ -1059,7 +1126,10 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 
     local origin = workspace.CurrentCamera.CFrame.Position
     local visiblePoint = checkPoint or GetVisiblePointOnPart(origin, targetPart)
-    if not visiblePoint then return end
+    if not visiblePoint then
+        CleanupBT()
+        return
+    end
     local oldCF = workspace.CurrentCamera.CFrame
     workspace.CurrentCamera.CFrame = CFrame.new(oldCF.Position, visiblePoint)
 
@@ -1072,6 +1142,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     workspace.CurrentCamera.CFrame = oldCF
     if not ok then HandleError("Camera silent shot input failed") end
 
+    CleanupBT()
     task.delay(0.15, function()
         LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
     end)
@@ -1796,7 +1867,9 @@ local function LoadAimbot()
             if Aimbot.Settings.SilentAim then
                 PerformSilentShot(targetPart, btn, nil)
             else
-                if Aimbot.Settings.WallCheck and not ShouldBypassWallCheck() then
+                if Aimbot.Settings.WallCheck
+                   and not ShouldBypassWallCheck()
+                   and not IsBacktrackEnabled() then
                     local vp = WaitForShotPoint(targetPart)
                     if not vp then return end
                 end
@@ -1828,7 +1901,8 @@ local function LoadAimbot()
 
                 local visiblePoint, nowVisible = WaitForShotPoint(targetPart)
                 if Aimbot.Settings.WallCheck and not visiblePoint
-                   and not ShouldBypassWallCheck() then
+                   and not ShouldBypassWallCheck()
+                   and not IsBacktrackEnabled() then
                     CancelLock()
                     return
                 end
@@ -1913,6 +1987,7 @@ Aimbot.RunAutoScan           = RunAutoScan
 Aimbot.CancelAutoScan        = CancelAutoScan
 Aimbot.IsModeAvailable       = IsModeAvailable
 Aimbot.ShouldBypassWallCheck = ShouldBypassWallCheck
+Aimbot.IsBacktrackEnabled    = IsBacktrackEnabled
 
 Aimbot.PerformWallbang       = PerformWallbang
 Aimbot.PerformMagicBullet    = PerformMagicBullet
@@ -2021,7 +2096,7 @@ local function Diagnose()
         "PredictPartPosition", "MoveMouseAbs", "WorldToMouseVIM",
         "GetNPCCharacters", "GetLockedCharacter",
         "RunAutoScan", "CancelAutoScan", "IsModeAvailable",
-        "ShouldBypassWallCheck",
+        "ShouldBypassWallCheck", "IsBacktrackEnabled",
         "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
     }
     for _, name in ipairs(exports) do
@@ -2058,6 +2133,16 @@ local function Diagnose()
         end
     end
 
+    warn("-- Backtrack (Exploits) dependency --")
+    local Ex = H.Exploits
+    T(Ex ~= nil,                             "H.Exploits")
+    if Ex then
+        T(Ex.Settings ~= nil,                "Exploits.Settings")
+        T(Ex.Functions ~= nil,               "Exploits.Functions")
+        T(type(Ex.Functions.GetBacktrackCFrame) == "function",
+                                              "Exploits.GetBacktrackCFrame")
+    end
+
     warn("==========================================================")
     warn(string.format("  RESULT: %d passed, %d failed", passed, failed))
     warn("==========================================================")
@@ -2065,11 +2150,6 @@ local function Diagnose()
         warn("[DIAG] Everything looks GOOD. Aimbot should work.")
     else
         warn("[DIAG] " .. tostring(failed) .. " check(s) FAILED - see [FAIL] lines above.")
-        warn("[DIAG] Common causes:")
-        warn("  - Executor missing hookmetamethod/hookfunction -> most silent-aim modes won't work")
-        warn("  - Drawing.new not available -> FOV circle won't show, use executor with Drawing support")
-        warn("  - AntiAim module not loaded -> TP Aim (MagicBullet) can't toggle desync")
-        warn("  - Util module incomplete -> check 01_core.lua loaded before 02_aimbot.lua")
     end
 
     return passed, failed
