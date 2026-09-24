@@ -1,5 +1,5 @@
 --// AirHub - 02_aimbot.lua
---// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, Backtrack, diagnostics.
+--// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, Backtrack + Ghost targeting.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -62,6 +62,9 @@ H.Aimbot = {
         NPCNameFilter = "",
         AimbotHz = 120,
         IgnoreGameProcessed = true,
+
+        --// NEW: target backtrack ghosts as separate "players"
+        TargetGhosts = true,
 
         AutoShoot = {
             Enabled = false,
@@ -154,6 +157,61 @@ local function IsBacktrackEnabled()
     return true
 end
 
+--// Resolve a ghost model to its owner's REAL character (for hit detection / logging)
+local function ResolveOwnerCharacter(character)
+    if not character then return nil end
+    if character:GetAttribute("AirHub_Ghost") then
+        local pv = character:FindFirstChild("Player")
+        if pv and pv.Value and pv.Value.Character then
+            return pv.Value.Character
+        end
+        return nil
+    end
+    return character
+end
+
+--// Resolve a ghost model to its owner Player instance
+local function ResolveOwnerPlayer(character)
+    if not character then return nil end
+    if character:GetAttribute("AirHub_Ghost") then
+        local pv = character:FindFirstChild("Player")
+        if pv and pv.Value then
+            return pv.Value
+        end
+        return nil
+    end
+    return Players:GetPlayerFromCharacter(character)
+end
+
+--// Get all active backtrack ghosts as target candidates
+local function GetBacktrackGhostTargets()
+    if not Aimbot.Settings.TargetGhosts then return {} end
+    if not Aimbot.Settings.UseBacktrack then return {} end
+    if not H.Exploits then return {} end
+    if not H.Exploits.Settings or not H.Exploits.Settings.BacktrackEnabled then return {} end
+    if not H.Exploits.Internal or not H.Exploits.Internal.BacktrackGhosts then return {} end
+
+    local out = {}
+    for owner, ghost in pairs(H.Exploits.Internal.BacktrackGhosts) do
+        if ghost and ghost.Parent and ghost:GetAttribute("AirHub_Ghost") then
+            local hum = ghost:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                --// skip if owner no longer exists or is dead
+                local ownerRealChar = owner.Character
+                local ownerHum = ownerRealChar and ownerRealChar:FindFirstChildOfClass("Humanoid")
+                if ownerHum and ownerHum.Health > 0 then
+                    table.insert(out, {
+                        character = ghost,
+                        player = owner,
+                        isGhost = true,
+                    })
+                end
+            end
+        end
+    end
+    return out
+end
+
 local function GetActualPartName(lockPart)
     if lockPart == "Torso" then
         return { "Torso", "UpperTorso", "LowerTorso" }
@@ -167,6 +225,11 @@ end
 
 local function PredictPartPosition(part)
     if not part then return Vector3.new(0, 0, 0) end
+
+    --// Ghost: no backtrack needed, it's already at the backtrack position
+    if part.Parent and part.Parent:GetAttribute("AirHub_Ghost") then
+        return part.Position
+    end
 
     if Aimbot.Settings.UseBacktrack
        and H.Exploits
@@ -218,7 +281,7 @@ local function BuildRayParams(targetCharacter)
             if g.ghost then table.insert(ignoreList, g.ghost) end
         end
     end
-    --// ignore backtrack ghost models so our wallcheck doesn't see them
+    --// ignore backtrack ghosts (both own + other players') so wallcheck goes through them
     if Hg and Hg.Exploits and Hg.Exploits.Internal and Hg.Exploits.Internal.BacktrackGhosts then
         for _, ghost in pairs(Hg.Exploits.Internal.BacktrackGhosts) do
             if ghost and ghost.Parent then table.insert(ignoreList, ghost) end
@@ -277,7 +340,14 @@ end
 local function GetLockedCharacter()
     local L = Aimbot.Locked
     if not L then return nil end
-    if typeof(L) == "Instance" and L:IsA("Player") then return L.Character end
+    --// for ghost lock, Locked is the owner Player; use the ghost model as char
+    if typeof(L) == "Instance" and L:IsA("Player") then
+        --// prefer ghost if one exists for this owner
+        if Aimbot.Internal and Aimbot.Internal.LockedGhost and Aimbot.Internal.LockedGhost.Parent then
+            return Aimbot.Internal.LockedGhost
+        end
+        return L.Character
+    end
     if typeof(L) == "Instance" and L:IsA("Model") then return L end
     return nil
 end
@@ -341,21 +411,16 @@ local function GetClosestMultipointToMouse(part, refScreen)
     return bestPt or PredictPartPosition(part)
 end
 
---// ---------------------------------------------------------------------------
---// GetVisiblePointOnPart — wallcheck против aimPos (backtrack-aware)
---// ---------------------------------------------------------------------------
+--// WallCheck against aimPos (backtrack-aware)
 local function GetVisiblePointOnPart(origin, part)
     if not part or not part:IsA("BasePart") then return nil end
 
-    --// 1. Позиция куда хотим стрелять (с учётом backtrack)
     local aimPos = PredictPartPosition(part)
 
-    --// 2. WallCheck выключен / TP / WB — возвращаем сразу
     if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
         return aimPos
     end
 
-    --// 3. WallCheck против aimPos, НЕ против реального part.CFrame
     local params = BuildRayParams(part.Parent)
     local size = part.Size
     local hx, hy, hz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
@@ -394,7 +459,6 @@ local function GetVisiblePointOnPart(origin, part)
         return aimPos
     end
 
-    --// Fast mode: проверка одной центральной точки
     if IsPointVisible(origin, aimPos, params) then
         return aimPos
     end
@@ -440,13 +504,31 @@ local function FindVisiblePart(char, origin, preferredParts)
     return nil
 end
 
+--// Ghosts are now valid targets — team check via owner player
 local function IsTargetValid(character, player)
     if not character then return false end
     if character == LocalPlayer.Character then return false end
-    if character:GetAttribute("AirHub_Ghost") then return false end
+
+    local isGhost = character:GetAttribute("AirHub_Ghost") == true
+
+    --// resolve check player for ghosts
+    if isGhost and not player then
+        local pv = character:FindFirstChild("Player")
+        if pv and pv.Value then
+            player = pv.Value
+        end
+    end
 
     local hum = character:FindFirstChildOfClass("Humanoid")
     if Aimbot.Settings.AliveCheck and (not hum or hum.Health <= 0) then return false end
+
+    --// for ghost, also check owner's real char alive
+    if isGhost and player then
+        local ownerChar = player.Character
+        if not ownerChar then return false end
+        local ownerHum = ownerChar:FindFirstChildOfClass("Humanoid")
+        if not ownerHum or ownerHum.Health <= 0 then return false end
+    end
 
     if not player then
         return Aimbot.Settings.TargetNPCs == true
@@ -473,6 +555,7 @@ end
 local function CancelLock()
     Aimbot.Locked = nil
     Aimbot.LockPartInstance = nil
+    Aimbot.Internal.LockedGhost = nil
     Aimbot.FOVCircle.Color = Color3.fromRGB(255, 255, 255)
 end
 
@@ -492,7 +575,7 @@ local function GetClosestPlayer()
     if Aimbot.Locked then
         local targetChar = GetLockedCharacter()
         if not targetChar then CancelLock() return end
-        local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
+        local targetPlayer = ResolveOwnerPlayer(targetChar) or Players:GetPlayerFromCharacter(targetChar)
         if not IsTargetValid(targetChar, targetPlayer) then CancelLock() return end
 
         local origin = GetCheckOrigin()
@@ -533,11 +616,20 @@ local function GetClosestPlayer()
             table.insert(candidates, { character = npc, player = nil })
         end
     end
+    --// add backtrack ghosts as separate targets
+    for _, ghostInfo in ipairs(GetBacktrackGhostTargets()) do
+        table.insert(candidates, {
+            character = ghostInfo.character,
+            player = ghostInfo.player,
+            isGhost = true,
+        })
+    end
 
     local ignoreFOV = Aimbot.Settings.IgnoreFOV
     local fovEnabled = Aimbot.FOVSettings.Enabled and not ignoreFOV
     local required = fovEnabled and Aimbot.FOVSettings.Amount or 999999
     local bestTarget, bestPart, bestDist = nil, nil, math.huge
+    local bestGhostChar = nil
     local mousePos = GetMousePos()
     local origin = GetCheckOrigin()
 
@@ -574,6 +666,7 @@ local function GetClosestPlayer()
                     bestDist   = dist
                     bestTarget = cand.player or charTarget
                     bestPart   = targetPart
+                    bestGhostChar = cand.isGhost and charTarget or nil
                 end
             end
         end
@@ -582,14 +675,29 @@ local function GetClosestPlayer()
     if bestTarget and bestPart then
         Aimbot.Locked = bestTarget
         Aimbot.LockPartInstance = bestPart
+        Aimbot.Internal.LockedGhost = bestGhostChar
     else
         CancelLock()
     end
 end
 
+--// LogShot — resolves ghost to owner's real humanoid for accurate hit detection
 local function LogShot(targetChar, targetName, startHealth, hitPartName, wasVisible)
     if not targetChar then return end
-    local hum = targetChar:FindFirstChildOfClass("Humanoid")
+
+    --// if target is a ghost, use owner's real character
+    local realChar = targetChar
+    if targetChar:GetAttribute("AirHub_Ghost") then
+        local pv = targetChar:FindFirstChild("Player")
+        if pv and pv.Value and pv.Value.Character then
+            realChar = pv.Value.Character
+            targetName = pv.Value.Name
+        else
+            return  -- owner gone, nothing to log
+        end
+    end
+
+    local hum = realChar:FindFirstChildOfClass("Humanoid")
     if not hum then return end
     local endHealth = hum.Health
     local hit = endHealth < startHealth
@@ -601,7 +709,7 @@ local function LogShot(targetChar, targetName, startHealth, hitPartName, wasVisi
     if hit and not H.Logging.ShowHit then return end
     if not hit and not H.Logging.ShowMiss then return end
 
-    local displayName = targetName or targetChar.Name
+    local displayName = targetName or realChar.Name
     local msg, color
     if hit then
         if hum.Health <= 0 then
@@ -1037,10 +1145,25 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 
     local targetChar = targetPart.Parent
     if not targetChar then return end
-    local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
-    local displayName  = targetPlayer and targetPlayer.Name or targetChar.Name
 
-    local hum = targetChar:FindFirstChildOfClass("Humanoid")
+    local isGhost = targetChar:GetAttribute("AirHub_Ghost") == true
+
+    --// resolve owner player + real char for health tracking
+    local targetPlayer
+    local realCharForHealth = targetChar
+    if isGhost then
+        local pv = targetChar:FindFirstChild("Player")
+        if pv and pv.Value then
+            targetPlayer = pv.Value
+            realCharForHealth = pv.Value.Character or targetChar
+        end
+    else
+        targetPlayer = Players:GetPlayerFromCharacter(targetChar)
+    end
+
+    local displayName = targetPlayer and targetPlayer.Name or targetChar.Name
+
+    local hum = realCharForHealth:FindFirstChildOfClass("Humanoid")
     if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
     local startHealth = hum and hum.Health or 0
 
@@ -2057,6 +2180,9 @@ Aimbot.ShouldBypassWallCheck = ShouldBypassWallCheck
 Aimbot.IsBacktrackEnabled    = IsBacktrackEnabled
 Aimbot.IsModeHooked          = IsModeHooked
 Aimbot.ShouldRedirect        = ShouldRedirect
+Aimbot.GetBacktrackGhostTargets = GetBacktrackGhostTargets
+Aimbot.ResolveOwnerCharacter = ResolveOwnerCharacter
+Aimbot.ResolveOwnerPlayer    = ResolveOwnerPlayer
 
 Aimbot.PerformWallbang       = PerformWallbang
 Aimbot.PerformMagicBullet    = PerformMagicBullet
@@ -2120,6 +2246,7 @@ local function Diagnose()
     local exports = { "CancelLock", "GetVisiblePointOnPart", "PredictPartPosition",
                       "RunAutoScan", "IsModeAvailable", "ShouldBypassWallCheck",
                       "IsBacktrackEnabled", "IsModeHooked", "ShouldRedirect",
+                      "GetBacktrackGhostTargets", "ResolveOwnerCharacter", "ResolveOwnerPlayer",
                       "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
