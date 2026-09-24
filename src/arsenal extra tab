@@ -5,7 +5,7 @@
 --// Features:
 --//   • Name Tags ESP    — player name above head with team/alive checks
 --//   • Hitbox Expander  — "OP Silent Aim" style: enlarge enemy limbs client-side
---//   • Weapon Mods      — Infinite Ammo (StoredAmmo/Ammo = 99999), Fire Rate, Recoil
+--//   • Weapon Mods      — Infinite Ammo (StoredAmmo/Ammo), Fire Rate, Recoil
 --//
 --// Requires: 01_core.lua, 07a_ui_core.lua
 --// ============================================================================
@@ -17,6 +17,7 @@ if H.Arsenal and H.Arsenal._Loaded then return end
 local Util               = H.Util
 local Players            = Util.Players
 local RunService         = Util.RunService
+local UserInputService   = Util.UserInputService
 local LocalPlayer        = Util.LocalPlayer
 local ReplicatedStorage  = Util.ReplicatedStorage
 local Track              = Util.Track
@@ -43,7 +44,7 @@ A.Settings = A.Settings or {
 
     -- Weapon mods
     InfAmmoEnabled        = false,
-    InfAmmoValue          = 99999,
+    InfAmmoValue          = 99,      -- // по умолчанию 99
     FireRateEnabled       = false,
     FireRateValue         = 0.02,
     RecoilEnabled         = false,
@@ -54,6 +55,7 @@ A.Internal = A.Internal or {
     HitboxApplied    = {},   -- [player] = {parts...}
     Conns            = {},
     WeaponLoopActive = false,
+    LastAimTarget    = nil,  -- // следим за сменой цели aimbot'а
 }
 A.Functions = A.Functions or {}
 
@@ -278,18 +280,14 @@ end
 -- ============================================================================
 --  WEAPON MODS
 -- ============================================================================
---// Бесконечные патроны: пробегаемся по каждому оружию в ReplicatedStorage.Weapons
---// и выставляем Ammo / StoredAmmo в InfAmmoValue (по умолчанию 99999).
 local function ApplyInfiniteAmmo()
     local weapons = ReplicatedStorage:FindFirstChild("Weapons")
     if not weapons then return 0 end
 
-    local value = tonumber(A.Settings.InfAmmoValue) or 99999
+    local value = tonumber(A.Settings.InfAmmoValue) or 99
     local patched = 0
 
     for _, weapon in ipairs(weapons:GetChildren()) do
-        --// Ammo и StoredAmmo могут быть как прямыми детьми, так и внутри
-        --// какой-нибудь под-папки — поэтому проходимся по всем descendants.
         local targets = {}
 
         local directAmmo = weapon:FindFirstChild("Ammo")
@@ -299,7 +297,6 @@ local function ApplyInfiniteAmmo()
         if directStored then targets[#targets + 1] = directStored end
 
         if #targets == 0 then
-            --// fallback: ищем глубже
             for _, d in ipairs(weapon:GetDescendants()) do
                 if d.Name == "Ammo" or d.Name == "StoredAmmo" then
                     targets[#targets + 1] = d
@@ -308,7 +305,6 @@ local function ApplyInfiniteAmmo()
         end
 
         for _, t in ipairs(targets) do
-            --// Value может быть IntValue / NumberValue / StringValue
             pcall(function()
                 if t:IsA("IntValue") or t:IsA("NumberValue") then
                     t.Value = value
@@ -369,7 +365,57 @@ local function StopWeaponMods()
     A.Internal.WeaponLoopActive = false
 end
 
---// Публичный хелпер для ручного вызова (например, сразу после выстрела)
+--// ---------------------------------------------------------------------------
+--// Auto-apply Ammo: при наведении aimbot'а ИЛИ клике ЛКМ.
+--// Работает только когда InfAmmoEnabled = true.
+--// ---------------------------------------------------------------------------
+local function TryRefreshAmmo()
+    if not A.Settings.InfAmmoEnabled then return end
+    task.spawn(function() ApplyInfiniteAmmo() end)
+end
+
+local function StartAmmoAutoRefresh()
+    --// 1) Хук на ЛКМ: каждый клик — обновляем патроны
+    if not A.Internal.Conns.ammoClick then
+        A.Internal.Conns.ammoClick = UserInputService.InputBegan:Connect(function(input, gpe)
+            if gpe then return end
+            if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+            TryRefreshAmmo()
+        end)
+    end
+
+    --// 2) Следим за сменой цели aimbot'а (H.Aimbot.Locked / LockPartInstance).
+    --// Как только aimbot захватил новую цель — обновляем патроны.
+    if not A.Internal.Conns.ammoAimWatch then
+        A.Internal.Conns.ammoAimWatch = RunService.Heartbeat:Connect(function()
+            if H.ShuttingDown then return end
+            local Aim = H.Aimbot
+            if not Aim then return end
+            local current = Aim.LockPartInstance
+            if current ~= A.Internal.LastAimTarget then
+                local wasEmpty = (A.Internal.LastAimTarget == nil)
+                A.Internal.LastAimTarget = current
+                --// Триггерим только на появление НОВОЙ цели (не на сброс)
+                if current ~= nil then
+                    TryRefreshAmmo()
+                end
+            end
+        end)
+    end
+end
+
+local function StopAmmoAutoRefresh()
+    if A.Internal.Conns.ammoClick then
+        pcall(function() A.Internal.Conns.ammoClick:Disconnect() end)
+        A.Internal.Conns.ammoClick = nil
+    end
+    if A.Internal.Conns.ammoAimWatch then
+        pcall(function() A.Internal.Conns.ammoAimWatch:Disconnect() end)
+        A.Internal.Conns.ammoAimWatch = nil
+    end
+end
+
+--// Публичный хелпер для ручного вызова
 A.Functions.ApplyInfiniteAmmo = ApplyInfiniteAmmo
 
 -- ============================================================================
@@ -460,16 +506,18 @@ local function FillUI()
 
     -- Weapon mods
     local secWM = tab:CreateSection({ Name = "Weapon Mods" })
-    secWM:AddToggle({ Name = "Infinite Ammo (Ammo + StoredAmmo = 99999)", Value = A.Settings.InfAmmoEnabled,
+    secWM:AddToggle({ Name = "Infinite Ammo (Ammo + StoredAmmo)", Value = A.Settings.InfAmmoEnabled,
         Callback = function(v)
             A.Settings.InfAmmoEnabled = v
             if v then
                 StartWeaponMods()
-                --// мгновенный эффект, не ждём 0.2 сек
+                StartAmmoAutoRefresh()
                 task.spawn(function()
                     task.wait(0.05)
                     ApplyInfiniteAmmo()
                 end)
+            else
+                StopAmmoAutoRefresh()
             end
         end })
     secWM:AddTextbox({ Name = "Ammo Value (число)",
@@ -530,4 +578,5 @@ A.Functions.StopAll = function()
     StopNameTags()
     StopHitboxExpander()
     StopWeaponMods()
+    StopAmmoAutoRefresh()
 end
