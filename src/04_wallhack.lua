@@ -17,6 +17,16 @@
 --//   [FIX-11] Added SetSelfESPEnabled / SetSelfESPChamsEnabled /
 --//            SetSelfESPChinaHatEnabled helpers.
 --//   [FIX-12] Added GetHUDEnabled / GetSelfESPEnabled helpers.
+--//   [FIX-13] ChinaHat rewrite:
+--//              • Reuse only if hat.Parent == CURRENT character (was leaking
+--//                to the old character on respawn → hat vanished forever).
+--//              • Stale hat is destroyed before creating a new one.
+--//              • Head-wait retry (bounded) so the hat survives fast respawns
+--//                where Head isn't yet present when CharacterAdded fires.
+--//              • CharacterRemoving hook tears the hat down immediately so no
+--//                orphan instances survive the death.
+--//              • startHatLoop now double-checks that head.Parent is still the
+--//                current character before applying CFrame.
 --// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 04_wallhack: core not loaded") return end
@@ -80,7 +90,8 @@ WallHack.Internal = WallHack.Internal or {
     },
     SelfESP = {
         Highlight = nil, HatPart = nil, HatHead = nil,
-        HatConn = nil, CharConn = nil,
+        HatConn = nil, CharConn = nil, CharRemoveConn = nil,
+        HatToken = 0,
     },
 }
 WallHack.WrappedPlayers = WallHack.WrappedPlayers or {}
@@ -138,16 +149,13 @@ local okInit, errInit = pcall(function()
     --// Helpers
     --// -----------------------------------------------------------------------
     local function getPingMs()
-        -- Roblox has historically returned seconds; some builds return ms.
         local ok, raw = pcall(function() return LocalPlayer:GetNetworkPing() end)
         if not ok or type(raw) ~= "number" then return 0 end
-        -- If value looks like seconds (< 10), scale to ms. Otherwise assume ms.
         if raw < 10 then return math.floor(raw * 1000 + 0.5) end
         return math.floor(raw + 0.5)
     end
 
     local function applyDefaults(target, defaults)
-        -- Remove keys not in defaults, then copy defaults (in-place mutation).
         for k in pairs(target) do
             if defaults[k] == nil then target[k] = nil end
         end
@@ -175,8 +183,6 @@ local okInit, errInit = pcall(function()
     end
 
     local function hudEnsureElements()
-        -- [FIX-8] Build atomically: create everything into locals first,
-        -- then publish to HUD.Elements only if all succeeded.
         local HUD = WallHack.Internal.HUD
         if HUD.Elements.bg and HUD.Elements.accent and HUD.Elements.title
            and HUD.Elements.subtitle and HUD.Elements.line1 and HUD.Elements.line2 then
@@ -209,14 +215,12 @@ local okInit, errInit = pcall(function()
         end)
 
         if not ok then
-            -- Clean up anything we managed to create before failing.
             for _, e in pairs(built) do
                 if e and e.Remove then pcall(function() e:Remove() end) end
             end
             return false
         end
 
-        -- Publish atomically.
         HUD.Elements.bg       = built.bg
         HUD.Elements.accent   = built.accent
         HUD.Elements.title    = built.title
@@ -331,7 +335,6 @@ local okInit, errInit = pcall(function()
     local function StartHUD()
         local HUD = WallHack.Internal.HUD
         if HUD.Conn then return end
-        -- [FIX-4] Reset sampling window so the first FPS read is sane.
         HUD.SessionStart = os.clock()
         HUD.LastSample   = os.clock()
         HUD.Frames       = 0
@@ -341,7 +344,6 @@ local okInit, errInit = pcall(function()
 
     local function StopHUD()
         local HUD = WallHack.Internal.HUD
-        -- [FIX-5] Force flag off for consistency.
         WallHack.Visuals.HUDSettings.Enabled = false
         if HUD.Conn then
             pcall(function() HUD.Conn:Disconnect() end)
@@ -394,6 +396,7 @@ local okInit, errInit = pcall(function()
         end
     end
 
+    --// ------------------------- China Hat core -------------------------------
     local function stopHatLoop()
         local Se = WallHack.Internal.SelfESP
         if Se.HatConn then
@@ -405,6 +408,8 @@ local okInit, errInit = pcall(function()
     local function removeChinaHat()
         stopHatLoop()
         local Se = WallHack.Internal.SelfESP
+        -- [FIX-13] Invalidate any pending head-wait retries.
+        Se.HatToken = (Se.HatToken or 0) + 1
         if Se.HatPart then
             pcall(function() Se.HatPart:Destroy() end)
             Se.HatPart = nil
@@ -412,6 +417,9 @@ local okInit, errInit = pcall(function()
         Se.HatHead = nil
     end
 
+    -- [FIX-13] Loop now double-checks that both hat AND head still belong to
+    -- the *current* character. If a respawn happened under our feet, we just
+    -- stop updating — refreshSelfESP (via CharacterAdded) will rebuild.
     local function startHatLoop()
         local Se = WallHack.Internal.SelfESP
         if Se.HatConn then return end
@@ -421,29 +429,73 @@ local okInit, errInit = pcall(function()
             local head = Se.HatHead
             if not hat or not hat.Parent then return end
             if not head or not head.Parent then return end
+            -- Guard: hat/head must belong to the CURRENT character.
+            local cur = LocalPlayer.Character
+            if not cur or head.Parent ~= cur or hat.Parent ~= cur then
+                return
+            end
             local C = WallHack.Visuals.SelfESP.ChinaHat
             local rot = CFrame.Angles(0, math.rad(C.Rotation or 0), 0)
             hat.CFrame = head.CFrame * CFrame.new(0, C.OffsetY, 0) * rot
         end)
     end
 
+    -- [FIX-13] Head-wait retry so fast respawns don't drop the hat.
     local function applyChinaHat()
+        if not WallHack.Visuals.SelfESP.Enabled then return end
+        if not WallHack.Visuals.SelfESP.ChinaHat.Enabled then return end
+
         local char = LocalPlayer.Character
         if not char then return end
+
         local head = char:FindFirstChild("Head")
-        if not head then return end
+        if not head then
+            -- Head not spawned yet — schedule a bounded retry.
+            local Se = WallHack.Internal.SelfESP
+            Se.HatToken = (Se.HatToken or 0) + 1
+            local myToken = Se.HatToken
+            task.spawn(function()
+                local waited = 0
+                while waited < 10 do
+                    if H.ShuttingDown then return end
+                    if myToken ~= Se.HatToken then return end
+                    if LocalPlayer.Character ~= char then return end
+                    if not WallHack.Visuals.SelfESP.Enabled then return end
+                    if not WallHack.Visuals.SelfESP.ChinaHat.Enabled then return end
+                    head = char:FindFirstChild("Head")
+                    if head then break end
+                    task.wait(0.1)
+                    waited = waited + 0.1
+                end
+                if not head then return end
+                if H.ShuttingDown then return end
+                if myToken ~= Se.HatToken then return end
+                applyChinaHat()
+            end)
+            return
+        end
+
         local Se = WallHack.Internal.SelfESP
         local C  = WallHack.Visuals.SelfESP.ChinaHat
-        if Se.HatPart and Se.HatPart.Parent then
+
+        -- [FIX-13] Reuse ONLY if the hat is still parented to the CURRENT char
+        -- and the head reference is still the current one.
+        if Se.HatPart and Se.HatPart.Parent == char and Se.HatHead == head then
             Se.HatPart.Color        = C.Color
             Se.HatPart.Transparency = C.Transparency
             Se.HatPart.Material     = Enum.Material[C.Material] or Enum.Material.Neon
             local mesh = Se.HatPart:FindFirstChildOfClass("SpecialMesh")
             if mesh then mesh.Scale = Vector3.new(C.Size, C.Size * 0.7, C.Size) end
-            Se.HatHead = head
             startHatLoop()
             return
         end
+
+        -- Stale hat (old character / old head) — destroy before rebuilding.
+        if Se.HatPart then
+            pcall(function() Se.HatPart:Destroy() end)
+            Se.HatPart = nil
+        end
+
         local hat = Instance.new("Part")
         hat.Name = "AirHubChinaHat"
         hat.Size = Vector3.new(1, 1, 1)
@@ -457,10 +509,12 @@ local okInit, errInit = pcall(function()
         hat.Material = Enum.Material[C.Material] or Enum.Material.Neon
         hat.Transparency = C.Transparency
         hat.CFrame = head.CFrame * CFrame.new(0, C.OffsetY, 0)
+
         local mesh = Instance.new("SpecialMesh")
         mesh.MeshType = Enum.MeshType.Pyramid
         mesh.Scale = Vector3.new(C.Size, C.Size * 0.7, C.Size)
         mesh.Parent = hat
+
         hat.Parent = char
         Se.HatPart = hat
         Se.HatHead = head
@@ -468,7 +522,6 @@ local okInit, errInit = pcall(function()
     end
 
     local function refreshSelfESP()
-        -- [FIX-2] Respect the master flag.
         local S = WallHack.Visuals.SelfESP
         if not S.Enabled then
             removeChams()
@@ -487,26 +540,38 @@ local okInit, errInit = pcall(function()
 
     local function StartSelfESP()
         local Se = WallHack.Internal.SelfESP
-        if Se.CharConn then
-            -- Already connected; just refresh.
-            if WallHack.Visuals.SelfESP.Enabled then refreshSelfESP() end
-            return
+        if not Se.CharConn then
+            Se.CharConn = LocalPlayer.CharacterAdded:Connect(function(char)
+                -- [FIX-13] Wait properly for the Head part (fast respawn safety).
+                local waited = 0
+                while waited < 5 and not H.ShuttingDown do
+                    if char:FindFirstChild("Head") then break end
+                    task.wait(0.1)
+                    waited = waited + 0.1
+                end
+                if H.ShuttingDown then return end
+                if WallHack.Visuals.SelfESP.Enabled then refreshSelfESP() end
+            end)
         end
-        Se.CharConn = LocalPlayer.CharacterAdded:Connect(function()
-            task.wait(0.5)
-            if H.ShuttingDown then return end
-            if WallHack.Visuals.SelfESP.Enabled then refreshSelfESP() end
-        end)
+        if not Se.CharRemoveConn then
+            -- [FIX-13] Kill the hat immediately on death so no orphan survives.
+            Se.CharRemoveConn = LocalPlayer.CharacterRemoving:Connect(function()
+                removeChinaHat()
+            end)
+        end
         if WallHack.Visuals.SelfESP.Enabled then refreshSelfESP() end
     end
 
     local function StopSelfESP()
         local Se = WallHack.Internal.SelfESP
-        -- [FIX-5] Force flag off.
         WallHack.Visuals.SelfESP.Enabled = false
         if Se.CharConn then
             pcall(function() Se.CharConn:Disconnect() end)
             Se.CharConn = nil
+        end
+        if Se.CharRemoveConn then
+            pcall(function() Se.CharRemoveConn:Disconnect() end)
+            Se.CharRemoveConn = nil
         end
         removeChams()
         removeChinaHat()
@@ -701,7 +766,6 @@ local okInit, errInit = pcall(function()
                     t.Checks.Alive = true
                 end
 
-                -- [FIX-6] Strict boolean, nil-safe.
                 if not WallHack.Settings.TeamCheck then
                     t.Checks.Team = true
                 else
@@ -784,7 +848,6 @@ local okInit, errInit = pcall(function()
 
     local WHConnections = {}
 
-    -- [FIX-1] Generation token instead of a boolean flag.
     local ReWrapToken = 0
 
     local function StartReWrapLoop()
@@ -816,12 +879,10 @@ local okInit, errInit = pcall(function()
     --// Public API
     --// -----------------------------------------------------------------------
     WallHack.Functions.Exit = function()
-        -- [FIX-1] Invalidate the ReWrap loop by bumping the token.
         ReWrapToken += 1
         for _, v in pairs(WHConnections) do
             pcall(function() v:Disconnect() end)
         end
-        -- [FIX-7] Clear the connection table.
         WHConnections = {}
         for _, v in pairs(Players:GetPlayers()) do
             if v ~= LocalPlayer then UnWrap(v) end
@@ -840,14 +901,12 @@ local okInit, errInit = pcall(function()
     end
 
     WallHack.Functions.ResetSettings = function()
-        -- [FIX-3] In-place mutation so external references survive.
         applyDefaults(WallHack.Settings,               DEFAULT_SETTINGS)
         applyDefaults(WallHack.Visuals.BoxSettings,    DEFAULT_BOX)
         applyDefaults(WallHack.Visuals.GlowSettings,   DEFAULT_GLOW)
         applyDefaults(WallHack.Visuals.HUDSettings,    DEFAULT_HUD)
         applyDefaults(WallHack.Visuals.SelfESP,        DEFAULT_SELFESP)
 
-        -- Reset runtime counters too.
         local HUD = WallHack.Internal.HUD
         HUD.SessionStart = os.clock()
         HUD.LastSample   = os.clock()
@@ -874,7 +933,6 @@ local okInit, errInit = pcall(function()
     WallHack.Functions.StopSelfESP    = StopSelfESP
     WallHack.Functions.RefreshSelfESP = refreshSelfESP
 
-    -- [FIX-11] Granular setters so UI never has to touch internals directly.
     WallHack.Functions.SetSelfESPEnabled = function(v)
         WallHack.Visuals.SelfESP.Enabled = v and true or false
         if v then StartSelfESP() else StopSelfESP() end
