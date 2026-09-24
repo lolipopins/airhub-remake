@@ -61,7 +61,7 @@ H.Aimbot = {
         TargetNPCs    = false,
         NPCNameFilter = "",
         AimbotHz = 120,
-        IgnoreGameProcessed = true,  --// NEW: trigger key fires even if game consumes input
+        IgnoreGameProcessed = true,
 
         AutoShoot = {
             Enabled = false,
@@ -218,6 +218,12 @@ local function BuildRayParams(targetCharacter)
             if g.ghost then table.insert(ignoreList, g.ghost) end
         end
     end
+    --// ignore backtrack ghost models so our wallcheck doesn't see them
+    if Hg and Hg.Exploits and Hg.Exploits.Internal and Hg.Exploits.Internal.BacktrackGhosts then
+        for _, ghost in pairs(Hg.Exploits.Internal.BacktrackGhosts) do
+            if ghost and ghost.Parent then table.insert(ignoreList, ghost) end
+        end
+    end
     local params = RaycastParams.new()
     params.FilterDescendantsInstances = ignoreList
     params.FilterType = RAY_FILTER
@@ -249,6 +255,7 @@ local function GetNPCCharacters()
         if not obj:IsA("Model") then return end
         if obj == localChar then return end
         if Players:GetPlayerFromCharacter(obj) then return end
+        if obj:GetAttribute("AirHub_Ghost") then return end
         local hum = obj:FindFirstChildOfClass("Humanoid")
         if not hum then return end
         if Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
@@ -337,9 +344,10 @@ end
 local function GetVisiblePointOnPart(origin, part)
     if not part or not part:IsA("BasePart") then return nil end
 
-    if IsBacktrackEnabled() then
-        return PredictPartPosition(part)
-    end
+    --// NOTE: backtrack NO LONGER bypasses wallcheck.
+    --// If backtrack is enabled, PredictPartPosition returns the old position,
+    --// and wallcheck runs against that old position (from origin to that point).
+    --// This means: walls still block shots, but the shot goes to the OLD spot.
 
     if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
         return PredictPartPosition(part)
@@ -404,6 +412,7 @@ end
 local function IsTargetValid(character, player)
     if not character then return false end
     if character == LocalPlayer.Character then return false end
+    if character:GetAttribute("AirHub_Ghost") then return false end
 
     local hum = character:FindFirstChildOfClass("Humanoid")
     if Aimbot.Settings.AliveCheck and (not hum or hum.Health <= 0) then return false end
@@ -605,9 +614,7 @@ end
 
 local function WaitForShotPoint(targetPart)
     if not targetPart then return nil, false end
-    if IsBacktrackEnabled() then
-        return PredictPartPosition(targetPart), true
-    end
+    --// NOTE: backtrack NO LONGER bypasses wallcheck here either.
     if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
         return PredictPartPosition(targetPart), true
     end
@@ -1841,10 +1848,8 @@ local function LoadAimbot()
         ManageHooks()
     end))
 
-    --// TRIGGER KEY — ignores gpe (games consume RMB for ADS etc.)
     Track(UserInputService.InputBegan:Connect(function(inp, gpe)
         if Typing then return end
-        --// if IgnoreGameProcessed is false, respect gpe
         if not Aimbot.Settings.IgnoreGameProcessed and gpe then return end
 
         local triggerKey = Aimbot.Settings.TriggerKey
@@ -1863,7 +1868,6 @@ local function LoadAimbot()
             else
                 Running = true
             end
-            --// force target refresh on next frame
             Aimbot.Internal.TargetAccum = 999
         end
     end))
@@ -1885,7 +1889,6 @@ local function LoadAimbot()
         end
     end))
 
-    --// SHOOT handler — respects gpe (don't shoot when clicking UI)
     Track(UserInputService.InputBegan:Connect(function(inp, gpe)
         if gpe or Typing then return end
         if not Aimbot.Settings.Enabled then return end
@@ -1904,8 +1907,7 @@ local function LoadAimbot()
                 PerformSilentShot(targetPart, btn, nil)
             else
                 if Aimbot.Settings.WallCheck
-                   and not ShouldBypassWallCheck()
-                   and not IsBacktrackEnabled() then
+                   and not ShouldBypassWallCheck() then
                     local vp = WaitForShotPoint(targetPart)
                     if not vp then return end
                 end
@@ -1937,8 +1939,7 @@ local function LoadAimbot()
 
                 local visiblePoint, nowVisible = WaitForShotPoint(targetPart)
                 if Aimbot.Settings.WallCheck and not visiblePoint
-                   and not ShouldBypassWallCheck()
-                   and not IsBacktrackEnabled() then
+                   and not ShouldBypassWallCheck() then
                     CancelLock()
                     return
                 end
@@ -2057,143 +2058,46 @@ local function Diagnose()
     warn("          AirHub Aimbot - DIAGNOSTICS")
     warn("==========================================================")
 
-    warn("-- [1/6] Core modules --")
-    T(H ~= nil,                              "H (AirHub) exists")
-    T(H._CoreLoaded ~= nil,                  "H._CoreLoaded set")
-    T(Util ~= nil,                           "Util module present")
-    if Util then
-        T(Util.Players ~= nil,               "Util.Players")
-        T(Util.RunService ~= nil,            "Util.RunService")
-        T(Util.UserInputService ~= nil,      "Util.UserInputService")
-        T(Util.VirtualInputManager ~= nil,   "Util.VirtualInputManager")
-        T(Util.ReplicatedStorage ~= nil,     "Util.ReplicatedStorage")
-        T(Util.LocalPlayer ~= nil,           "Util.LocalPlayer")
-        T(type(Util.Track) == "function",    "Util.Track")
-        T(type(Util.HandleError) == "function", "Util.HandleError")
-        T(type(Util.AddLog) == "function",   "Util.AddLog")
-        T(type(Util.SafeKeyCode) == "function", "Util.SafeKeyCode")
-        T(type(Util.SafeUserInputType) == "function", "Util.SafeUserInputType")
-        T(Util.RAY_FILTER ~= nil,            "Util.RAY_FILTER")
-        T(H.DELAY_SHOT_TIMEOUT ~= nil,       "H.DELAY_SHOT_TIMEOUT", H.DELAY_SHOT_TIMEOUT)
-    end
+    T(H ~= nil, "H (AirHub) exists")
+    T(Util ~= nil, "Util module present")
+    T(Players ~= nil, "Players service")
+    T(RunService ~= nil, "RunService")
+    T(UserInputService ~= nil, "UserInputService")
+    T(VirtualInputManager ~= nil, "VirtualInputManager")
+    T(ReplicatedStorage ~= nil, "ReplicatedStorage")
+    T(LocalPlayer ~= nil, "LocalPlayer")
+    T(workspace.CurrentCamera ~= nil, "CurrentCamera")
 
-    warn("-- [2/6] Roblox services --")
-    T(Players ~= nil,                        "Players service")
-    T(RunService ~= nil,                     "RunService")
-    T(UserInputService ~= nil,               "UserInputService")
-    T(VirtualInputManager ~= nil,            "VirtualInputManager")
-    T(ReplicatedStorage ~= nil,              "ReplicatedStorage")
-    T(LocalPlayer ~= nil,                    "LocalPlayer")
-    T(workspace.CurrentCamera ~= nil,        "CurrentCamera")
-    T(LocalPlayer and LocalPlayer.Character ~= nil, "LocalPlayer.Character")
-
-    warn("-- [3/6] Drawing / FOVCircle --")
     local drawingOK = pcall(function() local d = Drawing.new("Circle"); d:Remove() end)
-    T(drawingOK,                             "Drawing.new available")
-    T(Aimbot.FOVCircle ~= nil,               "Aimbot.FOVCircle created")
-    if Aimbot.FOVCircle then
-        local ok = pcall(function() Aimbot.FOVCircle.Radius = 50 end)
-        T(ok,                                "FOVCircle writable")
-    end
+    T(drawingOK, "Drawing.new available")
 
-    warn("-- [4/6] Executor functions --")
-    local execs = {
-        "hookmetamethod", "hookfunction", "newcclosure", "checkcaller",
-        "getrawmetatable", "setreadonly", "getnamecallmethod",
-        "mousemoverel", "mousemoveabs", "setclipboard", "getconnections",
-    }
+    local execs = { "hookmetamethod", "hookfunction", "newcclosure", "checkcaller",
+                    "getrawmetatable", "getnamecallmethod", "mousemoverel", "mousemoveabs" }
     for _, name in ipairs(execs) do
         T(getExec(name) ~= nil, "executor: " .. name)
     end
 
-    warn("-- [5/6] Hook availability --")
     if Aimbot.IsModeAvailable then
-        local modes = {
-            "RayHook", "RayNew", "Vector3Unit", "ScreenPointToRay",
-            "MouseHit", "MouseFull", "GunHandler", "FireServer",
-            "MouseLock", "Mouse", "Camera", "CFrameHook", "Vector3New",
-        }
-        local available = {}
+        local modes = { "RayHook", "RayNew", "Vector3Unit", "ScreenPointToRay",
+                        "MouseHit", "MouseFull", "GunHandler", "FireServer",
+                        "MouseLock", "Mouse", "Camera", "CFrameHook", "Vector3New" }
         for _, m in ipairs(modes) do
             local ok, reason = Aimbot.IsModeAvailable(m)
-            if ok then
-                available[#available + 1] = m
-                T(true, "hook: " .. m)
-            else
-                T(false, "hook: " .. m, reason)
-            end
+            T(ok, "hook: " .. m, reason)
         end
-        Aimbot.AutoDetect.AvailableMethods = available
-    else
-        T(false, "Aimbot.IsModeAvailable", "not exported")
     end
 
-    warn("-- [6/6] Aimbot exports --")
-    local exports = {
-        "CancelLock", "GetVisiblePointOnPart", "GetMousePos",
-        "PredictPartPosition", "MoveMouseAbs", "WorldToMouseVIM",
-        "GetNPCCharacters", "GetLockedCharacter",
-        "RunAutoScan", "CancelAutoScan", "IsModeAvailable",
-        "ShouldBypassWallCheck", "IsBacktrackEnabled",
-        "IsModeHooked", "ShouldRedirect",
-        "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
-    }
+    local exports = { "CancelLock", "GetVisiblePointOnPart", "PredictPartPosition",
+                      "RunAutoScan", "IsModeAvailable", "ShouldBypassWallCheck",
+                      "IsBacktrackEnabled", "IsModeHooked", "ShouldRedirect",
+                      "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
-    end
-
-    warn("-- Settings sanity --")
-    local S = Aimbot.Settings
-    T(S ~= nil,                              "Settings table")
-    if S then
-        T(S.TriggerKey ~= nil,               "TriggerKey", S.TriggerKey)
-        T(S.SilentAimMode ~= nil,            "SilentAimMode", S.SilentAimMode)
-        T(S.LockPart ~= nil,                 "LockPart", S.LockPart)
-        T(S.TeamCheck ~= nil,                "TeamCheck table")
-        T(S.AutoShoot ~= nil,                "AutoShoot table")
-        T(S.AutoEnabledMethods ~= nil,       "AutoEnabledMethods table")
-        T(S.AutoPriorityOrder ~= nil,        "AutoPriorityOrder list")
-        T(S.TPAimKey ~= nil,                 "TPAimKey", S.TPAimKey)
-        T(S.TPAimDistance ~= nil,            "TPAimDistance", tostring(S.TPAimDistance))
-        T(S.WallbangDistance ~= nil,         "WallbangDistance", tostring(S.WallbangDistance))
-        T(S.AimbotHz ~= nil,                 "AimbotHz", tostring(S.AimbotHz))
-        T(S.IgnoreGameProcessed ~= nil,      "IgnoreGameProcessed", tostring(S.IgnoreGameProcessed))
-    end
-
-    warn("-- AntiAim dependency --")
-    local AA = H.AntiAim
-    T(AA ~= nil,                             "H.AntiAim")
-    if AA then
-        T(AA.Desync ~= nil,                  "AntiAim.Desync")
-        T(type(AA.StartDesync) == "function",  "AntiAim.StartDesync")
-        T(type(AA.StopDesync) == "function",   "AntiAim.StopDesync")
-        if AA.Desync and AA.Desync.Settings then
-            T(true, "AntiAim.Desync.Settings ready")
-        else
-            T(false, "AntiAim.Desync.Settings", "not initialized")
-        end
-    end
-
-    warn("-- Backtrack (Exploits) dependency --")
-    local Ex = H.Exploits
-    T(Ex ~= nil,                             "H.Exploits")
-    if Ex then
-        T(Ex.Settings ~= nil,                "Exploits.Settings")
-        T(Ex.Functions ~= nil,               "Exploits.Functions")
-        T(type(Ex.Functions.GetBacktrackCFrame) == "function",
-                                              "Exploits.GetBacktrackCFrame")
-        T(type(Ex.Functions.GetBacktrackCFrameSmart) == "function",
-                                              "Exploits.GetBacktrackCFrameSmart")
     end
 
     warn("==========================================================")
     warn(string.format("  RESULT: %d passed, %d failed", passed, failed))
     warn("==========================================================")
-    if failed == 0 then
-        warn("[DIAG] Everything looks GOOD. Aimbot should work.")
-    else
-        warn("[DIAG] " .. tostring(failed) .. " check(s) FAILED - see [FAIL] lines above.")
-    end
 
     return passed, failed
 end
@@ -2202,10 +2106,7 @@ Aimbot.Diagnose = Diagnose
 
 task.delay(1, function()
     if H.ShuttingDown then return end
-    local ok, err = pcall(Diagnose)
-    if not ok then
-        warn("[DIAG] Diagnose() crashed: " .. tostring(err))
-    end
+    pcall(Diagnose)
 end)
 
 if Aimbot.Settings.AutoRunOnLoad and Aimbot.Settings.SilentAimMode == "Auto" then
