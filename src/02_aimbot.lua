@@ -94,7 +94,7 @@ H.Aimbot = {
         TPAimDistance    = 5,
         TPAimReturnOnKill = true,
 
-        --// Backtrack integration
+        --// Backtrack integration (real RakNet)
         UseBacktrack     = false,
     },
     FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
@@ -161,6 +161,31 @@ end
 
 local function PredictPartPosition(part)
     if not part then return Vector3.new(0, 0, 0) end
+
+    --// ==== REAL RAKNET BACKTRACK ====
+    --// Если аимбот использует backtrack и Exploits хранит историю,
+    --// возвращаем позицию врага с задержкой `BacktrackTime`.
+    --// Это синхронизировано с FakeLag (исходящие FireServer задерживаются
+    --// на то же время) → сервер в lag compensation отматывает мир к этой
+    --// самой позиции → выстрел регистрируется.
+    if Aimbot.Settings.UseBacktrack
+       and H.Exploits
+       and H.Exploits.Settings
+       and H.Exploits.Settings.BacktrackEnabled
+       and H.Exploits.Functions
+       and H.Exploits.Functions.GetBacktrackCFrame then
+        local pl = Players:GetPlayerFromCharacter(part.Parent)
+        if pl then
+            local btCF = H.Exploits.Functions.GetBacktrackCFrame(
+                pl,
+                H.Exploits.Settings.BacktrackTime
+            )
+            if btCF then
+                return btCF.Position
+            end
+        end
+    end
+
     if not Aimbot.Settings.PredictionEnabled then return part.Position end
     local vel = part.AssemblyLinearVelocity or part.Velocity
     if not vel then return part.Position end
@@ -950,7 +975,7 @@ local function PerformInfiniteTP(targetPart, btn)
 end
 
 --// ---------------------------------------------------------------------------
---// PerformSilentShot (с Backtrack)
+--// PerformSilentShot
 --// ---------------------------------------------------------------------------
 
 local function PerformSilentShot(targetPart, btn, wasVisible)
@@ -966,35 +991,9 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
     local startHealth = hum and hum.Health or 0
 
-    --// ==== Backtrack: подменяем targetPart на backtrack-позицию ====
-    local btProxyPart = nil
-    if IsBacktrackEnabled() and targetPlayer then
-        local btCF = H.Exploits.Functions.GetBacktrackCFrame(
-            targetPlayer,
-            H.Exploits.Settings.BacktrackTime
-        )
-        if btCF then
-            btProxyPart = Instance.new("Part")
-            btProxyPart.Size = targetPart.Size
-            btProxyPart.CFrame = btCF
-            btProxyPart.CanCollide = false
-            btProxyPart.Anchored = true
-            btProxyPart.Transparency = 1
-            btProxyPart.Massless = true
-            btProxyPart.CanQuery = false
-            btProxyPart.CanTouch = false
-            btProxyPart.Parent = workspace
-            targetPart = btProxyPart
-        end
-    end
-
-    local function CleanupBT()
-        if btProxyPart and btProxyPart.Parent then
-            task.delay(0.2, function()
-                if btProxyPart and btProxyPart.Parent then btProxyPart:Destroy() end
-            end)
-        end
-    end
+    --// Backtrack уже применяется внутри PredictPartPosition —
+    --// здесь ничего подменять не нужно. Просто стреляем в актуальную
+    --// (backtrack-сдвинутую) позицию.
 
     --// TP Aim — возвращаемся до WallCheck, полностью его игнорируем
     if Aimbot.Settings.TPAimEnabled then
@@ -1003,13 +1002,11 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         else
             PerformInfiniteTP(targetPart, btn)
         end
-        CleanupBT()
         return
     end
     --// Wallbang — возвращаемся до WallCheck, полностью его игнорируем
     if Aimbot.Settings.WallbangEnabled then
         PerformWallbang(targetPart, btn)
-        CleanupBT()
         return
     end
 
@@ -1017,7 +1014,6 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 
     local checkPoint, nowVisible = WaitForShotPoint(targetPart)
     if Aimbot.Settings.WallCheck and not checkPoint then
-        CleanupBT()
         return
     end
     if nowVisible ~= nil then wasVisible = nowVisible end
@@ -1030,16 +1026,10 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
             local origin = workspace.CurrentCamera.CFrame.Position
             visiblePoint = GetVisiblePointOnPart(origin, targetPart)
         end
-        if not visiblePoint then
-            CleanupBT()
-            return
-        end
+        if not visiblePoint then return end
 
         local targetX, targetY = WorldToMouseVIM(visiblePoint)
-        if not targetX then
-            CleanupBT()
-            return
-        end
+        if not targetX then return end
 
         local oldBehavior = UserInputService.MouseBehavior
         local oldIcon     = UserInputService.MouseIconEnabled
@@ -1065,7 +1055,6 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
             UserInputService.MouseIconEnabled = oldIcon
         end)
 
-        CleanupBT()
         task.delay(0.15, function()
             LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
         end)
@@ -1078,16 +1067,10 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
             local origin = workspace.CurrentCamera.CFrame.Position
             visiblePoint = GetVisiblePointOnPart(origin, targetPart)
         end
-        if not visiblePoint then
-            CleanupBT()
-            return
-        end
+        if not visiblePoint then return end
 
         local targetX, targetY = WorldToMouseVIM(visiblePoint)
-        if not targetX then
-            CleanupBT()
-            return
-        end
+        if not targetX then return end
         local curMouse = UserInputService:GetMouseLocation()
         local oldX = math.floor(curMouse.X)
         local oldY = math.floor(curMouse.Y)
@@ -1101,7 +1084,6 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         end)
         if not ok then HandleError("Mouse silent shot failed") end
 
-        CleanupBT()
         task.delay(0.15, function()
             LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
         end)
@@ -1117,7 +1099,6 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
         task.wait(0.001)
         VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
-        CleanupBT()
         task.delay(0.15, function()
             LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
         end)
@@ -1126,10 +1107,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 
     local origin = workspace.CurrentCamera.CFrame.Position
     local visiblePoint = checkPoint or GetVisiblePointOnPart(origin, targetPart)
-    if not visiblePoint then
-        CleanupBT()
-        return
-    end
+    if not visiblePoint then return end
     local oldCF = workspace.CurrentCamera.CFrame
     workspace.CurrentCamera.CFrame = CFrame.new(oldCF.Position, visiblePoint)
 
@@ -1142,7 +1120,6 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     workspace.CurrentCamera.CFrame = oldCF
     if not ok then HandleError("Camera silent shot input failed") end
 
-    CleanupBT()
     task.delay(0.15, function()
         LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
     end)
