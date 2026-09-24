@@ -5,7 +5,7 @@
 --// Features:
 --//   • Name Tags ESP    — player name above head with team/alive checks
 --//   • Hitbox Expander  — "OP Silent Aim" style: enlarge enemy limbs client-side
---//   • Weapon Mods      — Infinite Ammo, Fire Rate, Recoil (ReplicatedStorage.Weapons)
+--//   • Weapon Mods      — Infinite Ammo (StoredAmmo/Ammo = 99999), Fire Rate, Recoil
 --//
 --// Requires: 01_core.lua, 07a_ui_core.lua
 --// ============================================================================
@@ -43,6 +43,7 @@ A.Settings = A.Settings or {
 
     -- Weapon mods
     InfAmmoEnabled        = false,
+    InfAmmoValue          = 99999,
     FireRateEnabled       = false,
     FireRateValue         = 0.02,
     RecoilEnabled         = false,
@@ -166,9 +167,6 @@ end
 
 -- ============================================================================
 --  HITBOX EXPANDER (OP Silent Aim)
---  Enlarges enemy limbs client-side so the server-side hit detection still
---  registers a hit when your bullet's raycast passes through the enlarged
---  hitbox. Same trick as "OP Silent Aim" — no hooking, no remote spoofing.
 -- ============================================================================
 local HITBOX_PARTS = {
     "RightUpperLeg", "LeftUpperLeg",
@@ -243,7 +241,6 @@ local function StartHitboxExpander()
                 if not plr.Parent or not plr.Character then
                     RestoreHitboxForPlayer(plr)
                 elseif A.Settings.HitboxExpanderTeamCheck and not IsEnemy(plr) then
-                    --// Перестал быть врагом — снимаем хитбокс
                     RestoreHitboxForPlayer(plr)
                 else
                     for _, p in ipairs(parts) do
@@ -257,7 +254,6 @@ local function StartHitboxExpander()
                     end
                 end
             end
-            --// Discovery: подхватываем новых игроков / респавны
             for _, plr in ipairs(Players:GetPlayers()) do
                 if plr ~= LocalPlayer and not A.Internal.HitboxApplied[plr] then
                     if not A.Settings.HitboxExpanderTeamCheck or IsEnemy(plr) then
@@ -282,34 +278,74 @@ end
 -- ============================================================================
 --  WEAPON MODS
 -- ============================================================================
+--// Бесконечные патроны: пробегаемся по каждому оружию в ReplicatedStorage.Weapons
+--// и выставляем Ammo / StoredAmmo в InfAmmoValue (по умолчанию 99999).
+local function ApplyInfiniteAmmo()
+    local weapons = ReplicatedStorage:FindFirstChild("Weapons")
+    if not weapons then return 0 end
+
+    local value = tonumber(A.Settings.InfAmmoValue) or 99999
+    local patched = 0
+
+    for _, weapon in ipairs(weapons:GetChildren()) do
+        --// Ammo и StoredAmmo могут быть как прямыми детьми, так и внутри
+        --// какой-нибудь под-папки — поэтому проходимся по всем descendants.
+        local targets = {}
+
+        local directAmmo = weapon:FindFirstChild("Ammo")
+        if directAmmo then targets[#targets + 1] = directAmmo end
+
+        local directStored = weapon:FindFirstChild("StoredAmmo")
+        if directStored then targets[#targets + 1] = directStored end
+
+        if #targets == 0 then
+            --// fallback: ищем глубже
+            for _, d in ipairs(weapon:GetDescendants()) do
+                if d.Name == "Ammo" or d.Name == "StoredAmmo" then
+                    targets[#targets + 1] = d
+                end
+            end
+        end
+
+        for _, t in ipairs(targets) do
+            --// Value может быть IntValue / NumberValue / StringValue
+            pcall(function()
+                if t:IsA("IntValue") or t:IsA("NumberValue") then
+                    t.Value = value
+                elseif t:IsA("StringValue") then
+                    t.Value = tostring(value)
+                end
+                patched = patched + 1
+            end)
+        end
+    end
+
+    return patched
+end
+
+local function ApplyFireRateAndRecoil()
+    local weapons = ReplicatedStorage:FindFirstChild("Weapons")
+    if not weapons then return end
+
+    for _, v in ipairs(weapons:GetDescendants()) do
+        if A.Settings.FireRateEnabled then
+            if v.Name == "Auto"     then v.Value = true end
+            if v.Name == "FireRate" then v.Value = A.Settings.FireRateValue end
+        end
+        if A.Settings.RecoilEnabled then
+            if v.Name == "RecoilControl" then v.Value = 0 end
+            if v.Name == "MaxSpread"     then v.Value = 0 end
+        end
+    end
+end
+
 local function ApplyWeaponMods()
     pcall(function()
         if A.Settings.InfAmmoEnabled then
-            local pg = LocalPlayer:FindFirstChild("PlayerGui")
-            local gui = pg and pg:FindFirstChild("GUI")
-            local client = gui and gui:FindFirstChild("Client")
-            local vars = client and client:FindFirstChild("Variables")
-            if vars then
-                local a1 = vars:FindFirstChild("ammocount")
-                local a2 = vars:FindFirstChild("ammocount2")
-                if a1 then a1.Value = 999 end
-                if a2 then a2.Value = 999 end
-            end
+            ApplyInfiniteAmmo()
         end
         if A.Settings.FireRateEnabled or A.Settings.RecoilEnabled then
-            local weapons = ReplicatedStorage:FindFirstChild("Weapons")
-            if weapons then
-                for _, v in ipairs(weapons:GetDescendants()) do
-                    if A.Settings.FireRateEnabled then
-                        if v.Name == "Auto"     then v.Value = true end
-                        if v.Name == "FireRate" then v.Value = A.Settings.FireRateValue end
-                    end
-                    if A.Settings.RecoilEnabled then
-                        if v.Name == "RecoilControl" then v.Value = 0 end
-                        if v.Name == "MaxSpread"     then v.Value = 0 end
-                    end
-                end
-            end
+            ApplyFireRateAndRecoil()
         end
     end)
 end
@@ -332,6 +368,9 @@ end
 local function StopWeaponMods()
     A.Internal.WeaponLoopActive = false
 end
+
+--// Публичный хелпер для ручного вызова (например, сразу после выстрела)
+A.Functions.ApplyInfiniteAmmo = ApplyInfiniteAmmo
 
 -- ============================================================================
 --  EVENTS
@@ -421,10 +460,28 @@ local function FillUI()
 
     -- Weapon mods
     local secWM = tab:CreateSection({ Name = "Weapon Mods" })
-    secWM:AddToggle({ Name = "Infinite Ammo", Value = A.Settings.InfAmmoEnabled,
+    secWM:AddToggle({ Name = "Infinite Ammo (Ammo + StoredAmmo = 99999)", Value = A.Settings.InfAmmoEnabled,
         Callback = function(v)
             A.Settings.InfAmmoEnabled = v
-            if v then StartWeaponMods() end
+            if v then
+                StartWeaponMods()
+                --// мгновенный эффект, не ждём 0.2 сек
+                task.spawn(function()
+                    task.wait(0.05)
+                    ApplyInfiniteAmmo()
+                end)
+            end
+        end })
+    secWM:AddTextbox({ Name = "Ammo Value (число)",
+        Value = tostring(A.Settings.InfAmmoValue),
+        Callback = function(v)
+            local n = tonumber(v)
+            if n and n > 0 then
+                A.Settings.InfAmmoValue = math.floor(n)
+                if A.Settings.InfAmmoEnabled then
+                    task.spawn(ApplyInfiniteAmmo)
+                end
+            end
         end })
     secWM:AddToggle({ Name = "Fire Rate Mod", Value = A.Settings.FireRateEnabled,
         Callback = function(v)
@@ -443,7 +500,6 @@ local function FillUI()
     return true
 end
 
--- Wait for UI to be ready before adding the tab
 task.spawn(function()
     local deadline = tick() + 30
     while tick() < deadline do
