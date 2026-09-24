@@ -442,6 +442,20 @@ task.delay(math.random(1, 3), function()
             refreshModeLabel()
         end })
 
+    --// Use Backtrack — стрельба в backtrack-позицию
+    secD:AddToggle({ Name = "Use Backtrack", Value = AS.UseBacktrack or false,
+        Callback = function(v)
+            aSet("UseBacktrack", v)
+            if v then
+                local ok = H.Exploits
+                    and H.Exploits.Settings
+                    and H.Exploits.Settings.BacktrackEnabled
+                if not ok then
+                    warn("[AirHub] Use Backtrack: H.Exploits не загружен или Backtrack не включён в Exploits tab.")
+                end
+            end
+        end })
+
     do
         local okLabel = pcall(function()
             modeStatusLabel = secD:AddLabel({ Name = "Mode Status", Text = "Mode: " .. tostring(AS.SilentAimMode or "Auto") })
