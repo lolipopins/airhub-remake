@@ -90,6 +90,7 @@ H.Aimbot = {
         WallbangEnabled  = false,
         WallbangMethod   = "RemotePatch",
         WallbangDistance = 500,
+        WallbangHoldTime = 0.1,
 
         TPAimEnabled     = false,
         TPAimMethod      = "MagicBullet",
@@ -98,6 +99,7 @@ H.Aimbot = {
         TPAimReturnOnKill = true,
 
         UseBacktrack     = false,
+        BacktrackAimAtGhost = false,
     },
     FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
     FOVCircle   = Drawing.new("Circle"),
@@ -129,6 +131,11 @@ H.Aimbot = {
 }
 local Aimbot = H.Aimbot
 
+--// Shared wallbang state — keeps hooks alive during post-shot window
+local WB = {
+    HoldUntil = 0,
+}
+
 local Running       = false
 local Typing        = false
 local LastShotTime  = 0
@@ -155,7 +162,6 @@ local function IsBacktrackEnabled()
     return true
 end
 
---// Проверка что Instance не разрушен и его можно использовать
 local function IsAlive(inst)
     if not inst then return false end
     local ok, parent = pcall(function() return inst.Parent end)
@@ -188,6 +194,7 @@ end
 
 local function GetBacktrackGhostTargets()
     if not Aimbot.Settings.UseBacktrack then return {} end
+    if not Aimbot.Settings.BacktrackAimAtGhost then return {} end
     if not IsBacktrackEnabled() then return {} end
     if not H.Exploits.Internal or not H.Exploits.Internal.BacktrackGhosts then return {} end
 
@@ -231,6 +238,7 @@ local function PredictPartPosition(part)
     end
 
     if Aimbot.Settings.UseBacktrack
+       and Aimbot.Settings.BacktrackAimAtGhost
        and H.Exploits
        and H.Exploits.Settings
        and H.Exploits.Settings.BacktrackEnabled
@@ -339,11 +347,9 @@ local function GetLockedCharacter()
     local L = Aimbot.Locked
     if not L then return nil end
     if typeof(L) == "Instance" and L:IsA("Player") then
-        --// ghost priority, but only if still alive
         if Aimbot.Internal.LockedGhost and IsAlive(Aimbot.Internal.LockedGhost) then
             return Aimbot.Internal.LockedGhost
         end
-        --// ghost died — fall back to real character
         if Aimbot.Internal.LockedGhost then
             Aimbot.Internal.LockedGhost = nil
         end
@@ -415,7 +421,6 @@ local function GetClosestMultipointToMouse(part, refScreen)
 end
 
 local function GetVisiblePointOnPart(origin, part)
-    --// safety: part destroyed → bail out
     if not part or not part:IsA("BasePart") or not IsAlive(part) then return nil end
 
     local aimPos = PredictPartPosition(part)
@@ -946,24 +951,46 @@ local function TeleportToTarget(targetPart)
     return true
 end
 
+--// Send a raw click through VirtualInputManager
+local function FireClick(btn)
+    local mousePos = UserInputService:GetMouseLocation()
+    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
+    task.wait(0.001)
+    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+end
+
+--// Schedule hook removal after HoldTime (+small slack)
+local function ScheduleHookRemoval(restoreFn, holdTime)
+    task.delay((holdTime or Aimbot.Settings.WallbangHoldTime or 0.1) + 0.05, function()
+        pcall(restoreFn)
+    end)
+end
+
+--// ==== MODE 1: RemotePatch — patch direction Vector3 in FireServer args ====
 local function PerformWallbang_RemotePatch(targetPart, btn)
-    local hookf = getExec("hookmetamethod")
+    local hookf     = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
-    local newc = getExec("newcclosure")
-    local checkC = getExec("checkcaller")
-    if not hookf or not getMethod then return false end
+    local newc      = getExec("newcclosure")
+    local checkC    = getExec("checkcaller")
+    if not hookf or not getMethod or not newc then return false end
+
+    local aimPos   = PredictPartPosition(targetPart)
+    local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
+    WB.HoldUntil = tick() + holdTime
 
     local original
     original = hookf(game, "__namecall", newc(function(self, ...)
         local method = getMethod()
-        if method == "FireServer" and not checkC() then
+        if method == "FireServer"
+           and not (checkC and checkC())
+           and tick() < WB.HoldUntil then
             local args = { ... }
+            local cPos = workspace.CurrentCamera.CFrame.Position
             for i, v in ipairs(args) do
                 if typeof(v) == "Vector3" then
                     local vm = v.Magnitude
-                    if math.abs(vm - 1) < 0.3 then
-                        local origin = workspace.CurrentCamera.CFrame.Position
-                        args[i] = (targetPart.Position - origin).Unit
+                    if math.abs(vm - 1) < 0.15 then
+                        args[i] = (aimPos - cPos).Unit
                     end
                 end
             end
@@ -971,33 +998,103 @@ local function PerformWallbang_RemotePatch(targetPart, btn)
         end
         return original(self, ...)
     end))
-    local mousePos = UserInputService:GetMouseLocation()
-    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
-    task.wait(0.001)
-    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
-    task.delay(0.05, function()
-        pcall(function() hookf(game, "__namecall", original) end)
-    end)
+
+    FireClick(btn)
+    ScheduleHookRemoval(function() hookf(game, "__namecall", original) end, holdTime)
     return true
 end
 
+--// ==== MODE 2: RemotePatchFull — patches Vector3 + CFrame + table args ====
+local function PerformWallbang_RemotePatchFull(targetPart, btn)
+    local hookf     = getExec("hookmetamethod")
+    local getMethod = getExec("getnamecallmethod")
+    local newc      = getExec("newcclosure")
+    local checkC    = getExec("checkcaller")
+    if not hookf or not getMethod or not newc then return false end
+
+    local aimPos   = PredictPartPosition(targetPart)
+    local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
+    WB.HoldUntil = tick() + holdTime
+
+    local function rewriteValue(v, depth)
+        depth = depth or 0
+        if depth > 3 then return v end
+        local t = typeof(v)
+        if t == "Vector3" then
+            local vm = v.Magnitude
+            if math.abs(vm - 1) < 0.15 then
+                local cPos = workspace.CurrentCamera.CFrame.Position
+                return (aimPos - cPos).Unit
+            elseif vm > 5 then
+                local dir = (aimPos - v)
+                if dir.Magnitude > 0.001 then
+                    return aimPos - dir.Unit * 2
+                end
+            end
+            return v
+        elseif t == "CFrame" then
+            return CFrame.lookAt(v.Position, aimPos)
+        elseif t == "table" then
+            local newT = {}
+            for k, subv in pairs(v) do
+                newT[k] = rewriteValue(subv, depth + 1)
+            end
+            return newT
+        end
+        return v
+    end
+
+    local original
+    original = hookf(game, "__namecall", newc(function(self, ...)
+        local method = getMethod()
+        if method == "FireServer"
+           and not (checkC and checkC())
+           and tick() < WB.HoldUntil then
+            local args = { ... }
+            for i = 1, #args do
+                args[i] = rewriteValue(args[i], 0)
+            end
+            return original(self, table.unpack(args, 1, #args))
+        end
+        return original(self, ...)
+    end))
+
+    FireClick(btn)
+    ScheduleHookRemoval(function() hookf(game, "__namecall", original) end, holdTime)
+    return true
+end
+
+--// ==== MODE 3: RayIgnore — extend raycast filter to exclude world ====
 local function PerformWallbang_RayIgnore(targetPart, btn)
     local hookf     = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
     local newc      = getExec("newcclosure")
     local checkC    = getExec("checkcaller")
-    if not hookf or not getMethod then return false end
+    if not hookf or not getMethod or not newc then return false end
+
+    local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
+    WB.HoldUntil = tick() + holdTime
 
     local original
     original = hookf(game, "__namecall", newc(function(self, ...)
         local method = getMethod()
-        if method == "Raycast" and not checkC() then
+        if method == "Raycast"
+           and not (checkC and checkC())
+           and tick() < WB.HoldUntil then
             local args = { ... }
             local params = args[3]
             if typeof(params) == "Instance" and params:IsA("RaycastParams") then
+                local current = params.FilterDescendantsInstances
+                local extended = {}
+                if type(current) == "table" then
+                    for _, v in ipairs(current) do
+                        extended[#extended + 1] = v
+                    end
+                end
+                extended[#extended + 1] = workspace
                 pcall(function()
                     params.FilterType = Enum.RaycastFilterType.Exclude
-                    params.FilterDescendantsInstances = { workspace.CurrentCamera }
+                    params.FilterDescendantsInstances = extended
                 end)
             end
             return original(self, table.unpack(args, 1, #args))
@@ -1005,35 +1102,175 @@ local function PerformWallbang_RayIgnore(targetPart, btn)
         return original(self, ...)
     end))
 
-    local mousePos = UserInputService:GetMouseLocation()
-    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
-    task.wait(0.001)
-    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
-
-    task.delay(0.05, function()
-        pcall(function() hookf(game, "__namecall", original) end)
-    end)
+    FireClick(btn)
+    ScheduleHookRemoval(function() hookf(game, "__namecall", original) end, holdTime)
     return true
 end
 
-local function PerformWallbang_BulletTeleport(targetPart, btn)
-    local hrp = GetHRP()
-    if not hrp then return false end
+--// ==== MODE 4: RayNewHook — hook Ray.new constructor ====
+local function PerformWallbang_RayNewHook(targetPart, btn)
+    if type(Ray) ~= "table" or type(Ray.new) ~= "function" then return false end
+    local old = Ray.new
+    local aimPos   = PredictPartPosition(targetPart)
+    local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
+    WB.HoldUntil = tick() + holdTime
+
+    local newc = getExec("newcclosure")
+    local function handler(origin, direction)
+        if tick() < WB.HoldUntil
+           and typeof(origin) == "Vector3"
+           and typeof(direction) == "Vector3" then
+            local dir = aimPos - origin
+            if dir.Magnitude > 0.001 then
+                if direction.Magnitude > 0.001 then
+                    return old(origin, dir.Unit * direction.Magnitude)
+                else
+                    return old(origin, dir.Unit)
+                end
+            end
+        end
+        return old(origin, direction)
+    end
+    if newc then pcall(function() handler = newc(handler) end) end
+
+    local ok = pcall(function() Ray.new = handler end)
+    if not ok then return false end
+
+    FireClick(btn)
+    ScheduleHookRemoval(function() Ray.new = old end, holdTime)
+    return true
+end
+
+--// ==== MODE 5: MuzzleTeleport — move FireServer origin next to target ====
+local function PerformWallbang_MuzzleTeleport(targetPart, btn)
+    local hookf     = getExec("hookmetamethod")
+    local getMethod = getExec("getnamecallmethod")
+    local newc      = getExec("newcclosure")
+    local checkC    = getExec("checkcaller")
+    if not hookf or not getMethod or not newc then return false end
+
+    local aimPos   = PredictPartPosition(targetPart)
+    local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
+    WB.HoldUntil = tick() + holdTime
+
+    local original
+    original = hookf(game, "__namecall", newc(function(self, ...)
+        local method = getMethod()
+        if method == "FireServer"
+           and not (checkC and checkC())
+           and tick() < WB.HoldUntil then
+            local args = { ... }
+            local patchedOrigin = false
+            local cPos = workspace.CurrentCamera.CFrame.Position
+            for i, v in ipairs(args) do
+                if typeof(v) == "Vector3" then
+                    local vm = v.Magnitude
+                    if vm > 5 and not patchedOrigin then
+                        local dir = (aimPos - v)
+                        if dir.Magnitude > 0.001 then
+                            args[i] = aimPos - dir.Unit * 2
+                            patchedOrigin = true
+                        end
+                    elseif math.abs(vm - 1) < 0.15 then
+                        args[i] = (aimPos - cPos).Unit
+                    end
+                end
+            end
+            return original(self, table.unpack(args, 1, #args))
+        end
+        return original(self, ...)
+    end))
+
+    FireClick(btn)
+    ScheduleHookRemoval(function() hookf(game, "__namecall", original) end, holdTime)
+    return true
+end
+
+--// ==== MODE 6: MouseHit — spoof LocalPlayer:GetMouse() during shot ====
+local function PerformWallbang_MouseHit(targetPart, btn)
+    local aimPos   = PredictPartPosition(targetPart)
+    local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
+    WB.HoldUntil = tick() + holdTime
+
+    local oldGetMouse = LocalPlayer.GetMouse
+    local function fakeGetMouse()
+        local realMouse = oldGetMouse(LocalPlayer)
+        return setmetatable({}, {
+            __index = function(_, k)
+                if tick() < WB.HoldUntil then
+                    if k == "Hit" then return aimPos end
+                    if k == "Target" then return targetPart end
+                    if k == "TargetSurface" then return Vector3.new(0, 1, 0) end
+                    if k == "UnitRay" then
+                        local camPos = workspace.CurrentCamera.CFrame.Position
+                        return Ray.new(camPos, (aimPos - camPos).Unit)
+                    end
+                end
+                return realMouse[k]
+            end,
+        })
+    end
+
+    LocalPlayer.GetMouse = fakeGetMouse
+    FireClick(btn)
+    ScheduleHookRemoval(function() LocalPlayer.GetMouse = oldGetMouse end, holdTime)
+    return true
+end
+
+--// ==== MODE 7: ScreenPointToRay — hook camera method ====
+local function PerformWallbang_ScreenPointToRay(targetPart, btn)
     local cam = workspace.CurrentCamera
-    local oldCF = cam.CFrame
-    cam.CFrame = CFrame.new(targetPart.Position - (targetPart.Position - cam.CFrame.Position).Unit * 2, targetPart.Position)
-    local mousePos = UserInputService:GetMouseLocation()
-    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
-    task.wait(0.001)
-    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+    if not cam then return false end
+    local old = cam.ScreenPointToRay
+    if type(old) ~= "function" then return false end
+
+    local aimPos   = PredictPartPosition(targetPart)
+    local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
+    WB.HoldUntil = tick() + holdTime
+
+    local newc = getExec("newcclosure")
+    local function handler(self, x, y)
+        if tick() < WB.HoldUntil then
+            local camPos = self.CFrame.Position
+            local dir = aimPos - camPos
+            if dir.Magnitude > 0.001 then
+                return Ray.new(camPos, dir.Unit)
+            end
+        end
+        return old(self, x, y)
+    end
+    if newc then pcall(function() handler = newc(handler) end) end
+
+    local ok = pcall(function() cam.ScreenPointToRay = handler end)
+    if not ok then return false end
+
+    FireClick(btn)
+    ScheduleHookRemoval(function() cam.ScreenPointToRay = old end, holdTime)
+    return true
+end
+
+--// ==== MODE 8: CameraTP — move camera to look at target during shot ====
+local function PerformWallbang_CameraTP(targetPart, btn)
+    local cam = workspace.CurrentCamera
+    if not cam then return false end
+    local aimPos   = PredictPartPosition(targetPart)
+    local oldCF    = cam.CFrame
+    local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
+
+    cam.CFrame = CFrame.lookAt(cam.CFrame.Position, aimPos)
+    FireClick(btn)
+    task.wait(math.min(holdTime, 0.05))
     cam.CFrame = oldCF
     return true
 end
 
+--// ==== Dispatcher ====
 local function PerformWallbang(targetPart, btn)
     if not Aimbot.Settings.WallbangEnabled then return false end
+    if not targetPart or not IsAlive(targetPart) then return false end
+
     local method = Aimbot.Settings.WallbangMethod
-    local char = targetPart and targetPart.Parent
+    local char = targetPart.Parent
     if not char then return false end
     local hum = char:FindFirstChildOfClass("Humanoid")
     local startHealth = hum and hum.Health or 0
@@ -1041,13 +1278,24 @@ local function PerformWallbang(targetPart, btn)
     local ok = false
     if method == "RemotePatch" then
         ok = PerformWallbang_RemotePatch(targetPart, btn)
+    elseif method == "RemotePatchFull" then
+        ok = PerformWallbang_RemotePatchFull(targetPart, btn)
     elseif method == "RayIgnore" then
         ok = PerformWallbang_RayIgnore(targetPart, btn)
-    elseif method == "BulletTeleport" then
-        ok = PerformWallbang_BulletTeleport(targetPart, btn)
+    elseif method == "RayNewHook" then
+        ok = PerformWallbang_RayNewHook(targetPart, btn)
+    elseif method == "MuzzleTeleport" then
+        ok = PerformWallbang_MuzzleTeleport(targetPart, btn)
+    elseif method == "MouseHit" then
+        ok = PerformWallbang_MouseHit(targetPart, btn)
+    elseif method == "ScreenPointToRay" then
+        ok = PerformWallbang_ScreenPointToRay(targetPart, btn)
+    elseif method == "CameraTP" then
+        ok = PerformWallbang_CameraTP(targetPart, btn)
     end
+
     if ok then
-        task.delay(0.15, function()
+        task.delay(0.2, function()
             local h2 = char:FindFirstChildOfClass("Humanoid")
             if h2 then
                 LogShot(char, char.Name, startHealth, targetPart.Name, false)
@@ -1078,10 +1326,7 @@ local function PerformMagicBullet(targetPart, btn)
     TeleportToTarget(targetPart)
     task.wait(0.01)
 
-    local mousePos = UserInputService:GetMouseLocation()
-    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true, game, 1)
-    task.wait(0.001)
-    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+    FireClick(btn)
 
     task.wait(0.02)
     RestoreCurrentCFrame()
@@ -1263,10 +1508,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
        or mode == "Vector3Unit" or mode == "ScreenPointToRay"
        or mode == "FireServer"
        or mode == "CFrameHook" or mode == "Vector3New" then
-        local mousePos = UserInputService:GetMouseLocation()
-        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
-        task.wait(0.001)
-        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+        FireClick(btn)
         task.delay(0.15, function()
             LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
         end)
@@ -1280,10 +1522,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     workspace.CurrentCamera.CFrame = CFrame.new(oldCF.Position, visiblePoint)
 
     local ok = pcall(function()
-        local mousePos = UserInputService:GetMouseLocation()
-        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
-        task.wait(0.001)
-        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+        FireClick(btn)
     end)
     workspace.CurrentCamera.CFrame = oldCF
     if not ok then HandleError("Camera silent shot input failed") end
@@ -2064,10 +2303,7 @@ local function LoadAimbot()
                     if not vp then return end
                 end
                 RefreshOldPositionIfNeeded()
-                local mousePos = UserInputService:GetMouseLocation()
-                VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
-                task.wait(0.001)
-                VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+                FireClick(btn)
             end
         end
     end))
@@ -2114,10 +2350,7 @@ local function LoadAimbot()
                     PerformSilentShot(targetPart, shootBtn, nowVisible)
                 else
                     RefreshOldPositionIfNeeded()
-                    local mousePos = UserInputService:GetMouseLocation()
-                    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, shootBtn, true,  game, 1)
-                    task.wait(0.001)
-                    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, shootBtn, false, game, 1)
+                    FireClick(shootBtn)
                 end
                 LastShotTime = nowt
             end, HandleError)
