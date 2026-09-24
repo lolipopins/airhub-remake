@@ -60,6 +60,11 @@ H.Aimbot = {
         PredictionTime = 0.15,
         TargetNPCs    = false,
         NPCNameFilter = "",
+
+        --// NEW: target update rate. 120 is plenty for human reaction speeds.
+        --// Higher values waste CPU at 240+ FPS with no benefit.
+        AimbotHz = 120,
+
         AutoShoot = {
             Enabled = false,
             ShootKey = "MouseButton1",
@@ -94,14 +99,18 @@ H.Aimbot = {
         TPAimDistance    = 5,
         TPAimReturnOnKill = true,
 
-        --// Backtrack integration (position-history based)
         UseBacktrack     = false,
     },
     FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
     FOVCircle   = Drawing.new("Circle"),
     Locked      = nil,
     LockPartInstance = nil,
-    Internal    = {},
+    Internal    = {
+        TargetAccum  = 0,       --// for throttling target selection
+        FovAccum     = 0,       --// for throttling FOV circle
+        LastHookState = {},     --// mode -> true/false (installed or not)
+        LastManageKey = nil,    --// hash of current desired hook state
+    },
 
     AutoDetect = {
         Active         = false,
@@ -166,9 +175,6 @@ end
 local function PredictPartPosition(part)
     if not part then return Vector3.new(0, 0, 0) end
 
-    --// ==== Backtrack (position-history based, no packet delay) ====
-    --// Использует smart-версию: если враг слишком быстро двигался,
-    --// возвращает nil → падаем на текущую позицию.
     if Aimbot.Settings.UseBacktrack
        and H.Exploits
        and H.Exploits.Settings
@@ -338,12 +344,10 @@ end
 local function GetVisiblePointOnPart(origin, part)
     if not part or not part:IsA("BasePart") then return nil end
 
-    --// Backtrack активен → стены игнорируем полностью
     if IsBacktrackEnabled() then
         return PredictPartPosition(part)
     end
 
-    --// WallCheck отключён ИЛИ включены TP/WB → стены игнорируем
     if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
         return PredictPartPosition(part)
     end
@@ -608,7 +612,6 @@ end
 
 local function WaitForShotPoint(targetPart)
     if not targetPart then return nil, false end
-    --// Backtrack / TP / WB bypass — не ждём видимости
     if IsBacktrackEnabled() then
         return PredictPartPosition(targetPart), true
     end
@@ -730,14 +733,29 @@ local function GetEffectiveMode()
     return m
 end
 
-local function IsModeActive(mode)
+--// Hook lifecycle: hooks stay INSTALLED while mode is selected + SilentAim on.
+--// They only REDIRECT while Running (trigger key held). This is the fix for
+--// high-fps races where the hook couldn't install between keypress and shot.
+local function IsModeHooked(mode)
     if Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode == mode then
         return Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim
     end
     return Aimbot.Settings.Enabled
        and Aimbot.Settings.SilentAim
        and GetEffectiveMode() == mode
-       and Running
+end
+
+--// Whether the hook should actually redirect the call
+local function ShouldRedirect(mode)
+    if Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode == mode then
+        return true
+    end
+    return IsModeHooked(mode) and Running
+end
+
+--// Backwards-compat: some code paths still call IsModeActive.
+local function IsModeActive(mode)
+    return IsModeHooked(mode)
 end
 
 local function InScanFor(mode)
@@ -1001,10 +1019,6 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
     local startHealth = hum and hum.Health or 0
 
-    --// Backtrack уже применяется внутри PredictPartPosition —
-    --// здесь ничего подменять не нужно.
-
-    --// TP Aim — возвращаемся до WallCheck, полностью его игнорируем
     if Aimbot.Settings.TPAimEnabled then
         if Aimbot.Settings.TPAimMethod == "MagicBullet" then
             PerformMagicBullet(targetPart, btn)
@@ -1013,7 +1027,6 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         end
         return
     end
-    --// Wallbang — возвращаемся до WallCheck, полностью его игнорируем
     if Aimbot.Settings.WallbangEnabled then
         PerformWallbang(targetPart, btn)
         return
@@ -1135,42 +1148,6 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 end
 
 --// ---------------------------------------------------------------------------
---// Target resolver
---// ---------------------------------------------------------------------------
-local function GetClosestTargetRay()
-    local target, dist = nil, math.huge
-    local mousePos = GetMousePos()
-    local candidates = {}
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character then
-            local sameTeam
-            if LocalPlayer.Team and player.Team then
-                sameTeam = (LocalPlayer.Team == player.Team)
-            else
-                sameTeam = (LocalPlayer:GetAttribute('Team') == player:GetAttribute('Team'))
-            end
-            if not sameTeam then table.insert(candidates, player.Character) end
-        end
-    end
-    if Aimbot.Settings.TargetNPCs then
-        for _, npc in ipairs(GetNPCCharacters()) do table.insert(candidates, npc) end
-    end
-    for _, char in ipairs(candidates) do
-        local head = char:FindFirstChild('Head')
-        local hum  = char:FindFirstChildOfClass('Humanoid')
-        if head and hum and hum.Health > 0 then
-            local sp, on = workspace.CurrentCamera:WorldToViewportPoint(head.Position)
-            if on then
-                local hp = Vector2.new(sp.X, sp.Y)
-                local mag = (mousePos - hp).magnitude
-                if mag < dist then dist = mag; target = head end
-            end
-        end
-    end
-    return target
-end
-
---// ---------------------------------------------------------------------------
 --// Hooks
 --// ---------------------------------------------------------------------------
 
@@ -1188,12 +1165,16 @@ local function SetupRayHook()
     end
     oldRayIndex = savedOriginal
     mt.__index = function(t, k)
-        if k == 'Direction' and not H.ShuttingDown and IsModeActive("RayHook") then
+        if k == 'Direction' and not H.ShuttingDown and IsModeHooked("RayHook") then
             if InScanFor("RayHook") then
                 ReportHookCall("RayHook")
                 return oldRayIndex(t, k)
             end
-            local target = GetClosestTargetRay()
+            if not ShouldRedirect("RayHook") then
+                return oldRayIndex(t, k)
+            end
+            --// Fast path: use cached LockPartInstance set by the throttled loop
+            local target = Aimbot.LockPartInstance
             if target then
                 local origin = oldRayIndex(t, 'Origin')
                 local vp = GetVisiblePointOnPart(origin, target)
@@ -1229,13 +1210,16 @@ local function SetupRayNewHook()
     local checkC = getExec("checkcaller")
 
     local function handler(origin, direction)
-        if not H.ShuttingDown and IsModeActive("RayNew") then
+        if not H.ShuttingDown and IsModeHooked("RayNew") then
             if not (checkC and not checkC()) then
                 if InScanFor("RayNew") then
                     ReportHookCall("RayNew")
                     return RayNewOriginal(origin, direction)
                 end
-                local target = Aimbot.LockPartInstance or GetClosestTargetRay()
+                if not ShouldRedirect("RayNew") then
+                    return RayNewOriginal(origin, direction)
+                end
+                local target = Aimbot.LockPartInstance
                 if target then
                     local aimPos = PredictPartPosition(target)
                     local dir = aimPos - origin
@@ -1280,11 +1264,14 @@ local function SetupVector3UnitHook()
     V3_oldIndex = savedOriginal
 
     mt.__index = function(self, k)
-        if k == "Unit" and not H.ShuttingDown and IsModeActive("Vector3Unit") then
+        if k == "Unit" and not H.ShuttingDown and IsModeHooked("Vector3Unit") then
             local mag = math.sqrt(self.X*self.X + self.Y*self.Y + self.Z*self.Z)
             if math.abs(mag - 1) < 0.25 then
                 if InScanFor("Vector3Unit") then
                     ReportHookCall("Vector3Unit")
+                    return V3_oldIndex(self, k)
+                end
+                if not ShouldRedirect("Vector3Unit") then
                     return V3_oldIndex(self, k)
                 end
                 local target = Aimbot.LockPartInstance
@@ -1324,9 +1311,12 @@ local function SetupScreenPointToRayHook()
 
     local newc = getExec("newcclosure")
     local function handler(self, x, y)
-        if not H.ShuttingDown and IsModeActive("ScreenPointToRay") then
+        if not H.ShuttingDown and IsModeHooked("ScreenPointToRay") then
             if InScanFor("ScreenPointToRay") then
                 ReportHookCall("ScreenPointToRay")
+                return SPR_Original(self, x, y)
+            end
+            if not ShouldRedirect("ScreenPointToRay") then
                 return SPR_Original(self, x, y)
             end
             local target = Aimbot.LockPartInstance
@@ -1387,9 +1377,9 @@ local function SetupMouseHook()
         return setmetatable({}, {
             __index = function(t, k)
                 if not H.ShuttingDown then
-                    local isHit  = (k == "Hit")  and IsModeActive("MouseHit")
+                    local isHit  = (k == "Hit")  and IsModeHooked("MouseHit")
                     local isFull = (k == "Hit" or k == "UnitRay" or k == "Target" or k == "TargetSurface")
-                                   and IsModeActive("MouseFull")
+                                   and IsModeHooked("MouseFull")
                     if isHit or isFull then
                         if InScanFor("MouseHit") and k == "Hit" then
                             ReportHookCall("MouseHit")
@@ -1397,6 +1387,10 @@ local function SetupMouseHook()
                         end
                         if InScanFor("MouseFull") and (k == "Hit" or k == "UnitRay" or k == "Target") then
                             ReportHookCall("MouseFull")
+                            return realMouse[k]
+                        end
+                        local mode = isHit and "MouseHit" or "MouseFull"
+                        if not ShouldRedirect(mode) then
                             return realMouse[k]
                         end
                         local target = Aimbot.LockPartInstance
@@ -1446,13 +1440,16 @@ local function SetupFireServerHook()
 
     local function handler(self, ...)
         local method = getMethod()
-        if method == "FireServer" and not H.ShuttingDown and IsModeActive("FireServer") then
+        if method == "FireServer" and not H.ShuttingDown and IsModeHooked("FireServer") then
             if not (checkC and checkC()) then
                 if InScanFor("FireServer") then
                     if typeof(self) == "Instance"
                        and (self:IsA("RemoteEvent") or self:IsA("UnreliableRemoteEvent")) then
                         ReportHookCall("FireServer")
                     end
+                    return FS_Original(self, ...)
+                end
+                if not ShouldRedirect("FireServer") then
                     return FS_Original(self, ...)
                 end
 
@@ -1518,11 +1515,14 @@ local function SetupGunHandlerHook()
     GunHandlerOldShoot = GunHandler.Shoot
     GunHandler.Shoot = function(p1, p2, p3, p4, p5, p6, p7, p8)
         local Hg = getgenv().AirHub
-        if Hg and Hg.Aimbot and IsModeActive("GunHandler") then
+        if Hg and Hg.Aimbot and IsModeHooked("GunHandler") then
             if InScanFor("GunHandler") then
                 if p1 == LocalPlayer then
                     ReportHookCall("GunHandler")
                 end
+                return GunHandlerOldShoot(p1, p2, p3, p4, p5, p6, p7, p8)
+            end
+            if not ShouldRedirect("GunHandler") then
                 return GunHandlerOldShoot(p1, p2, p3, p4, p5, p6, p7, p8)
             end
             if Hg.Aimbot.Locked and Hg.Aimbot.LockPartInstance then
@@ -1565,12 +1565,15 @@ local function SetupCFrameHook()
     local checkC = getExec("checkcaller")
 
     local function handler(at, lookAt, up)
-        if not H.ShuttingDown and IsModeActive("CFrameHook") then
+        if not H.ShuttingDown and IsModeHooked("CFrameHook") then
             if not (checkC and not checkC()) then
                 if InScanFor("CFrameHook") then
                     if typeof(at) == "Vector3" and typeof(lookAt) == "Vector3" then
                         ReportHookCall("CFrameHook")
                     end
+                    return CFrameHookOriginal(at, lookAt, up)
+                end
+                if not ShouldRedirect("CFrameHook") then
                     return CFrameHookOriginal(at, lookAt, up)
                 end
                 local target = Aimbot.LockPartInstance
@@ -1613,13 +1616,16 @@ local function SetupVector3NewHook()
     local checkC = getExec("checkcaller")
 
     local function handler(x, y, z)
-        if not H.ShuttingDown and IsModeActive("Vector3New") then
+        if not H.ShuttingDown and IsModeHooked("Vector3New") then
             if not (checkC and not checkC()) then
                 if type(x) == "number" and type(y) == "number" and type(z) == "number" then
                     local mag = math.sqrt(x*x + y*y + z*z)
                     if math.abs(mag - 1) < 0.25 then
                         if InScanFor("Vector3New") then
                             ReportHookCall("Vector3New")
+                            return Vector3NewOriginal(x, y, z)
+                        end
+                        if not ShouldRedirect("Vector3New") then
                             return Vector3NewOriginal(x, y, z)
                         end
                         local target = Aimbot.LockPartInstance
@@ -1660,16 +1666,51 @@ task.spawn(function()
     end
 end)
 
+--// ManageHooks — only rebuilds hook state when something actually changed.
+--// At 240 FPS this saves ~230 no-op checks per second.
 local function ManageHooks()
-    if IsModeActive("RayHook")            then SetupRayHook()            else RemoveRayHook()            end
-    if IsModeActive("RayNew")             then SetupRayNewHook()         else RemoveRayNewHook()         end
-    if IsModeActive("Vector3Unit")        then SetupVector3UnitHook()    else RemoveVector3UnitHook()    end
-    if IsModeActive("ScreenPointToRay")   then SetupScreenPointToRayHook() else RemoveScreenPointToRayHook() end
-    if IsModeActive("MouseHit") or IsModeActive("MouseFull")
-                                          then SetupMouseHook()          else RemoveMouseHook()          end
-    if IsModeActive("FireServer")         then SetupFireServerHook()     else RemoveFireServerHook()     end
-    if IsModeActive("CFrameHook")         then SetupCFrameHook()         else RemoveCFrameHook()         end
-    if IsModeActive("Vector3New")         then SetupVector3NewHook()     else RemoveVector3NewHook()     end
+    local m = GetEffectiveMode()
+    local autoScanMode = Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode or nil
+    local desired = {}
+
+    local function want(name)
+        return IsModeHooked(name) or (autoScanMode == name)
+    end
+
+    desired.RayHook          = want("RayHook")
+    desired.RayNew           = want("RayNew")
+    desired.Vector3Unit      = want("Vector3Unit")
+    desired.ScreenPointToRay = want("ScreenPointToRay")
+    desired.Mouse            = want("MouseHit") or want("MouseFull")
+    desired.FireServer       = want("FireServer")
+    desired.CFrameHook       = want("CFrameHook")
+    desired.Vector3New       = want("Vector3New")
+
+    --// early-out if nothing changed since last frame
+    local key = table.concat({
+        tostring(desired.RayHook),
+        tostring(desired.RayNew),
+        tostring(desired.Vector3Unit),
+        tostring(desired.ScreenPointToRay),
+        tostring(desired.Mouse),
+        tostring(desired.FireServer),
+        tostring(desired.CFrameHook),
+        tostring(desired.Vector3New),
+    }, "|")
+
+    if Aimbot.Internal.LastManageKey == key then
+        return
+    end
+    Aimbot.Internal.LastManageKey = key
+
+    if desired.RayHook          then SetupRayHook()            else RemoveRayHook()            end
+    if desired.RayNew           then SetupRayNewHook()         else RemoveRayNewHook()         end
+    if desired.Vector3Unit      then SetupVector3UnitHook()    else RemoveVector3UnitHook()    end
+    if desired.ScreenPointToRay then SetupScreenPointToRayHook() else RemoveScreenPointToRayHook() end
+    if desired.Mouse            then SetupMouseHook()          else RemoveMouseHook()          end
+    if desired.FireServer       then SetupFireServerHook()     else RemoveFireServerHook()     end
+    if desired.CFrameHook       then SetupCFrameHook()         else RemoveCFrameHook()         end
+    if desired.Vector3New       then SetupVector3NewHook()     else RemoveVector3NewHook()     end
 end
 
 local function RunAutoScan()
@@ -1703,6 +1744,7 @@ local function RunAutoScan()
                     warn("[AutoScan] Testing " .. mode .. " (" .. tostring(Aimbot.Settings.AutoTestDuration) .. "s)...")
                     Aimbot.AutoDetect.TestMode      = mode
                     Aimbot.AutoDetect.HookCallCount = 0
+                    Aimbot.Internal.LastManageKey = nil  --// force ManageHooks to run
 
                     task.wait(0.15)
 
@@ -1721,11 +1763,13 @@ local function RunAutoScan()
                         selected = mode
                         warn("[AutoScan] " .. mode .. " -> OK (" .. calls .. " game hook calls) -> SELECTED")
                         Aimbot.AutoDetect.TestMode = nil
+                        Aimbot.Internal.LastManageKey = nil
                         task.wait(0.1)
                         break
                     else
                         warn("[AutoScan] " .. mode .. " -> FAIL (" .. calls .. " game hook calls, need " .. tostring(Aimbot.Settings.AutoMinHookCalls or 3) .. ")")
                         Aimbot.AutoDetect.TestMode = nil
+                        Aimbot.Internal.LastManageKey = nil
                         task.wait(0.1)
                     end
                 end
@@ -1735,6 +1779,7 @@ local function RunAutoScan()
         Aimbot.AutoDetect.SelectedMethod = selected or Aimbot.Settings.AutoFallback or "Camera"
         Aimbot.AutoDetect.Active = false
         Aimbot.AutoDetect.TestMode = nil
+        Aimbot.Internal.LastManageKey = nil
 
         warn("========================================")
         if selected then
@@ -1752,6 +1797,7 @@ local function CancelAutoScan()
     end
     Aimbot.AutoDetect.Active = false
     Aimbot.AutoDetect.TestMode = nil
+    Aimbot.Internal.LastManageKey = nil
 end
 
 local function LoadAimbot()
@@ -1761,40 +1807,55 @@ local function LoadAimbot()
         local dt = math.min(0.033, now - lastDelta)
         lastDelta = now
 
-        if Aimbot.Settings.Enabled and Aimbot.FOVSettings.Enabled and not Aimbot.Settings.IgnoreFOV then
-            Aimbot.FOVCircle.Radius = Aimbot.FOVSettings.Amount
-            Aimbot.FOVCircle.Thickness = 1
-            Aimbot.FOVCircle.Filled = false
-            Aimbot.FOVCircle.Transparency = 0.5
-            Aimbot.FOVCircle.Visible = Aimbot.FOVSettings.Visible
-            Aimbot.FOVCircle.Position = UserInputService:GetMouseLocation()
-        else
-            Aimbot.FOVCircle.Visible = false
+        --// FOV circle — throttle to 60 Hz (no reason to update faster)
+        Aimbot.Internal.FovAccum = Aimbot.Internal.FovAccum + dt
+        if Aimbot.Internal.FovAccum >= (1 / 60) then
+            Aimbot.Internal.FovAccum = 0
+            if Aimbot.Settings.Enabled and Aimbot.FOVSettings.Enabled and not Aimbot.Settings.IgnoreFOV then
+                Aimbot.FOVCircle.Radius = Aimbot.FOVSettings.Amount
+                Aimbot.FOVCircle.Thickness = 1
+                Aimbot.FOVCircle.Filled = false
+                Aimbot.FOVCircle.Transparency = 0.5
+                Aimbot.FOVCircle.Visible = Aimbot.FOVSettings.Visible
+                Aimbot.FOVCircle.Position = UserInputService:GetMouseLocation()
+            else
+                Aimbot.FOVCircle.Visible = false
+            end
         end
 
-        if Aimbot.Settings.Enabled and Running then
-            GetClosestPlayer()
-            Aimbot.FOVCircle.Color = Color3.fromRGB(255, 255, 255)
-            if Aimbot.Locked and Aimbot.LockPartInstance then
-                local targetPart = Aimbot.LockPartInstance
-                local origin = GetCheckOrigin()
-                local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
-                if visiblePoint then
-                    Aimbot.FOVCircle.Color = Color3.fromRGB(255, 200, 70)
-                    if not Aimbot.Settings.SilentAim then
-                        local targetPos = visiblePoint
-                        if Aimbot.Settings.AimMethod == "Instant" then
-                            workspace.CurrentCamera.CFrame = CFrame.new(workspace.CurrentCamera.CFrame.Position, targetPos)
-                        else
-                            local targetCF = CFrame.new(workspace.CurrentCamera.CFrame.Position, targetPos)
-                            local smoothFactor = 1 - math.exp(-Aimbot.Settings.AimSmoothingSpeed * dt)
-                            workspace.CurrentCamera.CFrame = workspace.CurrentCamera.CFrame:Lerp(targetCF, smoothFactor)
+        --// Target selection — throttled to AimbotHz (default 120). At 240+ FPS
+        --// this halves or quarters CPU spent on target selection.
+        local hz = math.max(30, math.min(1000, Aimbot.Settings.AimbotHz or 120))
+        local interval = 1 / hz
+        Aimbot.Internal.TargetAccum = Aimbot.Internal.TargetAccum + dt
+        if Aimbot.Internal.TargetAccum >= interval then
+            Aimbot.Internal.TargetAccum = 0
+
+            if Aimbot.Settings.Enabled and Running then
+                GetClosestPlayer()
+                Aimbot.FOVCircle.Color = Color3.fromRGB(255, 255, 255)
+                if Aimbot.Locked and Aimbot.LockPartInstance then
+                    local targetPart = Aimbot.LockPartInstance
+                    local origin = GetCheckOrigin()
+                    local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
+                    if visiblePoint then
+                        Aimbot.FOVCircle.Color = Color3.fromRGB(255, 200, 70)
+                        if not Aimbot.Settings.SilentAim then
+                            local targetPos = visiblePoint
+                            if Aimbot.Settings.AimMethod == "Instant" then
+                                workspace.CurrentCamera.CFrame = CFrame.new(workspace.CurrentCamera.CFrame.Position, targetPos)
+                            else
+                                local targetCF = CFrame.new(workspace.CurrentCamera.CFrame.Position, targetPos)
+                                local smoothFactor = 1 - math.exp(-Aimbot.Settings.AimSmoothingSpeed * (1 / hz))
+                                workspace.CurrentCamera.CFrame = workspace.CurrentCamera.CFrame:Lerp(targetCF, smoothFactor)
+                            end
                         end
                     end
                 end
             end
         end
 
+        --// ManageHooks — cheap thanks to LastManageKey cache
         ManageHooks()
     end))
 
@@ -1816,6 +1877,8 @@ local function LoadAimbot()
             else
                 Running = true
             end
+            --// force one immediate target refresh so the very first shot uses fresh data
+            Aimbot.Internal.TargetAccum = interval
         end
     end))
 
@@ -1974,6 +2037,8 @@ Aimbot.CancelAutoScan        = CancelAutoScan
 Aimbot.IsModeAvailable       = IsModeAvailable
 Aimbot.ShouldBypassWallCheck = ShouldBypassWallCheck
 Aimbot.IsBacktrackEnabled    = IsBacktrackEnabled
+Aimbot.IsModeHooked          = IsModeHooked
+Aimbot.ShouldRedirect        = ShouldRedirect
 
 Aimbot.PerformWallbang       = PerformWallbang
 Aimbot.PerformMagicBullet    = PerformMagicBullet
@@ -2083,6 +2148,7 @@ local function Diagnose()
         "GetNPCCharacters", "GetLockedCharacter",
         "RunAutoScan", "CancelAutoScan", "IsModeAvailable",
         "ShouldBypassWallCheck", "IsBacktrackEnabled",
+        "IsModeHooked", "ShouldRedirect",
         "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
     }
     for _, name in ipairs(exports) do
@@ -2103,6 +2169,7 @@ local function Diagnose()
         T(S.TPAimKey ~= nil,                 "TPAimKey", S.TPAimKey)
         T(S.TPAimDistance ~= nil,            "TPAimDistance", tostring(S.TPAimDistance))
         T(S.WallbangDistance ~= nil,         "WallbangDistance", tostring(S.WallbangDistance))
+        T(S.AimbotHz ~= nil,                 "AimbotHz", tostring(S.AimbotHz))
     end
 
     warn("-- AntiAim dependency --")
