@@ -1,3 +1,20 @@
+--// ============================================================================
+--// AirHub Loader + Specific Game version
+--// ============================================================================
+--// Features:
+--//   • Supports SIX versions (Full / Lite / Legacy / Original V2 / Original / Specific Game)
+--//   • Specific Game loads the "+1 mog script" from lolipopins/airhub-remake
+--//   • LOCAL PRIORITY: читает файлы из workspace (AirHub/src/...) если они есть,
+--//     иначе качает по HTTP с GitHub.
+--//   • Version picker in the menu (6 buttons)
+--//   • Kick Logger with reason-change detection
+--//   • All bypasses embedded, selectable from menu (OFF by default)
+--//   • Adonis AntiCheat bypass (Detected/Kill + debug.info shield)
+--//   • replaceHumanoid(BAC) — мягкая подмена Humanoid с авто-фиксом камеры
+--//     и перезапуском Animate (минимум побочек).
+--//   • Bypass list sorted alphabetically
+--// ============================================================================
+
 local AIRHUB_VERSIONS = {
     full = {
         id          = "full",
@@ -52,20 +69,19 @@ local AIRHUB_VERSIONS = {
         url         = "https://raw.githubusercontent.com/Exunys/AirHub/main/AirHub.lua",
         localPath   = "original.lua",
     },
-    --// NEW: custom menu for specific game 92648272637932
+    --// NEW: Specific Game — "+1 mog script" from lolipopins/airhub-remake
     specific_game = {
         id          = "specific_game",
         label       = "Specific Game",
         description = "Custom mod menu: Auto Mog / Auto Clicker / Noclip / Speed",
         type        = "single",
-        url         = "https://raw.githubusercontent.com/lolipopins/airhub-remake/refs/heads/main/%2B1%20mog%20script",
+        url         = "https://raw.githubusercontent.com/lolipopins/airhub-remake/main/%2B1%20mog%20script",
         localPath   = "+1 mog script.lua",
     },
 }
 
---// Порядок в UI (5 items - row 1: full, lite, legacy | row 2: original_v2, original)
---// specific_game НЕ включён в меню — он подставляется автоматически по PlaceId.
-local AIRHUB_VERSION_ORDER = { "full", "lite", "legacy", "original_v2", "original" }
+--// Порядок в UI: row 1: full, lite, legacy | row 2: original_v2, original | row 3: specific_game
+local AIRHUB_VERSION_ORDER = { "full", "lite", "legacy", "original_v2", "original", "specific_game" }
 
 --// Пробуем эти пути по порядку для локальных модулей и single-file версий.
 local LOCAL_DIRS_MODULES = {
@@ -85,7 +101,7 @@ local CONFIG = {
     MENU_TITLE      = "AirHub Loader",
     KICK_LOG_PREFIX = "[AirHub][KICK]",
     BLOCK_KICK      = true,
-    --// PlaceId, для которого подгружается specific_game
+    --// PlaceId для автоопределения (если хочешь оставить авто-режим)
     SPECIFIC_PLACE_ID = 92648272637932,
 }
 
@@ -1527,11 +1543,8 @@ local function loadAirHub(versionId)
 end
 
 --// ============================================================================
---// SPECIFIC GAME AUTO-DETECT
+--// SPECIFIC GAME AUTO-DETECT (optional)
 --// ============================================================================
---// Если игрок в игре с PlaceId = 92648272637932 — грузим наш кастомный
---// мод-меню (Auto Mog / Auto Clicker / Noclip / Speed).
---// Иначе — AirHub Full.
 local function isSpecificGame()
     local ok, pid = pcall(function() return game.PlaceId end)
     if not ok or type(pid) ~= "number" then return false end
@@ -1546,6 +1559,9 @@ local function startFlow()
         destroyMenu()
 
         local versionId
+        --// Если хочешь автоопределение — раскомментируй блок ниже.
+        --// Сейчас всегда используется выбранная в меню версия.
+        --[[
         if isSpecificGame() then
             versionId = "specific_game"
             say(string.format("[AirHub] detected PlaceId %d -> loading SPECIFIC GAME menu",
@@ -1554,6 +1570,10 @@ local function startFlow()
             versionId = cfg._version or "full"
             say(string.format("[AirHub] user config applied | version = %s", versionId))
         end
+        ]]
+
+        versionId = cfg._version or "full"
+        say(string.format("[AirHub] user config applied | version = %s", versionId))
 
         runSelectedBypasses(cfg)
 
