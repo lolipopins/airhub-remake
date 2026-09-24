@@ -162,7 +162,7 @@ task.delay(math.random(1, 3), function()
     LibraryRef = Library
 
     local MainFrame = Library:CreateWindow({
-        Name = "AirHub",
+        Name = "AirHub",          -- <<< вот тут название меню
         Themeable = {
             Image = "96742921028995",
             Info  = "Game / Player",
