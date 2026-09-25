@@ -3,11 +3,7 @@
 --//
 --// v8 (2026-09-26):
 --//   * NEW "Raycast" mode: hooks workspace:Raycast(origin, dir, params) and patches
---//     dir to aim at the locked target. Uses strict argument validation
---//     (Vector3, Vector3, RaycastParams).
---//   * NEW HitChance setting (0-100): random per-shot skip of argument patching.
---//     Applies to FireServer, Raycast and RayNew. Modeled on the
---//     "Universal Silent Aim" CalculateChance() pattern.
+--//     dir to aim at the locked target. Uses strict argument validation.
 --//   * NEW CycleAutowork(dir) + GetWorkingMethods() — iterate through methods
 --//     that are BOTH enabled (AutoEnabledMethods) AND available (IsModeAvailable).
 --//     Designed for "Next/Prev Autowork" buttons in the UI.
@@ -74,7 +70,6 @@ H.Aimbot = {
         NPCNameFilter = "",
         AimbotHz = 120,
         IgnoreGameProcessed = true,
-        HitChance = 100,                 -- [NEW] 0-100 % per-shot patch chance
 
         AutoShoot = {
             Enabled = false,
@@ -875,16 +870,6 @@ local function ReportHookCall(mode)
 end
 
 --// ---------------------------------------------------------------------------
---// HitChance
---// ---------------------------------------------------------------------------
-local function CalculateChance(percentage)
-    local p = math.floor(tonumber(percentage) or 100)
-    if p >= 100 then return true end
-    if p <= 0 then return false end
-    return math.random(1, 100) <= p
-end
-
---// ---------------------------------------------------------------------------
 --// PatchShotArgs v2 — adaptive Vector3 role detection + recursion into tables
 --// ---------------------------------------------------------------------------
 local function PatchValueRecursive(v, camPos, aimPos, dirUnit, correctCF, depth)
@@ -1017,7 +1002,6 @@ local function ComputeModeAvailability(mode)
         end
         return true
     elseif mode == "Raycast" then
-        -- [NEW] workspace:Raycast must exist and accept 3 args
         local ws = workspace
         if type(ws.Raycast) ~= "function" then
             return false, "workspace.Raycast missing"
@@ -1166,12 +1150,7 @@ local function CycleAutowork(direction)
 
     local newMode = list[pos]
     Aimbot.Settings.SilentAimMode = newMode
-    Aimbot.Internal.LastManageKey = nil  -- force ManageHooks to reconfigure
-
-    if Aimbot.Internal.HookHandlers then
-        -- tear down hooks that are no longer relevant
-        -- (ManageHooks in next frame will set up the right ones)
-    end
+    Aimbot.Internal.LastManageKey = nil
 
     return newMode, list
 end
@@ -1928,9 +1907,6 @@ local function SetupRayNewHook()
                 if not ShouldRedirect("RayNew") then
                     return RayNewOriginal(origin, direction)
                 end
-                if not CalculateChance(Aimbot.Settings.HitChance) then
-                    return RayNewOriginal(origin, direction)
-                end
                 local target = Aimbot.LockPartInstance
                 if target and IsAlive(target) then
                     local aimPos = PredictPartPosition(target)
@@ -2199,19 +2175,17 @@ local function SetupFireServerHook()
                        and typeof(args[1]) == "Vector3"
                        and typeof(args[2]) == "Vector3"
                        and typeof(args[3]) == "RaycastParams" then
-                        if CalculateChance(Aimbot.Settings.HitChance) then
-                            local target = Aimbot.LockPartInstance
-                            if target and IsAlive(target) then
-                                local aimPos = GetMouseSpoof() or PredictPartPosition(target)
-                                local origin = args[1]
-                                local dir = aimPos - origin
-                                local dm = dir.Magnitude
-                                if dm > 0.0001 then
-                                    local origLen = args[2].Magnitude
-                                    if origLen < 0.0001 then origLen = 1000 end
-                                    args[2] = (dir / dm) * origLen
-                                    return FS_Original(self, table.unpack(args, 1, args.n))
-                                end
+                        local target = Aimbot.LockPartInstance
+                        if target and IsAlive(target) then
+                            local aimPos = GetMouseSpoof() or PredictPartPosition(target)
+                            local origin = args[1]
+                            local dir = aimPos - origin
+                            local dm = dir.Magnitude
+                            if dm > 0.0001 then
+                                local origLen = args[2].Magnitude
+                                if origLen < 0.0001 then origLen = 1000 end
+                                args[2] = (dir / dm) * origLen
+                                return FS_Original(self, table.unpack(args, 1, args.n))
                             end
                         end
                     end
@@ -2234,10 +2208,6 @@ local function SetupFireServerHook()
                     return FS_Original(self, ...)
                 end
                 if not ShouldRedirect("FireServer") then
-                    return FS_Original(self, ...)
-                end
-
-                if not CalculateChance(Aimbot.Settings.HitChance) then
                     return FS_Original(self, ...)
                 end
 
@@ -2456,7 +2426,6 @@ task.spawn(function()
     end
 end)
 
---// Hook watchdog
 local function VerifyAndFixHooks()
     if H.ShuttingDown then return end
     local Hh = Aimbot.Internal.HookHandlers
@@ -2523,7 +2492,6 @@ local function ManageHooks()
     desired.Vector3Unit      = want("Vector3Unit")
     desired.ScreenPointToRay = want("ScreenPointToRay")
     desired.Mouse            = want("MouseHit") or want("MouseFull")
-    -- namecall hook serves FireServer + InvokeServer + Raycast
     desired.FireServer       = want("FireServer") or want("Raycast")
     desired.CFrameHook       = want("CFrameHook")
     desired.Vector3New       = want("Vector3New")
@@ -2914,7 +2882,6 @@ Aimbot.PatchShotArgs         = PatchShotArgs
 Aimbot.PatchValueRecursive   = PatchValueRecursive
 Aimbot.VerifyAndFixHooks     = VerifyAndFixHooks
 Aimbot.InvalidateModeCache   = InvalidateModeCache
-Aimbot.CalculateChance       = CalculateChance
 Aimbot.GetWorkingMethods     = GetWorkingMethods
 Aimbot.CycleAutowork         = CycleAutowork
 Aimbot.GetNPCCharacters      = GetNPCCharacters
@@ -2999,7 +2966,7 @@ local function Diagnose()
                       "DisableDesyncDuringShot", "FireClickNoDesync",
                       "PatchShotArgs", "PatchValueRecursive",
                       "VerifyAndFixHooks", "InvalidateModeCache",
-                      "CalculateChance", "GetWorkingMethods", "CycleAutowork" }
+                      "GetWorkingMethods", "CycleAutowork" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
     end
