@@ -1,8 +1,5 @@
 --// AirHub - 07a_ui_core.lua
 --// UI library load, window, tabs, Aimbot tab + Wallbang + TP Aim sections.
---//
---// v10: AutoScan removed. Mode выбирается вручную через dropdown или
---//       кнопками Next/Previous Autowork.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
@@ -193,6 +190,7 @@ task.delay(math.random(1, 3), function()
             Aimbot.Settings.WallbangEnabled = false
         end
         if Aimbot.FOVSettings then Aimbot.FOVSettings.Enabled = false end
+        if Aimbot.CancelAutoScan then pcall(Aimbot.CancelAutoScan) end
         if Aimbot.TPAimInternal then Aimbot.TPAimInternal.Active = false end
 
         if WallHack.Settings then WallHack.Settings.Enabled = false end
@@ -318,15 +316,18 @@ task.delay(math.random(1, 3), function()
     local teamModes      = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
     local wallCheckModes = { "Fast", "Perfect" }
 
-    -- Silent Aim modes (AutoScan removed — no "Auto" option)
+    -- [v8] Raycast added to top of list, matches the new silent-aim method
     local silentAimModes = {
-        "RayNew", "RayHook", "Raycast",
+        "Auto",
+        "Raycast",
+        "Camera",
+        "Mouse", "MouseLock",
+        "MouseHit", "MouseFull",
+        "RayHook", "RayNew",
         "ScreenPointToRay",
         "Vector3Unit", "Vector3New",
-        "MouseHit", "MouseFull",
-        "GunHandler", "FireServer",
-        "MouseLock", "Mouse",
-        "Camera", "CFrameHook",
+        "FireServer", "GunHandler",
+        "CFrameHook",
     }
 
     local wallbangModes = {
@@ -431,11 +432,19 @@ task.delay(math.random(1, 3), function()
     local modeStatusLabel = nil
     local function refreshModeLabel()
         if not modeStatusLabel then return end
-        local txt = "Mode: " .. tostring(AS.SilentAimMode or "RayNew")
+        local A = Aimbot.AutoDetect
+        local txt
+        if A and A.Active then
+            txt = "Scanning: " .. tostring(A.TestMode) .. " (" .. tostring(A.HookCallCount) .. ")"
+        elseif A and A.SelectedMethod then
+            txt = "Auto -> " .. tostring(A.SelectedMethod)
+        else
+            txt = "Mode: " .. tostring(AS.SilentAimMode or "Auto")
+        end
         pcall(function() modeStatusLabel:SetLabel(txt) end)
     end
 
-    secD:AddDropdown({ Name = "Mode", Value = AS.SilentAimMode or "RayNew",
+    secD:AddDropdown({ Name = "Mode", Value = AS.SilentAimMode or "Auto",
         List = silentAimModes,
         Callback = function(v)
             aSet("SilentAimMode", v)
@@ -450,6 +459,7 @@ task.delay(math.random(1, 3), function()
             if v ~= "CFrameHook"       and Aimbot.RemoveCFrameHook      then pcall(Aimbot.RemoveCFrameHook)      end
             if v ~= "Vector3New"       and Aimbot.RemoveVector3NewHook  then pcall(Aimbot.RemoveVector3NewHook)  end
 
+            if v ~= "Auto" and Aimbot.CancelAutoScan then pcall(Aimbot.CancelAutoScan) end
             refreshModeLabel()
         end })
 
@@ -473,12 +483,12 @@ task.delay(math.random(1, 3), function()
 
     do
         local okLabel = pcall(function()
-            modeStatusLabel = secD:AddLabel({ Name = "Mode Status", Text = "Mode: " .. tostring(AS.SilentAimMode or "RayNew") })
+            modeStatusLabel = secD:AddLabel({ Name = "Mode Status", Text = "Mode: " .. tostring(AS.SilentAimMode or "Auto") })
         end)
         if not okLabel then modeStatusLabel = nil end
     end
 
-    --// Autowork cyclers
+    --// [v8] Autowork cyclers replace Run/Cancel AutoScan
     secD:AddButton({ Name = "Next Autowork", Callback = function()
         if Aimbot.CycleAutowork then
             local newMode, list = Aimbot.CycleAutowork(1)
@@ -500,6 +510,12 @@ task.delay(math.random(1, 3), function()
             else
                 warn("[AirHub] No working methods available")
             end
+            refreshModeLabel()
+        end
+    end })
+    secD:AddButton({ Name = "Run Auto-Scan", Callback = function()
+        if Aimbot.RunAutoScan then
+            Aimbot.RunAutoScan()
             refreshModeLabel()
         end
     end })
