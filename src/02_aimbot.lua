@@ -1,14 +1,10 @@
 --// AirHub - 02_aimbot.lua
---// Aimbot: silent aim, prediction, Wallbang, TP Aim, Backtrack + Ghost targeting.
---//
---// v13 (2026-09-26):
---//   * Default SilentAimMode = "Raycast" (RayNew wasn't working in the target
---//     game; AutoScan used to set Raycast automatically, and since AutoScan
---//     is gone, default must match the working mode).
---//   * Raycast handler restored to v8 behavior — same validation, same
---//     origLen preservation. Re-entrancy guard is ONLY used around our own
---//     helpers (GetMouseSpoof → IsPointVisible → Raycast) so it can't block
---//     the real shot raycast.
+--// v14 (2026-09-26):
+--//   * Debug post-shot logging (Settings.Debug = true by default)
+--//   * Safe namecall wrapper — any error inside our handler is caught,
+--//     logged, and we fall through to the original without patching.
+--//   * Strict Instance check — non-Instance self is passed straight through.
+--//   * Default SilentAimMode = "Raycast".
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -71,6 +67,7 @@ H.Aimbot = {
         NPCNameFilter = "",
         AimbotHz = 120,
         IgnoreGameProcessed = true,
+        Debug = true,   -- post-shot logging
 
         AutoShoot = {
             Enabled = false,
@@ -109,6 +106,7 @@ H.Aimbot = {
         WatchdogAccum = 0,
         ModeCache    = {},
         RaycastRedirectActive = false,
+        LastShotInfo = nil,
         HookHandlers = {
             RayNew      = nil, RayNewOrig  = nil,
             V3New       = nil, V3NewOrig   = nil,
@@ -127,6 +125,18 @@ H.Aimbot = {
     },
 }
 local Aimbot = H.Aimbot
+
+local function DebugPrint(...)
+    if Aimbot.Settings.Debug then
+        warn("[AirHub][Shot]", ...)
+    end
+end
+
+local function DebugHookPrint(...)
+    if Aimbot.Settings.Debug then
+        warn("[AirHub][Hook]", ...)
+    end
+end
 
 local WB = {
     HoldUntil = 0,
@@ -368,9 +378,6 @@ end
 
 local function IsPointVisible(origin, pt, params)
     if (pt - origin).Magnitude < 0.001 then return true end
-    -- Recursion-safe: if we're already inside a Raycast redirect, our own
-    -- visibility checks will run the original (unpatched) Raycast via the
-    -- guard in the namecall handler.
     return workspace:Raycast(origin, pt - origin, params) == nil
 end
 
@@ -381,36 +388,6 @@ local function GetVisiblePoint_Fast(origin, part)
     if IsPointVisible(origin, predicted, params) then return predicted end
     if IsPointVisible(origin, part.Position, params) then return part.Position end
     return nil
-end
-
-local function GetNearestVisibleMultipoint(origin, part, refScreen)
-    if not IsAlive(part) then return nil end
-    local params = BuildRayParams(part.Parent)
-    local pts = GetMultipoints(part)
-    local bestPt, bestDist = nil, math.huge
-    for _, pt in ipairs(pts) do
-        if IsPointVisible(origin, pt, params) then
-            local screen, on = workspace.CurrentCamera:WorldToViewportPoint(pt)
-            if on then
-                local d = (refScreen - Vector2.new(screen.X, screen.Y)).Magnitude
-                if d < bestDist then bestDist = d; bestPt = pt end
-            end
-        end
-    end
-    return bestPt
-end
-
-local function GetClosestMultipointToMouse(part, refScreen)
-    local pts = GetMultipoints(part)
-    local bestPt, bestDist = nil, math.huge
-    for _, pt in ipairs(pts) do
-        local screen, on = workspace.CurrentCamera:WorldToViewportPoint(pt)
-        if on then
-            local d = (refScreen - Vector2.new(screen.X, screen.Y)).Magnitude
-            if d < bestDist then bestDist = d; bestPt = pt end
-        end
-    end
-    return bestPt or PredictPartPosition(part)
 end
 
 local function GetVisiblePointOnPart(origin, part)
@@ -842,7 +819,7 @@ local function MoveMouseAbs(x, y)
 end
 
 --// ---------------------------------------------------------------------------
---// PatchShotArgs — adaptive Vector3 role detection + recursion into tables
+--// PatchShotArgs
 --// ---------------------------------------------------------------------------
 local function PatchValueRecursive(v, camPos, aimPos, dirUnit, correctCF, depth)
     if depth > 4 then return v, 0 end
@@ -1065,10 +1042,6 @@ local function ShouldRedirect(mode)
     return IsModeHooked(mode) and Running
 end
 
-local function IsModeActive(mode)
-    return IsModeHooked(mode)
-end
-
 --// ---------------------------------------------------------------------------
 --// Autowork
 --// ---------------------------------------------------------------------------
@@ -1110,6 +1083,8 @@ local function CycleAutowork(direction)
     local newMode = list[pos]
     Aimbot.Settings.SilentAimMode = newMode
     Aimbot.Internal.LastManageKey = nil
+
+    DebugPrint(string.format("autowork -> %s (of %d working methods)", tostring(newMode), #list))
 
     return newMode, list
 end
@@ -1187,7 +1162,7 @@ local function ScheduleHookRemoval(restoreFn, holdTime)
     end)
 end
 
---// ==== MODE 1: RemotePatch ====
+--// ==== WALLBANG MODES ====
 local function PerformWallbang_RemotePatch(targetPart, btn)
     local hookf     = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
@@ -1221,7 +1196,6 @@ local function PerformWallbang_RemotePatch(targetPart, btn)
     return true
 end
 
---// ==== MODE 2: RemotePatchFull ====
 local function PerformWallbang_RemotePatchFull(targetPart, btn)
     local hookf     = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
@@ -1281,7 +1255,6 @@ local function PerformWallbang_RemotePatchFull(targetPart, btn)
     return true
 end
 
---// ==== MODE 3: RayIgnore ====
 local function PerformWallbang_RayIgnore(targetPart, btn)
     local hookf     = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
@@ -1324,7 +1297,6 @@ local function PerformWallbang_RayIgnore(targetPart, btn)
     return true
 end
 
---// ==== MODE 4: RayNewHook ====
 local function PerformWallbang_RayNewHook(targetPart, btn)
     if type(Ray) ~= "table" or type(Ray.new) ~= "function" then return false end
     local old = Ray.new
@@ -1363,7 +1335,6 @@ local function PerformWallbang_RayNewHook(targetPart, btn)
     return true
 end
 
---// ==== MODE 5: MuzzleTeleport ====
 local function PerformWallbang_MuzzleTeleport(targetPart, btn)
     local hookf     = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
@@ -1408,7 +1379,6 @@ local function PerformWallbang_MuzzleTeleport(targetPart, btn)
     return true
 end
 
---// ==== MODE 6: MouseHit ====
 local function PerformWallbang_MouseHit(targetPart, btn)
     local oldGetMouse = LocalPlayer.GetMouse
     if type(oldGetMouse) ~= "function" then
@@ -1444,7 +1414,6 @@ local function PerformWallbang_MouseHit(targetPart, btn)
     return true
 end
 
---// ==== MODE 7: ScreenPointToRay ====
 local function PerformWallbang_ScreenPointToRay(targetPart, btn)
     local cam = workspace.CurrentCamera
     if not cam then return false end
@@ -1476,7 +1445,6 @@ local function PerformWallbang_ScreenPointToRay(targetPart, btn)
     return true
 end
 
---// ==== MODE 8: CameraTP ====
 local function PerformWallbang_CameraTP(targetPart, btn)
     local cam = workspace.CurrentCamera
     if not cam then return false end
@@ -1531,7 +1499,6 @@ local function PerformWallbang(targetPart, btn)
     return ok
 end
 
---// ==== MagicBullet ====
 local function PerformMagicBullet(targetPart, btn)
     if not Aimbot.Settings.TPAimEnabled or Aimbot.Settings.TPAimMethod ~= "MagicBullet" then return end
     if not targetPart then return end
@@ -1645,6 +1612,14 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then return end
     local startHealth = hum and hum.Health or 0
 
+    local mode = GetEffectiveMode()
+    DebugPrint(string.format("shot start | mode=%s target=%s part=%s btn=%d visible=%s",
+        tostring(mode),
+        tostring(displayName),
+        tostring(targetPart.Name),
+        btn or -1,
+        tostring(wasVisible)))
+
     if Aimbot.Settings.TPAimEnabled then
         if Aimbot.Settings.TPAimMethod == "MagicBullet" then
             PerformMagicBullet(targetPart, btn)
@@ -1667,12 +1642,11 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 
     local checkPoint, nowVisible = WaitForShotPoint(targetPart)
     if Aimbot.Settings.WallCheck and not checkPoint then
+        DebugPrint("abort: wall check failed")
         if restoreDesync then restoreDesync() end
         return
     end
     if nowVisible ~= nil then wasVisible = nowVisible end
-
-    local mode = GetEffectiveMode()
 
     if mode == "MouseLock" then
         local visiblePoint = checkPoint
@@ -1715,6 +1689,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
             UserInputService.MouseIconEnabled = oldIcon
         end)
 
+        DebugPrint("shot fired (MouseLock)")
         task.delay(0.15, function()
             LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
         end)
@@ -1750,6 +1725,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         end)
         if not ok then HandleError("Mouse silent shot failed") end
 
+        DebugPrint("shot fired (Mouse)")
         task.delay(0.15, function()
             LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
         end)
@@ -1762,6 +1738,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
        or mode == "FireServer" or mode == "Raycast"
        or mode == "CFrameHook" or mode == "Vector3New" then
         FireClickNoDesync(btn, 0.25)
+        DebugPrint("shot fired (hook mode=" .. tostring(mode) .. ")")
         task.delay(0.15, function()
             LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
         end)
@@ -1783,6 +1760,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     workspace.CurrentCamera.CFrame = oldCF
     if not ok then HandleError("Camera silent shot input failed") end
 
+    DebugPrint("shot fired (Camera fallback)")
     task.delay(0.15, function()
         LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
     end)
@@ -2076,92 +2054,114 @@ local function RemoveMouseHook()
 end
 
 --// ---------------------------------------------------------------------------
---// FireServer / InvokeServer / Raycast SHARED namecall hook
+--// Namecall hook — wrapped in pcall for safety
 --// ---------------------------------------------------------------------------
 local FS_Active = false
 local FS_Original = nil
 
-local function SetupFireServerHook()
-    if FS_Active then return end
-    local hookf     = getExec("hookmetamethod")
-    local getMethod = getExec("getnamecallmethod")
-    local newc      = getExec("newcclosure")
-    local checkC    = getExec("checkcaller")
-    if not hookf or not getMethod then return end
+local function NamecallImpl(self, ...)
+    local method = getExec("getnamecallmethod") and getExec("getnamecallmethod")() or nil
+    if type(method) ~= "string" then
+        return FS_Original(self, ...)
+    end
 
-    local function handler(self, ...)
-        local method = getMethod()
+    local checkC = getExec("checkcaller")
 
-        --// ====================== Raycast ======================
-        --// v8 behavior restored: patch EVERY Raycast (no origin filter).
-        --// Direction length preserved (origLen). Re-entrancy guard active so
-        --// our own visibility checks (which also call workspace:Raycast)
-        --// cannot recurse into this branch.
-        if method == "Raycast"
-           and not H.ShuttingDown
-           and not (checkC and checkC())
-           and typeof(self) == "Instance"
-           and self == workspace then
-            if IsModeHooked("Raycast") then
-                if ShouldRedirect("Raycast")
-                   and not Aimbot.Internal.RaycastRedirectActive then
-                    local args = table.pack(...)
-                    if args.n >= 3
-                       and typeof(args[1]) == "Vector3"
-                       and typeof(args[2]) == "Vector3"
-                       and typeof(args[3]) == "RaycastParams" then
-                        local target = Aimbot.LockPartInstance
-                        if target and IsAlive(target) then
-                            local aimPos = PredictPartPosition(target)
-                            local origin = args[1]
-                            local dir = aimPos - origin
-                            local dm = dir.Magnitude
-                            if dm > 0.0001 then
-                                local origLen = args[2].Magnitude
-                                if origLen < 0.0001 then origLen = 1000 end
-                                args[2] = (dir / dm) * origLen
-                                return FS_Original(self, table.unpack(args, 1, args.n))
-                            end
-                        end
+    --// ====================== Raycast ======================
+    if method == "Raycast"
+       and not H.ShuttingDown
+       and typeof(self) == "Instance"
+       and self == workspace
+       and not (checkC and checkC())
+       and not Aimbot.Internal.RaycastRedirectActive then
+        if IsModeHooked("Raycast") and ShouldRedirect("Raycast") then
+            local args = table.pack(...)
+            if args.n >= 3
+               and typeof(args[1]) == "Vector3"
+               and typeof(args[2]) == "Vector3"
+               and typeof(args[3]) == "RaycastParams" then
+                local target = Aimbot.LockPartInstance
+                if target and IsAlive(target) then
+                    local aimPos = PredictPartPosition(target)
+                    local origin = args[1]
+                    local origDir = args[2]
+                    local dm = (aimPos - origin).Magnitude
+                    if dm > 0.0001 then
+                        local dirUnit = (aimPos - origin) / dm
+                        local origLen = origDir.Magnitude
+                        if origLen < 0.0001 then origLen = 1000 end
+                        args[2] = dirUnit * origLen
+                        DebugHookPrint(string.format(
+                            "Raycast patched | origin=(%.1f,%.1f,%.1f) target=%s len=%.1f",
+                            origin.X, origin.Y, origin.Z,
+                            tostring(target), origLen))
+                        return FS_Original(self, table.unpack(args, 1, args.n))
                     end
                 end
             end
+        end
+        return FS_Original(self, ...)
+    end
+
+    --// ====================== FireServer / InvokeServer ======================
+    local isShot = (method == "FireServer" or method == "InvokeServer")
+    if isShot
+       and not H.ShuttingDown
+       and typeof(self) == "Instance"
+       and IsModeHooked("FireServer")
+       and not (checkC and checkC())
+       and ShouldRedirect("FireServer") then
+        local target = Aimbot.LockPartInstance
+        if target and IsAlive(target) then
+            local aimPos = GetMouseSpoof() or PredictPartPosition(target)
+            local cam = workspace.CurrentCamera
+            local camPos = cam and cam.CFrame.Position or GetCheckOrigin()
+
+            if (aimPos - camPos).Magnitude > 0.1 then
+                local args = table.pack(...)
+                local patched = PatchShotArgs(args, camPos, aimPos)
+                if patched > 0 then
+                    DebugHookPrint(string.format(
+                        "FireServer patched %d args | remote=%s target=%s",
+                        patched, tostring(self), tostring(target)))
+                    return FS_Original(self, table.unpack(args, 1, args.n))
+                end
+            end
+        end
+    end
+
+    return FS_Original(self, ...)
+end
+
+local function SetupFireServerHook()
+    if FS_Active then return end
+    local hookf = getExec("hookmetamethod")
+    local newc  = getExec("newcclosure")
+    if not hookf then return end
+
+    local safeHandler = function(self, ...)
+        if Aimbot.Internal.RaycastRedirectActive then
             return FS_Original(self, ...)
         end
 
-        --// ====================== FireServer / InvokeServer ======================
-        local isShot = (method == "FireServer" or method == "InvokeServer")
-        if isShot and not H.ShuttingDown and IsModeHooked("FireServer") then
-            if not (checkC and checkC()) then
-                if not ShouldRedirect("FireServer") then
-                    return FS_Original(self, ...)
-                end
-
-                local target = Aimbot.LockPartInstance
-                if target and IsAlive(target) then
-                    local aimPos = GetMouseSpoof() or PredictPartPosition(target)
-                    local cam = workspace.CurrentCamera
-                    local camPos = cam and cam.CFrame.Position or GetCheckOrigin()
-
-                    if (aimPos - camPos).Magnitude > 0.1 then
-                        local args = table.pack(...)
-                        local patched = PatchShotArgs(args, camPos, aimPos)
-                        if patched > 0 then
-                            return FS_Original(self, table.unpack(args, 1, args.n))
-                        end
-                    end
-                end
+        local ok, err = pcall(NamecallImpl, self, ...)
+        if not ok then
+            DebugHookPrint("namecall error: " .. tostring(err))
+            if FS_Original then
+                return FS_Original(self, ...)
             end
+            return
         end
-
-        return FS_Original(self, ...)
+        return err
     end
-    if newc then pcall(function() handler = newc(handler) end) end
+    if newc then pcall(function() safeHandler = newc(safeHandler) end) end
 
     local ok = pcall(function()
-        FS_Original = hookf(game, "__namecall", handler)
+        FS_Original = hookf(game, "__namecall", safeHandler)
     end)
-    if ok and FS_Original then FS_Active = true end
+    if ok and FS_Original then
+        FS_Active = true
+    end
 end
 
 local function RemoveFireServerHook()
@@ -2679,6 +2679,7 @@ Aimbot.ShouldRedirect        = ShouldRedirect
 Aimbot.GetBacktrackGhostTargets = GetBacktrackGhostTargets
 Aimbot.ResolveOwnerCharacter = ResolveOwnerCharacter
 Aimbot.ResolveOwnerPlayer    = ResolveOwnerPlayer
+Aimbot.DebugPrint            = DebugPrint
 
 Aimbot.PerformWallbang          = PerformWallbang
 Aimbot.PerformMagicBullet       = PerformMagicBullet
@@ -2749,7 +2750,7 @@ local function Diagnose()
                       "DisableDesyncDuringShot", "FireClickNoDesync",
                       "PatchShotArgs", "PatchValueRecursive",
                       "VerifyAndFixHooks", "InvalidateModeCache",
-                      "GetWorkingMethods", "CycleAutowork" }
+                      "GetWorkingMethods", "CycleAutowork", "DebugPrint" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
     end
