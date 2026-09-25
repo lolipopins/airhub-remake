@@ -1,41 +1,23 @@
 --// AirHub - 02_aimbot.lua
 --// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, Backtrack + Ghost targeting.
 --//
---// FIXES applied:
---//   * checkcaller() condition fixed in RayNew / Vector3New / CFrameHook
---//     (was inverted → hooks only fired on our own script, not on game calls)
---//   * PerformMagicBullet now saves/restores Desync Mode + RefreshOnShot
---//   * PerformWallbang_MouseHit guards against missing LocalPlayer.GetMouse
---//   * FOV circle now drawn in viewport coordinates (matches FOV check)
---//   * GunHandler hook no longer blocks with WaitForShotPoint → uses sync check
---//   * AutoScan delay increased to 5s so GunHandler can load
---//   * NEW: DisableDesyncDuringShot() — временно выключает AntiAim.Desync
---//     (останавливает render-step смещение) на время выстрела, чтобы
---//     исходящий пакет шёл с реальной позиции. Восстанавливает состояние
---//     через task.delay. Применено к Wallbang, Silent Aim (hook/mouse/camera
---//     режимы), ручному клику и AutoShoot. PerformMagicBullet НАМЕРЕННО
---//     оставлен на обычном FireClick — там Desync включается, чтобы скрыть
---//     телепорт.
+--// NEW (2026-09-26 v3):
+--//   * "Arsenal" silent-aim mode now hooks ReplicatedStorage.Crosshair.OnClientInvoke
+--//     (RemoteFunction callback invoked BY THE SERVER). The previous v2 attempted
+--//     a __namecall hook and patched args — that was the wrong hook point, and
+--//     is why Arsenal mode did nothing. This is the pattern used by the Manji
+--//     DX11 pseudo-aimbot (visible in the decompiled snippet as
+--//     `Crosshair.OnClientInvoke = function(...) end`).
 --//
---// NEW (2026-09-26):
---//   * "Arsenal" silent-aim mode. Hooks __namecall and patches InvokeServer/
---//     FireServer args on ReplicatedStorage.*Crosshair* remotes to redirect
---//     aim towards Aimbot.LockPartInstance. Ported from the Manji DX11
---//     pseudo-aimbot pattern (hookmetamethod + getnamecallmethod).
---//
---//   * [FIX v2] The previous version only patched the FIRST matching Vector3
---//     and did not touch camera/character. Now:
---//       - ALL Vector3 / CFrame / Ray args are patched (not just the first).
---//       - Vector3 magnitude > 2  → target position
---//       - Vector3 magnitude ≤ 2  → unit direction to target
---//       - CFrame                 → CFrame.lookAt(camPos, aimPos)
---//       - Ray                    → Ray.new(camPos, dirToTarget)
---//       - If NO Vector3 args    → direction appended (games expecting it)
---//       - Camera + HRP + Head are SNAPPED to the target before firing and
---//         RESTORED right after InvokeServer returns (needed for games that
---//         derive shot direction from view/character, not from args).
---//       - IsArsenalCrosshair matches case-insensitive substring "crosshair"
---//         and works with remotes nested inside folders.
+--//   * Behavior:
+--//       - Original OnClientInvoke is saved on setup.
+--//       - Ours returns (aimPos - camPos).Unit when Aimbot.Enabled AND LockPart
+--//         exists AND the target is alive.
+--//       - Otherwise it forwards to the original callback.
+--//       - RenderStepped watchdog re-installs our callback if the game
+--//         overwrites it (weapon swap / respawn / round change).
+--//       - On disable, the original callback is restored cleanly.
+--//       - Toggle Aimbot.Settings.ArsenalDebug = true for verbose console logs.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -98,6 +80,7 @@ H.Aimbot = {
         NPCNameFilter = "",
         AimbotHz = 120,
         IgnoreGameProcessed = true,
+        ArsenalDebug = false,
 
         AutoShoot = {
             Enabled = false,
@@ -166,6 +149,16 @@ H.Aimbot = {
         KeyHeld       = false,
         TargetChar    = nil,
     },
+
+    --// [NEW] Arsenal state — OnClientInvoke callback replacement
+    Arsenal = {
+        Active          = false,
+        Remote          = nil,
+        OriginalOnCall  = nil,
+        OurCallback     = nil,
+        CallsServed     = 0,
+        LastWatchdog    = 0,
+    },
 }
 local Aimbot = H.Aimbot
 
@@ -183,16 +176,11 @@ local VISIBLE_PARTS = {
     "Torso", "Left Arm", "Right Arm",
 }
 
---// [NEW v2] Match any remote whose name CONTAINS "crosshair" (case-insensitive)
---// and is a RemoteFunction/RemoteEvent inside ReplicatedStorage.
 local function IsArsenalCrosshair(obj)
     if typeof(obj) ~= "Instance" then return false end
     local lname = string.lower(obj.Name)
     if not string.find(lname, "crosshair", 1, true) then return false end
-    local c = obj.ClassName
-    if c ~= "RemoteFunction" and c ~= "RemoteEvent" and c ~= "UnreliableRemoteEvent" then
-        return false
-    end
+    if obj.ClassName ~= "RemoteFunction" then return false end
     if ReplicatedStorage and obj:IsDescendantOf(ReplicatedStorage) then
         return true
     end
@@ -831,9 +819,6 @@ local function RefreshOldPositionIfNeeded()
     d.Internal.PendingRefresh = false
 end
 
---// ---------------------------------------------------------------------------
---// DISABLE DESYNC DURING SHOT
---// ---------------------------------------------------------------------------
 local function DisableDesyncDuringShot()
     local Hg = getgenv().AirHub
     if not Hg or not Hg.AntiAim or not Hg.AntiAim.Desync then return nil end
@@ -968,14 +953,8 @@ local function IsModeAvailable(mode)
         end
         return true
     elseif mode == "Arsenal" then
-        -- [NEW v2] recursive search + case-insensitive substring
-        local hookf = getExec("hookmetamethod")
-        local getMethod = getExec("getnamecallmethod")
-        if not hookf or not getMethod then
-            return false, "no hookmetamethod"
-        end
-        local found = FindArsenalCrosshair()
-        if not found then return false, "no ReplicatedStorage.*Crosshair* remote" end
+        local remote = FindArsenalCrosshair()
+        if not remote then return false, "no ReplicatedStorage.*Crosshair* RemoteFunction" end
         return true
     elseif mode == "MouseLock" or mode == "Mouse" then
         if not VirtualInputManager then return false, "no VIM" end
@@ -1028,6 +1007,116 @@ end
 
 local function InScanFor(mode)
     return Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode == mode
+end
+
+--// ---------------------------------------------------------------------------
+--// ARSENAL OnClientInvoke HOOK  [NEW v3]
+--// ---------------------------------------------------------------------------
+--// Arsenal's flow:
+--//   [server] Crosshair:InvokeClient(player)  →  asks client "where are you aiming?"
+--//   [client] Crosshair.OnClientInvoke(...)   →  returns direction (Vector3)
+--// We replace OnClientInvoke with our own callback that returns the direction
+-- to Aimbot.LockPartInstance. When Aimbot is off / no target / not targeting,
+-- we forward to the original callback so gameplay is unaffected.
+
+local function Arsenal_GetDirection()
+    local target = Aimbot.LockPartInstance
+    if not target or not IsAlive(target) then return nil end
+    if not Aimbot.Settings.Enabled or not Aimbot.Settings.SilentAim then return nil end
+    --// Require the aimbot to be actively tracking (Running) OR AutoShoot enabled
+    local auto = Aimbot.Settings.AutoShoot and Aimbot.Settings.AutoShoot.Enabled
+    if not Running and not auto then return nil end
+
+    local aimPos = PredictPartPosition(target)
+    local cam = workspace.CurrentCamera
+    if not cam then return nil end
+    local camPos = cam.CFrame.Position
+    local dir = aimPos - camPos
+    if dir.Magnitude < 0.001 then return nil end
+    return dir.Unit, aimPos, camPos
+end
+
+local function Arsenal_MakeCallback()
+    return function(...)
+        local A = Aimbot.Arsenal
+        A.CallsServed = A.CallsServed + 1
+
+        local dirUnit, aimPos, camPos = Arsenal_GetDirection()
+
+        if Aimbot.Settings.ArsenalDebug then
+            warn(string.format(
+                "[Arsenal] OnClientInvoke fired (#%d) target=%s dir=%s",
+                A.CallsServed,
+                tostring(Aimbot.LockPartInstance),
+                tostring(dirUnit)
+            ))
+        end
+
+        if dirUnit then
+            --// Most Arsenal-like games expect a unit direction Vector3.
+            return dirUnit
+        end
+
+        --// Fallback to original callback so the game still works
+        local orig = A.OriginalOnCall
+        if type(orig) == "function" then
+            return orig(...)
+        end
+        return nil
+    end
+end
+
+local function SetupArsenalOnClientInvoke()
+    local A = Aimbot.Arsenal
+    if A.Active and A.Remote and A.Remote.Parent then
+        --// watchdog: re-install if the game overwrote our callback
+        local ok, current = pcall(function() return A.Remote.OnClientInvoke end)
+        if ok and current ~= A.OurCallback then
+            pcall(function() A.Remote.OnClientInvoke = A.OurCallback end)
+            if Aimbot.Settings.ArsenalDebug then
+                warn("[Arsenal] watchdog re-installed OnClientInvoke")
+            end
+        end
+        return true
+    end
+
+    local remote = FindArsenalCrosshair()
+    if not remote then return false end
+
+    A.Remote = remote
+    local okRead, currentCb = pcall(function() return remote.OnClientInvoke end)
+    A.OriginalOnCall = okRead and currentCb or nil
+
+    A.OurCallback = Arsenal_MakeCallback()
+    local okAssign = pcall(function() remote.OnClientInvoke = A.OurCallback end)
+    if not okAssign then
+        warn("[AirHub] Arsenal: could not assign OnClientInvoke (readonly?)")
+        A.Remote = nil
+        A.OriginalOnCall = nil
+        A.OurCallback = nil
+        A.Active = false
+        return false
+    end
+
+    A.Active = true
+    A.CallsServed = 0
+    print("[AirHub] Arsenal OnClientInvoke hook installed on", remote:GetFullName())
+    return true
+end
+
+local function RemoveArsenalOnClientInvoke()
+    local A = Aimbot.Arsenal
+    if A.Remote and A.OriginalOnCall ~= nil then
+        pcall(function() A.Remote.OnClientInvoke = A.OriginalOnCall end)
+    elseif A.Remote then
+        --// original was nil — clear ours
+        pcall(function() A.Remote.OnClientInvoke = nil end)
+    end
+    A.Active = false
+    A.Remote = nil
+    A.OriginalOnCall = nil
+    A.OurCallback = nil
+    A.CallsServed = 0
 end
 
 --// ---------------------------------------------------------------------------
@@ -1985,77 +2074,10 @@ local function RemoveMouseHook()
 end
 
 --// ---------------------------------------------------------------------------
---// FireServer + Arsenal — SHARED namecall hook
+--// FireServer (classic namecall) hook  — Arsenal no longer uses this path.
 --// ---------------------------------------------------------------------------
 local FS_Active = false
 local FS_Original = nil
-
---// [NEW v2] Пробуем заменить КАЖДЫЙ Vector3/CFrame/Ray аргумент.
---// Vector3 с magnitude > 2  → aimPos (позиция цели)
--- Vector3 с magnitude ≤ 2  → dirUnit (юнит-направление)
--- CFrame                   → CFrame.lookAt(camPos, aimPos)
--- Ray                      → Ray.new(camPos, dirUnit)
--- Плюс: снапим camera / HRP / Head перед InvokeServer и восстанавливаем после.
-local function PatchArsenalArgs(args, aimPos, camPos, dirUnit, correctCF)
-    local patched = 0
-    for i = 1, args.n do
-        local v = args[i]
-        local t = typeof(v)
-        if t == "Vector3" then
-            local vm = v.Magnitude
-            if vm > 2 then
-                args[i] = aimPos
-            else
-                args[i] = dirUnit
-            end
-            patched = patched + 1
-        elseif t == "CFrame" then
-            args[i] = correctCF
-            patched = patched + 1
-        elseif t == "Ray" then
-            args[i] = Ray.new(camPos, dirUnit)
-            patched = patched + 1
-        end
-    end
-    return patched
-end
-
-local function SnapLocalCharacter(cam, aimPos, correctCF)
-    local saved = {
-        cam = cam and cam.CFrame or nil,
-        hrp = nil,
-        head = nil,
-    }
-    local char = LocalPlayer.Character
-    if char then
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        local head = char:FindFirstChild("Head")
-        if hrp then saved.hrp = hrp.CFrame end
-        if head then saved.head = head.CFrame end
-        pcall(function()
-            if cam then cam.CFrame = correctCF end
-            if hrp then hrp.CFrame = CFrame.lookAt(hrp.Position, aimPos) end
-            if head then head.CFrame = CFrame.lookAt(head.Position, aimPos) end
-        end)
-    elseif cam then
-        pcall(function() cam.CFrame = correctCF end)
-    end
-    return saved
-end
-
-local function RestoreLocalCharacter(cam, saved)
-    if not saved then return end
-    pcall(function()
-        if cam and saved.cam then cam.CFrame = saved.cam end
-        local char = LocalPlayer.Character
-        if char then
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            local head = char:FindFirstChild("Head")
-            if hrp and saved.hrp then hrp.CFrame = saved.hrp end
-            if head and saved.head then head.CFrame = saved.head end
-        end
-    end)
-end
 
 local function SetupFireServerHook()
     if FS_Active then return end
@@ -2067,12 +2089,7 @@ local function SetupFireServerHook()
 
     local function handler(self, ...)
         local method = getMethod()
-
-        --// ---- Branch 1: classic FireServer silent aim ----
-        if method == "FireServer"
-           and not H.ShuttingDown
-           and IsModeHooked("FireServer")
-           and not (typeof(self) == "Instance" and IsArsenalCrosshair(self)) then
+        if method == "FireServer" and not H.ShuttingDown and IsModeHooked("FireServer") then
             if not (checkC and checkC()) then
                 if InScanFor("FireServer") then
                     if typeof(self) == "Instance"
@@ -2108,56 +2125,6 @@ local function SetupFireServerHook()
                 end
             end
         end
-
-        --// ---- Branch 2: Arsenal silent aim via ReplicatedStorage.*Crosshair* ----
-        if (method == "InvokeServer" or method == "FireServer")
-           and not H.ShuttingDown
-           and IsModeHooked("Arsenal")
-           and IsArsenalCrosshair(self) then
-            if not (checkC and checkC()) then
-                if InScanFor("Arsenal") then
-                    ReportHookCall("Arsenal")
-                    return FS_Original(self, ...)
-                end
-                if not ShouldRedirect("Arsenal") then
-                    return FS_Original(self, ...)
-                end
-
-                local target = Aimbot.LockPartInstance
-                if target and IsAlive(target) then
-                    local aimPos = GetMouseSpoof() or PredictPartPosition(target)
-                    local cam = workspace.CurrentCamera
-                    local camPos = cam.CFrame.Position
-                    local toTarget = aimPos - camPos
-                    local dirUnit = toTarget.Magnitude > 0.001 and toTarget.Unit or cam.CFrame.LookVector
-                    local correctCF = CFrame.lookAt(camPos, aimPos)
-
-                    --// [v2] Snap camera / HRP / Head on the local character
-                    --// so games that derive shot direction from view direction
-                    --// also fire at the target.
-                    local savedState = SnapLocalCharacter(cam, aimPos, correctCF)
-
-                    --// [v2] Patch all arg types
-                    local args = table.pack(...)
-                    local patched = PatchArsenalArgs(args, aimPos, camPos, dirUnit, correctCF)
-
-                    --// If no args matched, append direction (some games expect
-                    --// the direction as an extra trailing argument).
-                    if patched == 0 then
-                        args[args.n + 1] = dirUnit
-                        args.n = args.n + 1
-                    end
-
-                    local result = FS_Original(self, table.unpack(args, 1, args.n))
-
-                    --// Restore camera / character immediately after server response
-                    RestoreLocalCharacter(cam, savedState)
-
-                    return result
-                end
-            end
-        end
-
         return FS_Original(self, ...)
     end
     if newc then pcall(function() handler = newc(handler) end) end
@@ -2364,9 +2331,10 @@ local function ManageHooks()
     desired.Vector3Unit      = want("Vector3Unit")
     desired.ScreenPointToRay = want("ScreenPointToRay")
     desired.Mouse            = want("MouseHit") or want("MouseFull")
-    desired.FireServer       = want("FireServer") or want("Arsenal")
+    desired.FireServer       = want("FireServer")
     desired.CFrameHook       = want("CFrameHook")
     desired.Vector3New       = want("Vector3New")
+    desired.Arsenal          = want("Arsenal")
 
     local key = table.concat({
         tostring(desired.RayHook),
@@ -2377,9 +2345,12 @@ local function ManageHooks()
         tostring(desired.FireServer),
         tostring(desired.CFrameHook),
         tostring(desired.Vector3New),
+        tostring(desired.Arsenal),
     }, "|")
 
     if Aimbot.Internal.LastManageKey == key then
+        --// even when the key hasn't changed we still run the Arsenal watchdog
+        if desired.Arsenal then pcall(SetupArsenalOnClientInvoke) end
         return
     end
     Aimbot.Internal.LastManageKey = key
@@ -2392,6 +2363,7 @@ local function ManageHooks()
     if desired.FireServer       then SetupFireServerHook()     else RemoveFireServerHook()     end
     if desired.CFrameHook       then SetupCFrameHook()         else RemoveCFrameHook()         end
     if desired.Vector3New       then SetupVector3NewHook()     else RemoveVector3NewHook()     end
+    if desired.Arsenal          then SetupArsenalOnClientInvoke() else RemoveArsenalOnClientInvoke() end
 end
 
 local function RunAutoScan()
@@ -2717,6 +2689,9 @@ Aimbot.ResolveOwnerCharacter = ResolveOwnerCharacter
 Aimbot.ResolveOwnerPlayer    = ResolveOwnerPlayer
 Aimbot.IsArsenalCrosshair    = IsArsenalCrosshair
 Aimbot.FindArsenalCrosshair  = FindArsenalCrosshair
+Aimbot.SetupArsenal          = SetupArsenalOnClientInvoke
+Aimbot.RemoveArsenal         = RemoveArsenalOnClientInvoke
+Aimbot.ArsenalGetDirection   = Arsenal_GetDirection
 
 Aimbot.PerformWallbang          = PerformWallbang
 Aimbot.PerformMagicBullet       = PerformMagicBullet
@@ -2769,6 +2744,10 @@ local function Diagnose()
         T(getExec(name) ~= nil, "executor: " .. name)
     end
 
+    local crosshair = FindArsenalCrosshair()
+    T(crosshair ~= nil, "Arsenal Crosshair remote found",
+      crosshair and crosshair:GetFullName() or "not present")
+
     if Aimbot.IsModeAvailable then
         local modes = { "Arsenal", "RayHook", "RayNew", "Vector3Unit",
                         "ScreenPointToRay",
@@ -2786,7 +2765,8 @@ local function Diagnose()
                       "GetBacktrackGhostTargets", "ResolveOwnerCharacter", "ResolveOwnerPlayer",
                       "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
                       "DisableDesyncDuringShot", "FireClickNoDesync",
-                      "IsArsenalCrosshair", "FindArsenalCrosshair" }
+                      "IsArsenalCrosshair", "FindArsenalCrosshair",
+                      "SetupArsenal", "RemoveArsenal", "ArsenalGetDirection" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
     end
