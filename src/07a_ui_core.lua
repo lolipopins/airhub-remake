@@ -318,6 +318,7 @@ task.delay(math.random(1, 3), function()
 
     local silentAimModes = {
         "Auto",
+        "Arsenal",
         "Camera",
         "Mouse", "MouseLock",
         "MouseHit", "MouseFull",
