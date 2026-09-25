@@ -1,16 +1,19 @@
 --// AirHub - 02_aimbot.lua
 --// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, Backtrack + Ghost targeting.
 --//
---// v6 (2026-09-26):
---//   * PatchShotArgs() — shared patcher: Vector3 (mag~1 → unit dir; mag>5 → aim pos),
---//     CFrame → lookAt(camPos, aimPos), Ray → Ray.new(camPos, dirUnit).
---//   * SetupFireServerHook now intercepts BOTH FireServer AND InvokeServer and
---//     uses PatchShotArgs (previously patched only the first Vector3).
---//   * RayNew: guards against zero-magnitude direction and position-as-direction.
---//   * Vector3New: guards against near-zero magnitude (avoids NaN unit vectors).
---//   * ScreenPointToRay: nil-camera guard.
---//   * RunAutoScan: best-effort fallback — if no method reaches AutoMinHookCalls,
---//     picks the one with the most calls instead of hard-falling to Camera.
+--// v7 (2026-09-26):
+--//   * PatchShotArgs v2 — adaptive Vector3 role detection (direction vs origin
+--//     based on relative magnitudes when 2+ Vector3 are present). Recursive
+--//     into tables (depth 4). Buffer-safe (skips).
+--//   * Hook Health + Watchdog (2s) — re-installs RayNew/Vector3New/RayHook/
+--//     Vector3Unit if the game overwrites our hook.
+--//   * Mode availability caching (60s TTL) — no more pcall(getrawmetatable)
+--//     every frame from ManageHooks.
+--//   * AutoScan v2 — INSTANT detection for statically-available modes
+--//     (RayNew, RayHook, Vector3Unit, ScreenPointToRay, CFrameHook, Vector3New).
+--//     Only dynamic modes (FireServer, GunHandler, Mouse) get timing-based scan.
+--//   * Tighter guards in RayNew (mag<0.0001, >50), Vector3New, CFrameHook.
+--//   * ShouldPatch() guard in FireServer — skip if aimPos ≈ camPos.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -111,6 +114,10 @@ H.Aimbot = {
 
         UseBacktrack     = false,
         BacktrackAimAtGhost = false,
+
+        --// v7 additions
+        HookWatchdogInterval = 2.0,
+        ModeCacheTTL         = 60.0,
     },
     FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
     FOVCircle   = Drawing.new("Circle"),
@@ -121,6 +128,21 @@ H.Aimbot = {
         FovAccum     = 0,
         LastManageKey = nil,
         LockedGhost  = nil,
+        WatchdogAccum = 0,
+        ModeCache    = {},
+        HookHandlers = {
+            -- set by Setup* functions, used by watchdog
+            RayNew      = nil,
+            RayNewOrig  = nil,
+            V3New       = nil,
+            V3NewOrig   = nil,
+            RayHook     = nil,
+            RayHookOrig = nil,
+            V3Unit      = nil,
+            V3UnitOrig  = nil,
+            SPR         = nil,
+            SPR_Orig    = nil,
+        },
     },
 
     AutoDetect = {
@@ -859,8 +881,47 @@ local function ReportHookCall(mode)
 end
 
 --// ---------------------------------------------------------------------------
---// PatchShotArgs — universal shot-arg patcher
+--// PatchShotArgs v2 — adaptive Vector3 role detection + recursion into tables
 --// ---------------------------------------------------------------------------
+--// Strategy:
+--//   1. Collect all top-level Vector3 args.
+--//   2. If we have 2+, order them by magnitude: the smallest is treated as
+--//      direction, the largest as origin. Patches each accordingly.
+--//   3. If only 1 Vector3: mag≈1 → direction, mag>5 → origin.
+--//   4. CFrame args → lookAt(camPos, aimPos).
+--//   5. Ray args → Ray.new(camPos, dirUnit).
+--//   6. Table args → recurse into them (depth ≤ 4).
+--//   7. Buffer args → skipped (no safe way to detect direction inside).
+local function PatchValueRecursive(v, camPos, aimPos, dirUnit, correctCF, depth)
+    if depth > 4 then return v, 0 end
+    local t = typeof(v)
+    if t == "Vector3" then
+        local vm = v.Magnitude
+        if math.abs(vm - 1) < 0.4 then
+            return dirUnit, 1
+        elseif vm > 5 then
+            return aimPos, 1
+        end
+        return v, 0
+    elseif t == "CFrame" then
+        return correctCF, 1
+    elseif t == "Ray" then
+        local ok, r = pcall(Ray.new, camPos, dirUnit)
+        if ok and r then return r, 1 end
+        return v, 0
+    elseif t == "table" then
+        local newT = {}
+        local n = 0
+        for k, subv in pairs(v) do
+            local sv, sn = PatchValueRecursive(subv, camPos, aimPos, dirUnit, correctCF, depth + 1)
+            newT[k] = sv
+            n = n + sn
+        end
+        return newT, n
+    end
+    return v, 0
+end
+
 local function PatchShotArgs(args, camPos, aimPos)
     local cam = workspace.CurrentCamera
     local camPos2 = camPos or (cam and cam.CFrame.Position)
@@ -871,34 +932,102 @@ local function PatchShotArgs(args, camPos, aimPos)
     local dirUnit = toTarget.Unit
     local correctCF = CFrame.lookAt(camPos2, aimPos)
 
-    local n = 0
+    --// 1. Collect top-level Vector3 indices and their magnitudes
+    local v3Indices = {}
+    for i = 1, args.n do
+        if typeof(args[i]) == "Vector3" then
+            table.insert(v3Indices, { idx = i, mag = args[i].Magnitude })
+        end
+    end
+
+    --// 2. Adaptive role assignment when 2+ Vector3 present
+    local dirIdx, posIdx
+    if #v3Indices >= 2 then
+        -- sort ascending by magnitude
+        table.sort(v3Indices, function(a, b) return a.mag < b.mag end)
+        dirIdx = v3Indices[1].idx   -- smallest → direction
+        posIdx = v3Indices[#v3Indices].idx -- largest → origin/position
+
+        -- Sanity: if the largest isn't actually big enough, don't touch it
+        if v3Indices[#v3Indices].mag < 5 then
+            posIdx = nil
+        end
+        -- Sanity: if the smallest isn't direction-like, don't touch it
+        if math.abs(v3Indices[1].mag - 1) > 0.4 then
+            -- but only if largest is a position-like value
+            if posIdx then
+                dirIdx = nil
+            else
+                dirIdx = nil
+                posIdx = nil
+            end
+        end
+    end
+
+    local totalPatched = 0
     for i = 1, args.n do
         local v = args[i]
         local t = typeof(v)
         if t == "Vector3" then
-            local vm = v.Magnitude
-            if math.abs(vm - 1) < 0.4 then
+            if i == dirIdx then
                 args[i] = dirUnit
-                n = n + 1
-            elseif vm > 5 then
+                totalPatched = totalPatched + 1
+            elseif i == posIdx then
                 args[i] = aimPos
-                n = n + 1
+                totalPatched = totalPatched + 1
+            else
+                --// fallback single-Vector3 heuristic
+                local vm = v.Magnitude
+                if math.abs(vm - 1) < 0.4 then
+                    args[i] = dirUnit
+                    totalPatched = totalPatched + 1
+                elseif vm > 5 then
+                    args[i] = aimPos
+                    totalPatched = totalPatched + 1
+                end
             end
         elseif t == "CFrame" then
             args[i] = correctCF
-            n = n + 1
+            totalPatched = totalPatched + 1
         elseif t == "Ray" then
-            local okRay, ray = pcall(Ray.new, camPos2, dirUnit)
-            if okRay and ray then
-                args[i] = ray
-                n = n + 1
+            local ok, r = pcall(Ray.new, camPos2, dirUnit)
+            if ok and r then
+                args[i] = r
+                totalPatched = totalPatched + 1
             end
+        elseif t == "table" then
+            local newT, n = PatchValueRecursive(v, camPos2, aimPos, dirUnit, correctCF, 1)
+            args[i] = newT
+            totalPatched = totalPatched + n
         end
+        -- buffer, string, number, bool, Instance — leave alone
     end
-    return n
+
+    return totalPatched
 end
 
-local function IsModeAvailable(mode)
+--// ---------------------------------------------------------------------------
+--// Mode availability cache
+--// ---------------------------------------------------------------------------
+local function CacheGet(key)
+    local c = Aimbot.Internal.ModeCache[key]
+    if not c then return nil end
+    if tick() - c.t > (Aimbot.Settings.ModeCacheTTL or 60) then
+        Aimbot.Internal.ModeCache[key] = nil
+        return nil
+    end
+    return c.available, c.reason
+end
+
+local function CacheSet(key, available, reason)
+    Aimbot.Internal.ModeCache[key] = {
+        available = available,
+        reason    = reason,
+        t         = tick(),
+    }
+end
+
+local function ComputeModeAvailability(mode)
     if mode == "RayHook" then
         local ok, mt = pcall(getrawmetatable, Ray.new(Vector3.zero, Vector3.zero))
         return (ok and mt ~= nil), "no Ray metatable"
@@ -960,6 +1089,18 @@ local function IsModeAvailable(mode)
         return true
     end
     return false, "unknown mode"
+end
+
+local function IsModeAvailable(mode)
+    local cached, reason = CacheGet(mode)
+    if cached ~= nil then return cached, reason end
+    local available, r = ComputeModeAvailability(mode)
+    CacheSet(mode, available, r)
+    return available, r
+end
+
+local function InvalidateModeCache()
+    Aimbot.Internal.ModeCache = {}
 end
 
 local function GetEffectiveMode()
@@ -1115,7 +1256,7 @@ local function PerformWallbang_RemotePatchFull(targetPart, btn)
 
     local function rewriteValue(v, depth)
         depth = depth or 0
-        if depth > 3 then return v end
+        if depth > 4 then return v end
         local t = typeof(v)
         if t == "Vector3" then
             local vm = v.Magnitude
@@ -1218,11 +1359,16 @@ local function PerformWallbang_RayNewHook(targetPart, btn)
            and typeof(origin) == "Vector3"
            and typeof(direction) == "Vector3" then
             local dir = aimPos - origin
-            if dir.Magnitude > 0.001 then
-                if direction.Magnitude > 0.001 then
-                    return old(origin, dir.Unit * direction.Magnitude)
+            local dm = dir.Magnitude
+            if dm > 0.0001 then
+                local dirUnit = dir / dm
+                local origMag = direction.Magnitude
+                if origMag < 0.0001 then
+                    return old(origin, dirUnit)
+                elseif origMag > 50 then
+                    return old(origin, dir)
                 else
-                    return old(origin, dir.Unit)
+                    return old(origin, dirUnit * origMag)
                 end
             end
         end
@@ -1680,7 +1826,8 @@ local function SetupRayHook()
         getgenv().__AirHubRayIndexOriginal = savedOriginal
     end
     oldRayIndex = savedOriginal
-    mt.__index = function(t, k)
+
+    local handler = function(t, k)
         if k == 'Direction' and not H.ShuttingDown and IsModeHooked("RayHook") then
             if InScanFor("RayHook") then
                 ReportHookCall("RayHook")
@@ -1701,7 +1848,12 @@ local function SetupRayHook()
         end
         return oldRayIndex(t, k)
     end
+
+    mt.__index = handler
     RayHookActive = true
+
+    Aimbot.Internal.HookHandlers.RayHook     = handler
+    Aimbot.Internal.HookHandlers.RayHookOrig = savedOriginal
 end
 
 local function RemoveRayHook()
@@ -1709,6 +1861,7 @@ local function RemoveRayHook()
     local success, mt = pcall(getrawmetatable, Ray.new(Vector3.zero, Vector3.zero))
     if success and mt and oldRayIndex then mt.__index = oldRayIndex end
     RayHookActive = false
+    Aimbot.Internal.HookHandlers.RayHook = nil
 end
 
 local RayNewActive = false
@@ -1739,13 +1892,13 @@ local function SetupRayNewHook()
                     local aimPos = PredictPartPosition(target)
                     local dir = aimPos - origin
                     local dm = dir.Magnitude
-                    if dm > 0.001 then
+                    if dm > 0.0001 then
                         local dirUnit = dir / dm
                         if type(direction) == "Vector3" then
                             local origMag = direction.Magnitude
-                            if origMag < 0.001 then
+                            if origMag < 0.0001 then
                                 return RayNewOriginal(origin, dirUnit)
-                            elseif origMag > 100 then
+                            elseif origMag > 50 then
                                 return RayNewOriginal(origin, dir)
                             else
                                 return RayNewOriginal(origin, dirUnit * origMag)
@@ -1762,7 +1915,11 @@ local function SetupRayNewHook()
     if newc then pcall(function() handler = newc(handler) end) end
 
     local ok = pcall(function() Ray.new = handler end)
-    if ok then RayNewActive = true end
+    if ok then
+        RayNewActive = true
+        Aimbot.Internal.HookHandlers.RayNew     = handler
+        Aimbot.Internal.HookHandlers.RayNewOrig = RayNewOriginal
+    end
 end
 
 local function RemoveRayNewHook()
@@ -1770,6 +1927,7 @@ local function RemoveRayNewHook()
     pcall(function() Ray.new = RayNewOriginal end)
     RayNewActive = false
     RayNewOriginal = nil
+    Aimbot.Internal.HookHandlers.RayNew = nil
 end
 
 local V3UnitActive = false
@@ -1787,10 +1945,10 @@ local function SetupVector3UnitHook()
     end
     V3_oldIndex = savedOriginal
 
-    mt.__index = function(self, k)
+    local handler = function(self, k)
         if k == "Unit" and not H.ShuttingDown and IsModeHooked("Vector3Unit") then
             local mag = math.sqrt(self.X*self.X + self.Y*self.Y + self.Z*self.Z)
-            if math.abs(mag - 1) < 0.25 then
+            if math.abs(mag - 1) < 0.25 and mag > 0.0001 then
                 if InScanFor("Vector3Unit") then
                     ReportHookCall("Vector3Unit")
                     return V3_oldIndex(self, k)
@@ -1804,7 +1962,7 @@ local function SetupVector3UnitHook()
                     local camPos = workspace.CurrentCamera.CFrame.Position
                     local dir = aimPos - camPos
                     local dm = dir.Magnitude
-                    if dm > 0.001 then
+                    if dm > 0.0001 then
                         return Vector3.new(dir.X/dm, dir.Y/dm, dir.Z/dm)
                     end
                 end
@@ -1812,7 +1970,11 @@ local function SetupVector3UnitHook()
         end
         return V3_oldIndex(self, k)
     end
+
+    mt.__index = handler
     V3UnitActive = true
+    Aimbot.Internal.HookHandlers.V3Unit     = handler
+    Aimbot.Internal.HookHandlers.V3UnitOrig = savedOriginal
 end
 
 local function RemoveVector3UnitHook()
@@ -1820,6 +1982,7 @@ local function RemoveVector3UnitHook()
     local ok, mt = pcall(getrawmetatable, Vector3.new(1, 0, 0))
     if ok and mt and V3_oldIndex then mt.__index = V3_oldIndex end
     V3UnitActive = false
+    Aimbot.Internal.HookHandlers.V3Unit = nil
 end
 
 local SPR_Active = false
@@ -1848,7 +2011,7 @@ local function SetupScreenPointToRayHook()
                 local aimPos = PredictPartPosition(target)
                 local camPos = self.CFrame.Position
                 local dir = aimPos - camPos
-                if dir.Magnitude > 0.001 then
+                if dir.Magnitude > 0.0001 then
                     local okRay, ray = pcall(Ray.new, camPos, dir.Unit)
                     if okRay and ray then return ray end
                 end
@@ -1859,7 +2022,11 @@ local function SetupScreenPointToRayHook()
     if newc then pcall(function() handler = newc(handler) end) end
 
     local ok = pcall(function() cam.ScreenPointToRay = handler end)
-    if ok then SPR_Active = true end
+    if ok then
+        SPR_Active = true
+        Aimbot.Internal.HookHandlers.SPR     = handler
+        Aimbot.Internal.HookHandlers.SPR_Orig = old
+    end
 end
 
 local function RemoveScreenPointToRayHook()
@@ -1870,6 +2037,7 @@ local function RemoveScreenPointToRayHook()
     end
     SPR_Active = false
     SPR_Original = nil
+    Aimbot.Internal.HookHandlers.SPR = nil
 end
 
 local MouseHooked = false
@@ -1925,7 +2093,7 @@ local function SetupMouseHook()
                             if k == "UnitRay" then
                                 local camPos = workspace.CurrentCamera.CFrame.Position
                                 local dir = aimPos - camPos
-                                if dir.Magnitude > 0.001 then
+                                if dir.Magnitude > 0.0001 then
                                     return Ray.new(camPos, dir.Unit)
                                 end
                             end
@@ -1990,11 +2158,13 @@ local function SetupFireServerHook()
                     local cam = workspace.CurrentCamera
                     local camPos = cam and cam.CFrame.Position or GetCheckOrigin()
 
-                    local args = table.pack(...)
-                    local patched = PatchShotArgs(args, camPos, aimPos)
-
-                    if patched > 0 then
-                        return FS_Original(self, table.unpack(args, 1, args.n))
+                    --// Skip patch if aimPos ≈ camPos (would create zero vector)
+                    if (aimPos - camPos).Magnitude > 0.1 then
+                        local args = table.pack(...)
+                        local patched = PatchShotArgs(args, camPos, aimPos)
+                        if patched > 0 then
+                            return FS_Original(self, table.unpack(args, 1, args.n))
+                        end
                     end
                 end
             end
@@ -2146,7 +2316,7 @@ local function SetupVector3NewHook()
             if not (checkC and checkC()) then
                 if type(x) == "number" and type(y) == "number" and type(z) == "number" then
                     local mag = math.sqrt(x*x + y*y + z*z)
-                    if math.abs(mag - 1) < 0.25 and mag > 0.001 then
+                    if math.abs(mag - 1) < 0.25 and mag > 0.0001 then
                         if InScanFor("Vector3New") then
                             ReportHookCall("Vector3New")
                             return Vector3NewOriginal(x, y, z)
@@ -2160,7 +2330,7 @@ local function SetupVector3NewHook()
                             local camPos = workspace.CurrentCamera.CFrame.Position
                             local dir = aimPos - camPos
                             local dm = dir.Magnitude
-                            if dm > 0.001 then
+                            if dm > 0.0001 then
                                 return Vector3NewOriginal(dir.X/dm, dir.Y/dm, dir.Z/dm)
                             end
                         end
@@ -2173,7 +2343,11 @@ local function SetupVector3NewHook()
     if newc then pcall(function() handler = newc(handler) end) end
 
     local ok = pcall(function() Vector3.new = handler end)
-    if ok then Vector3NewActive = true end
+    if ok then
+        Vector3NewActive = true
+        Aimbot.Internal.HookHandlers.V3New     = handler
+        Aimbot.Internal.HookHandlers.V3NewOrig = Vector3NewOriginal
+    end
 end
 
 local function RemoveVector3NewHook()
@@ -2181,6 +2355,7 @@ local function RemoveVector3NewHook()
     pcall(function() Vector3.new = Vector3NewOriginal end)
     Vector3NewActive = false
     Vector3NewOriginal = nil
+    Aimbot.Internal.HookHandlers.V3New = nil
 end
 
 task.spawn(function()
@@ -2191,6 +2366,67 @@ task.spawn(function()
         task.wait(0.5)
     end
 end)
+
+--// ---------------------------------------------------------------------------
+--// Hook watchdog — re-install hooks if game overwrote them
+--// ---------------------------------------------------------------------------
+local function VerifyAndFixHooks()
+    if H.ShuttingDown then return end
+    local Hh = Aimbot.Internal.HookHandlers
+
+    -- RayNew
+    if RayNewActive and Hh.RayNew then
+        local ok, cur = pcall(function() return Ray.new end)
+        if ok and cur ~= Hh.RayNew then
+            warn("[AirHub] Hook watchdog: RayNew was overwritten — reinstalling")
+            RayNewActive = false
+            if IsModeHooked("RayNew") then SetupRayNewHook() end
+        end
+    end
+
+    -- Vector3New
+    if Vector3NewActive and Hh.V3New then
+        local ok, cur = pcall(function() return Vector3.new end)
+        if ok and cur ~= Hh.V3New then
+            warn("[AirHub] Hook watchdog: Vector3New was overwritten — reinstalling")
+            Vector3NewActive = false
+            if IsModeHooked("Vector3New") then SetupVector3NewHook() end
+        end
+    end
+
+    -- RayHook (metatable)
+    if RayHookActive and Hh.RayHook and Hh.RayHookOrig then
+        local ok, mt = pcall(getrawmetatable, Ray.new(Vector3.zero, Vector3.zero))
+        if ok and mt and mt.__index ~= Hh.RayHook then
+            warn("[AirHub] Hook watchdog: RayHook __index was overwritten — reinstalling")
+            RayHookActive = false
+            if IsModeHooked("RayHook") then SetupRayHook() end
+        end
+    end
+
+    -- Vector3Unit (metatable)
+    if V3UnitActive and Hh.V3Unit and Hh.V3UnitOrig then
+        local ok, mt = pcall(getrawmetatable, Vector3.new(1, 0, 0))
+        if ok and mt and mt.__index ~= Hh.V3Unit then
+            warn("[AirHub] Hook watchdog: Vector3Unit __index was overwritten — reinstalling")
+            V3UnitActive = false
+            if IsModeHooked("Vector3Unit") then SetupVector3UnitHook() end
+        end
+    end
+
+    -- ScreenPointToRay
+    if SPR_Active and Hh.SPR then
+        local cam = workspace.CurrentCamera
+        if cam then
+            local ok, cur = pcall(function() return cam.ScreenPointToRay end)
+            if ok and cur ~= Hh.SPR then
+                warn("[AirHub] Hook watchdog: ScreenPointToRay was overwritten — reinstalling")
+                SPR_Active = false
+                if IsModeHooked("ScreenPointToRay") then SetupScreenPointToRayHook() end
+            end
+        end
+    end
+end
 
 local function ManageHooks()
     local autoScanMode = Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode or nil
@@ -2234,14 +2470,27 @@ local function ManageHooks()
 end
 
 --// ---------------------------------------------------------------------------
---// AutoScan
+--// AutoScan v2 — instant detection for static-availability modes
 --// ---------------------------------------------------------------------------
+local STATIC_MODES = {
+    RayNew           = true,
+    RayHook          = true,
+    Vector3Unit      = true,
+    ScreenPointToRay = true,
+    CFrameHook       = true,
+    Vector3New       = true,
+    Camera           = true,
+    MouseLock        = true,
+    Mouse            = true,
+}
+
 local function RunAutoScan()
     if Aimbot.AutoDetect.Active then return end
     Aimbot.AutoDetect.Active   = true
     Aimbot.AutoDetect.SelectedMethod = nil
     Aimbot.AutoDetect.Results  = {}
     Aimbot.AutoDetect.LastScanTime = tick()
+    InvalidateModeCache()
 
     warn("========================================")
     warn("[AutoScan] Starting silent aim method detection...")
@@ -2265,20 +2514,30 @@ local function RunAutoScan()
                 if not available then
                     Aimbot.AutoDetect.Results[mode] = { available = false, reason = reason, calls = 0 }
                     warn("[AutoScan] " .. mode .. " -> UNAVAILABLE: " .. tostring(reason))
+                elseif STATIC_MODES[mode] then
+                    --// [v7] instant detection — no timing needed
+                    selected = mode
+                    Aimbot.AutoDetect.Results[mode] = { available = true, calls = 0, instant = true }
+                    warn("[AutoScan] " .. mode .. " -> OK (static availability) -> SELECTED")
+                    Aimbot.AutoDetect.TestMode = nil
+                    Aimbot.Internal.LastManageKey = nil
+                    task.wait(0.05)
+                    break
                 else
+                    --// dynamic: run timing-based test
                     warn("[AutoScan] Testing " .. mode .. " (" .. tostring(Aimbot.Settings.AutoTestDuration) .. "s)...")
                     Aimbot.AutoDetect.TestMode      = mode
                     Aimbot.AutoDetect.HookCallCount = 0
                     Aimbot.Internal.LastManageKey = nil
 
-                    task.wait(0.15)
+                    task.wait(0.05)
 
-                    local deadline = tick() + (Aimbot.Settings.AutoTestDuration or 4)
+                    local deadline = tick() + (Aimbot.Settings.AutoTestDuration or 0.5)
                     while tick() < deadline
                           and Aimbot.AutoDetect.Active
                           and Aimbot.AutoDetect.TestMode == mode
                           and not H.ShuttingDown do
-                        task.wait(0.05)
+                        task.wait(0.02)
                     end
 
                     local calls = Aimbot.AutoDetect.HookCallCount
@@ -2289,18 +2548,18 @@ local function RunAutoScan()
                         bestMode  = mode
                     end
 
-                    if calls >= (Aimbot.Settings.AutoMinHookCalls or 3) then
+                    if calls >= (Aimbot.Settings.AutoMinHookCalls or 1) then
                         selected = mode
                         warn("[AutoScan] " .. mode .. " -> OK (" .. calls .. " game hook calls) -> SELECTED")
                         Aimbot.AutoDetect.TestMode = nil
                         Aimbot.Internal.LastManageKey = nil
-                        task.wait(0.1)
+                        task.wait(0.05)
                         break
                     else
-                        warn("[AutoScan] " .. mode .. " -> FAIL (" .. calls .. " game hook calls, need " .. tostring(Aimbot.Settings.AutoMinHookCalls or 3) .. ")")
+                        warn("[AutoScan] " .. mode .. " -> FAIL (" .. calls .. " game hook calls, need " .. tostring(Aimbot.Settings.AutoMinHookCalls or 1) .. ")")
                         Aimbot.AutoDetect.TestMode = nil
                         Aimbot.Internal.LastManageKey = nil
-                        task.wait(0.1)
+                        task.wait(0.05)
                     end
                 end
             end
@@ -2361,6 +2620,13 @@ local function LoadAimbot()
             else
                 Aimbot.FOVCircle.Visible = false
             end
+        end
+
+        --// Watchdog — every HookWatchdogInterval seconds
+        Aimbot.Internal.WatchdogAccum = (Aimbot.Internal.WatchdogAccum or 0) + dt
+        if Aimbot.Internal.WatchdogAccum >= (Aimbot.Settings.HookWatchdogInterval or 2.0) then
+            Aimbot.Internal.WatchdogAccum = 0
+            pcall(VerifyAndFixHooks)
         end
 
         local hz = math.max(30, math.min(1000, Aimbot.Settings.AimbotHz or 120))
@@ -2561,6 +2827,9 @@ Aimbot.PredictPartPosition   = PredictPartPosition
 Aimbot.MoveMouseAbs          = MoveMouseAbs
 Aimbot.WorldToMouseVIM       = WorldToMouseVIM
 Aimbot.PatchShotArgs         = PatchShotArgs
+Aimbot.PatchValueRecursive   = PatchValueRecursive
+Aimbot.VerifyAndFixHooks     = VerifyAndFixHooks
+Aimbot.InvalidateModeCache   = InvalidateModeCache
 Aimbot.GetNPCCharacters      = GetNPCCharacters
 Aimbot.GetLockedCharacter    = GetLockedCharacter
 Aimbot.RunAutoScan           = RunAutoScan
@@ -2625,6 +2894,7 @@ local function Diagnose()
         T(getExec(name) ~= nil, "executor: " .. name)
     end
 
+    InvalidateModeCache()
     if Aimbot.IsModeAvailable then
         local modes = { "RayHook", "RayNew", "Vector3Unit", "ScreenPointToRay",
                         "MouseHit", "MouseFull", "GunHandler", "FireServer",
@@ -2641,7 +2911,8 @@ local function Diagnose()
                       "GetBacktrackGhostTargets", "ResolveOwnerCharacter", "ResolveOwnerPlayer",
                       "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
                       "DisableDesyncDuringShot", "FireClickNoDesync",
-                      "PatchShotArgs" }
+                      "PatchShotArgs", "PatchValueRecursive",
+                      "VerifyAndFixHooks", "InvalidateModeCache" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
     end
