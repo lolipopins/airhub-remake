@@ -1,23 +1,13 @@
 --// AirHub - 02_aimbot.lua
---// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, Backtrack + Ghost targeting.
---//
---// NEW (2026-09-26 v3):
---//   * "Arsenal" silent-aim mode now hooks ReplicatedStorage.Crosshair.OnClientInvoke
---//     (RemoteFunction callback invoked BY THE SERVER). The previous v2 attempted
---//     a __namecall hook and patched args — that was the wrong hook point, and
---//     is why Arsenal mode did nothing. This is the pattern used by the Manji
---//     DX11 pseudo-aimbot (visible in the decompiled snippet as
---//     `Crosshair.OnClientInvoke = function(...) end`).
---//
---//   * Behavior:
---//       - Original OnClientInvoke is saved on setup.
---//       - Ours returns (aimPos - camPos).Unit when Aimbot.Enabled AND LockPart
---//         exists AND the target is alive.
---//       - Otherwise it forwards to the original callback.
---//       - RenderStepped watchdog re-installs our callback if the game
---//         overwrites it (weapon swap / respawn / round change).
---//       - On disable, the original callback is restored cleanly.
---//       - Toggle Aimbot.Settings.ArsenalDebug = true for verbose console logs.
+--// v4 (2026-09-26):
+--//   - Arsenal callback now calls ReportHookCall("Arsenal") → AutoScan sees it.
+--//   - AutoScan special-cases Arsenal: succeeds on first remote availability
+--//     check (server may not InvokeClient within the 4s scan window).
+--//   - First 5 Arsenal callback invocations are always logged (then gated
+--//     behind Aimbot.Settings.ArsenalDebug) so you can see the flow.
+--//   - AutoShoot now acquires targets even when Running=false, provided
+--//     AutoShoot.OnlyWhenAiming is false. Previously you had to hold the
+--//     trigger key for LockPartInstance to ever be set.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -150,13 +140,13 @@ H.Aimbot = {
         TargetChar    = nil,
     },
 
-    --// [NEW] Arsenal state — OnClientInvoke callback replacement
     Arsenal = {
         Active          = false,
         Remote          = nil,
         OriginalOnCall  = nil,
         OurCallback     = nil,
         CallsServed     = 0,
+        LoggedCalls     = 0,
         LastWatchdog    = 0,
     },
 }
@@ -1010,30 +1000,29 @@ local function InScanFor(mode)
 end
 
 --// ---------------------------------------------------------------------------
---// ARSENAL OnClientInvoke HOOK  [NEW v3]
+--// ARSENAL OnClientInvoke HOOK
 --// ---------------------------------------------------------------------------
---// Arsenal's flow:
---//   [server] Crosshair:InvokeClient(player)  →  asks client "where are you aiming?"
---//   [client] Crosshair.OnClientInvoke(...)   →  returns direction (Vector3)
---// We replace OnClientInvoke with our own callback that returns the direction
--- to Aimbot.LockPartInstance. When Aimbot is off / no target / not targeting,
--- we forward to the original callback so gameplay is unaffected.
 
 local function Arsenal_GetDirection()
     local target = Aimbot.LockPartInstance
-    if not target or not IsAlive(target) then return nil end
-    if not Aimbot.Settings.Enabled or not Aimbot.Settings.SilentAim then return nil end
-    --// Require the aimbot to be actively tracking (Running) OR AutoShoot enabled
+    if not target or not IsAlive(target) then return nil, "no_target" end
+    if not Aimbot.Settings.Enabled then return nil, "aimbot_off" end
+    if not Aimbot.Settings.SilentAim then return nil, "silent_off" end
+
+    --// Running OR AutoShoot-without-OnlyWhenAiming
     local auto = Aimbot.Settings.AutoShoot and Aimbot.Settings.AutoShoot.Enabled
-    if not Running and not auto then return nil end
+    local autoWide = auto and not Aimbot.Settings.AutoShoot.OnlyWhenAiming
+    if not Running and not autoWide and not auto then
+        return nil, "not_aiming"
+    end
 
     local aimPos = PredictPartPosition(target)
     local cam = workspace.CurrentCamera
-    if not cam then return nil end
+    if not cam then return nil, "no_camera" end
     local camPos = cam.CFrame.Position
     local dir = aimPos - camPos
-    if dir.Magnitude < 0.001 then return nil end
-    return dir.Unit, aimPos, camPos
+    if dir.Magnitude < 0.001 then return nil, "zero_dir" end
+    return dir.Unit, "ok", aimPos, camPos
 end
 
 local function Arsenal_MakeCallback()
@@ -1041,23 +1030,27 @@ local function Arsenal_MakeCallback()
         local A = Aimbot.Arsenal
         A.CallsServed = A.CallsServed + 1
 
-        local dirUnit, aimPos, camPos = Arsenal_GetDirection()
+        --// Tell AutoScan we're alive even if we bail out below
+        ReportHookCall("Arsenal")
 
-        if Aimbot.Settings.ArsenalDebug then
+        local dirUnit, reason, aimPos, camPos = Arsenal_GetDirection()
+
+        --// Always log first 5 calls, then only if ArsenalDebug
+        if A.LoggedCalls < 5 or Aimbot.Settings.ArsenalDebug then
+            A.LoggedCalls = A.LoggedCalls + 1
             warn(string.format(
-                "[Arsenal] OnClientInvoke fired (#%d) target=%s dir=%s",
+                "[Arsenal] OnClientInvoke #%d reason=%s target=%s dir=%s",
                 A.CallsServed,
+                tostring(reason),
                 tostring(Aimbot.LockPartInstance),
                 tostring(dirUnit)
             ))
         end
 
         if dirUnit then
-            --// Most Arsenal-like games expect a unit direction Vector3.
             return dirUnit
         end
 
-        --// Fallback to original callback so the game still works
         local orig = A.OriginalOnCall
         if type(orig) == "function" then
             return orig(...)
@@ -1069,13 +1062,9 @@ end
 local function SetupArsenalOnClientInvoke()
     local A = Aimbot.Arsenal
     if A.Active and A.Remote and A.Remote.Parent then
-        --// watchdog: re-install if the game overwrote our callback
         local ok, current = pcall(function() return A.Remote.OnClientInvoke end)
         if ok and current ~= A.OurCallback then
             pcall(function() A.Remote.OnClientInvoke = A.OurCallback end)
-            if Aimbot.Settings.ArsenalDebug then
-                warn("[Arsenal] watchdog re-installed OnClientInvoke")
-            end
         end
         return true
     end
@@ -1088,9 +1077,10 @@ local function SetupArsenalOnClientInvoke()
     A.OriginalOnCall = okRead and currentCb or nil
 
     A.OurCallback = Arsenal_MakeCallback()
+    A.LoggedCalls = 0
     local okAssign = pcall(function() remote.OnClientInvoke = A.OurCallback end)
     if not okAssign then
-        warn("[AirHub] Arsenal: could not assign OnClientInvoke (readonly?)")
+        warn("[AirHub] Arsenal: could not assign OnClientInvoke")
         A.Remote = nil
         A.OriginalOnCall = nil
         A.OurCallback = nil
@@ -1109,7 +1099,6 @@ local function RemoveArsenalOnClientInvoke()
     if A.Remote and A.OriginalOnCall ~= nil then
         pcall(function() A.Remote.OnClientInvoke = A.OriginalOnCall end)
     elseif A.Remote then
-        --// original was nil — clear ours
         pcall(function() A.Remote.OnClientInvoke = nil end)
     end
     A.Active = false
@@ -2074,7 +2063,7 @@ local function RemoveMouseHook()
 end
 
 --// ---------------------------------------------------------------------------
---// FireServer (classic namecall) hook  — Arsenal no longer uses this path.
+--// FireServer (classic namecall) hook
 --// ---------------------------------------------------------------------------
 local FS_Active = false
 local FS_Original = nil
@@ -2349,7 +2338,6 @@ local function ManageHooks()
     }, "|")
 
     if Aimbot.Internal.LastManageKey == key then
-        --// even when the key hasn't changed we still run the Arsenal watchdog
         if desired.Arsenal then pcall(SetupArsenalOnClientInvoke) end
         return
     end
@@ -2366,6 +2354,7 @@ local function ManageHooks()
     if desired.Arsenal          then SetupArsenalOnClientInvoke() else RemoveArsenalOnClientInvoke() end
 end
 
+--// [v4] AutoScan special-cases Arsenal: succeed on availability, don't wait for calls
 local function RunAutoScan()
     if Aimbot.AutoDetect.Active then return end
     Aimbot.AutoDetect.Active   = true
@@ -2394,36 +2383,52 @@ local function RunAutoScan()
                     Aimbot.AutoDetect.Results[mode] = { available = false, reason = reason, calls = 0 }
                     warn("[AutoScan] " .. mode .. " -> UNAVAILABLE: " .. tostring(reason))
                 else
-                    warn("[AutoScan] Testing " .. mode .. " (" .. tostring(Aimbot.Settings.AutoTestDuration) .. "s)...")
-                    Aimbot.AutoDetect.TestMode      = mode
-                    Aimbot.AutoDetect.HookCallCount = 0
-                    Aimbot.Internal.LastManageKey = nil
-
-                    task.wait(0.15)
-
-                    local deadline = tick() + (Aimbot.Settings.AutoTestDuration or 4)
-                    while tick() < deadline
-                          and Aimbot.AutoDetect.Active
-                          and Aimbot.AutoDetect.TestMode == mode
-                          and not H.ShuttingDown do
-                        task.wait(0.05)
-                    end
-
-                    local calls = Aimbot.AutoDetect.HookCallCount
-                    Aimbot.AutoDetect.Results[mode] = { available = true, calls = calls }
-
-                    if calls >= (Aimbot.Settings.AutoMinHookCalls or 3) then
-                        selected = mode
-                        warn("[AutoScan] " .. mode .. " -> OK (" .. calls .. " game hook calls) -> SELECTED")
-                        Aimbot.AutoDetect.TestMode = nil
-                        Aimbot.Internal.LastManageKey = nil
-                        task.wait(0.1)
-                        break
+                    --// [v4] Arsenal: успех сразу если remote найден.
+                    --// Сервер может не дёрнуть InvokeClient за окно сканирования,
+                    --// но если remote существует — режим рабочий.
+                    if mode == "Arsenal" then
+                        local remote = FindArsenalCrosshair()
+                        if remote then
+                            selected = mode
+                            Aimbot.AutoDetect.Results[mode] = { available = true, calls = 0, instant = true }
+                            warn("[AutoScan] Arsenal -> OK (Crosshair remote found) -> SELECTED")
+                            Aimbot.AutoDetect.TestMode = nil
+                            Aimbot.Internal.LastManageKey = nil
+                            task.wait(0.1)
+                            break
+                        end
                     else
-                        warn("[AutoScan] " .. mode .. " -> FAIL (" .. calls .. " game hook calls, need " .. tostring(Aimbot.Settings.AutoMinHookCalls or 3) .. ")")
-                        Aimbot.AutoDetect.TestMode = nil
+                        warn("[AutoScan] Testing " .. mode .. " (" .. tostring(Aimbot.Settings.AutoTestDuration) .. "s)...")
+                        Aimbot.AutoDetect.TestMode      = mode
+                        Aimbot.AutoDetect.HookCallCount = 0
                         Aimbot.Internal.LastManageKey = nil
-                        task.wait(0.1)
+
+                        task.wait(0.15)
+
+                        local deadline = tick() + (Aimbot.Settings.AutoTestDuration or 4)
+                        while tick() < deadline
+                              and Aimbot.AutoDetect.Active
+                              and Aimbot.AutoDetect.TestMode == mode
+                              and not H.ShuttingDown do
+                            task.wait(0.05)
+                        end
+
+                        local calls = Aimbot.AutoDetect.HookCallCount
+                        Aimbot.AutoDetect.Results[mode] = { available = true, calls = calls }
+
+                        if calls >= (Aimbot.Settings.AutoMinHookCalls or 3) then
+                            selected = mode
+                            warn("[AutoScan] " .. mode .. " -> OK (" .. calls .. " game hook calls) -> SELECTED")
+                            Aimbot.AutoDetect.TestMode = nil
+                            Aimbot.Internal.LastManageKey = nil
+                            task.wait(0.1)
+                            break
+                        else
+                            warn("[AutoScan] " .. mode .. " -> FAIL (" .. calls .. " game hook calls, need " .. tostring(Aimbot.Settings.AutoMinHookCalls or 3) .. ")")
+                            Aimbot.AutoDetect.TestMode = nil
+                            Aimbot.Internal.LastManageKey = nil
+                            task.wait(0.1)
+                        end
                     end
                 end
             end
@@ -2451,6 +2456,17 @@ local function CancelAutoScan()
     Aimbot.AutoDetect.Active = false
     Aimbot.AutoDetect.TestMode = nil
     Aimbot.Internal.LastManageKey = nil
+end
+
+--// [v4] Target acquisition also when AutoShoot (without OnlyWhenAiming) is on
+local function ShouldAcquireTargets()
+    if not Aimbot.Settings.Enabled then return false end
+    if Running then return true end
+    local autoShoot = Aimbot.Settings.AutoShoot
+    if autoShoot and autoShoot.Enabled and not autoShoot.OnlyWhenAiming then
+        return true
+    end
+    return false
 end
 
 local function LoadAimbot()
@@ -2484,7 +2500,8 @@ local function LoadAimbot()
         if Aimbot.Internal.TargetAccum >= interval then
             Aimbot.Internal.TargetAccum = 0
 
-            if Aimbot.Settings.Enabled and Running then
+            --// [v4] acquire targets whenever ShouldAcquireTargets() is true
+            if ShouldAcquireTargets() then
                 GetClosestPlayer()
                 Aimbot.FOVCircle.Color = Color3.fromRGB(255, 255, 255)
                 if Aimbot.Locked and Aimbot.LockPartInstance and IsAlive(Aimbot.LockPartInstance) then
@@ -2493,7 +2510,7 @@ local function LoadAimbot()
                     local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
                     if visiblePoint then
                         Aimbot.FOVCircle.Color = Color3.fromRGB(255, 200, 70)
-                        if not Aimbot.Settings.SilentAim then
+                        if not Aimbot.Settings.SilentAim and Running then
                             local targetPos = visiblePoint
                             if Aimbot.Settings.AimMethod == "Instant" then
                                 workspace.CurrentCamera.CFrame = CFrame.new(workspace.CurrentCamera.CFrame.Position, targetPos)
@@ -2684,6 +2701,7 @@ Aimbot.ShouldBypassWallCheck = ShouldBypassWallCheck
 Aimbot.IsBacktrackEnabled    = IsBacktrackEnabled
 Aimbot.IsModeHooked          = IsModeHooked
 Aimbot.ShouldRedirect        = ShouldRedirect
+Aimbot.ShouldAcquireTargets  = ShouldAcquireTargets
 Aimbot.GetBacktrackGhostTargets = GetBacktrackGhostTargets
 Aimbot.ResolveOwnerCharacter = ResolveOwnerCharacter
 Aimbot.ResolveOwnerPlayer    = ResolveOwnerPlayer
@@ -2762,6 +2780,7 @@ local function Diagnose()
     local exports = { "CancelLock", "GetVisiblePointOnPart", "PredictPartPosition",
                       "RunAutoScan", "IsModeAvailable", "ShouldBypassWallCheck",
                       "IsBacktrackEnabled", "IsModeHooked", "ShouldRedirect",
+                      "ShouldAcquireTargets",
                       "GetBacktrackGhostTargets", "ResolveOwnerCharacter", "ResolveOwnerPlayer",
                       "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
                       "DisableDesyncDuringShot", "FireClickNoDesync",
