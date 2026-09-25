@@ -1,5 +1,18 @@
 --// AirHub - 02_aimbot.lua
 --// Aimbot: silent aim, prediction, Wallbang, TP Aim, Backtrack + Ghost targeting.
+--//
+--// v11 (2026-09-26):
+--//   * FIXED Raycast mode "shoots wrong direction":
+--//     1) Ray length now extends to reach the target (was keeping the
+--//        original tiny length, e.g. 5 studs melee reach → never hit).
+--//     2) Only patches raycasts whose ORIGIN is near the local camera or HRP
+--//        (filters out the dozens of unrelated LOS/physics/mesh raycasts
+--//        the game casts per frame, which were being corrupted and broke
+--//        aiming).
+--//   * AutoScan fully removed (v10). Mode must be selected manually or via
+--//     Next/Previous Autowork buttons.
+--//   * Recursion guard (RaycastRedirectActive) retained.
+
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
     warn("[AirHub] 02_aimbot: core not loaded")
@@ -50,7 +63,7 @@ H.Aimbot = {
         LockPart = "Head",
         AimMethod = "Smooth",
         SilentAim = true,
-        SilentAimMode = "RayNew",           -- default (AutoScan gone)
+        SilentAimMode = "RayNew",
         IgnoreFOV = false,
         CheckFromPlayerOnTP = true,
         PredictionEnabled = false,
@@ -98,7 +111,7 @@ H.Aimbot = {
         LockedGhost  = nil,
         WatchdogAccum = 0,
         ModeCache    = {},
-        RaycastRedirectActive = false,   -- re-entrancy guard for Raycast
+        RaycastRedirectActive = false,
         HookHandlers = {
             RayNew      = nil, RayNewOrig  = nil,
             V3New       = nil, V3NewOrig   = nil,
@@ -1057,7 +1070,7 @@ local function IsModeActive(mode)
 end
 
 --// ---------------------------------------------------------------------------
---// Autowork — cycling through working (enabled + available) methods
+--// Autowork
 --// ---------------------------------------------------------------------------
 local ALL_METHODS = {
     "Raycast",
@@ -2088,25 +2101,43 @@ local function SetupFireServerHook()
             if typeof(self) == "Instance"
                and self == workspace
                and not (checkC and checkC()) then
-                if IsModeHooked("Raycast") then
-                    if ShouldRedirect("Raycast") then
-                        local args = table.pack(...)
-                        if args.n >= 2
-                           and typeof(args[1]) == "Vector3"
-                           and typeof(args[2]) == "Vector3" then
+                if IsModeHooked("Raycast") and ShouldRedirect("Raycast") then
+                    local args = table.pack(...)
+                    if args.n >= 2
+                       and typeof(args[1]) == "Vector3"
+                       and typeof(args[2]) == "Vector3" then
 
+                        --// [FIX v11] Only patch raycasts whose ORIGIN is near the
+                        --// local shooter (camera or HumanoidRootPart). This filters
+                        --// out the dozens of unrelated raycasts the game casts per
+                        --// frame (LOS checks, physics, mesh tests, aim-camera).
+                        local origin = args[1]
+                        local cam = workspace.CurrentCamera
+                        local camPos = cam and cam.CFrame.Position
+                        local char = LocalPlayer.Character
+                        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                        local originOk = false
+                        if camPos and (origin - camPos).Magnitude < 10 then
+                            originOk = true
+                        elseif hrp and (origin - hrp.Position).Magnitude < 10 then
+                            originOk = true
+                        end
+
+                        if originOk then
                             Aimbot.Internal.RaycastRedirectActive = true
                             local ok, result = pcall(function()
                                 local target = Aimbot.LockPartInstance
                                 if target and IsAlive(target) then
                                     local aimPos = PredictPartPosition(target)
-                                    local origin = args[1]
                                     local dir = aimPos - origin
                                     local dm = dir.Magnitude
                                     if dm > 0.0001 then
-                                        local origLen = args[2].Magnitude
-                                        if origLen < 0.0001 then origLen = 1000 end
-                                        args[2] = (dir / dm) * origLen
+                                        --// [FIX v11] Extend ray so it ALWAYS reaches the
+                                        --// target, regardless of the original (usually
+                                        --// tiny) length. min 100 studs ensures short
+                                        --// melee-range rays still hit an enemy.
+                                        local newLen = math.max(dm * 1.05, 100)
+                                        args[2] = (dir / dm) * newLen
                                     end
                                 end
                                 return FS_Original(self, table.unpack(args, 1, args.n))
