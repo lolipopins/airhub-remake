@@ -1,21 +1,5 @@
 --// AirHub - 02_aimbot.lua
---// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, Backtrack + Ghost targeting.
---//
---// v9 (2026-09-26):
---//   * FIXED infinite recursion in Raycast mode:
---//     workspace:Raycast hook was calling IsPointVisible → workspace:Raycast
---//     → hook → GetMouseSpoof → ... → freeze + console spam.
---//     Added Aimbot.Internal.RaycastRedirectActive flag as a re-entrancy guard.
---//   * Raycast REMOVED from STATIC_MODES: it must be dynamically tested,
---//     otherwise AutoScan blindly selects it before any game shot happened.
---//   * Relaxed Raycast arg validation to (Vector3, Vector3) — some executors
---//     hide RaycastParams ClassName behind checkcaller or return a fake.
---//   * Raycast args validation also allows a missing RaycastParams.
---//   * NEW "Raycast" mode (from v8): hooks workspace:Raycast(origin, dir, params)
---//     and patches dir to aim at the locked target.
---//   * NEW CycleAutowork(dir) + GetWorkingMethods() — iterate through methods
---//     that are BOTH enabled (AutoEnabledMethods) AND available (IsModeAvailable).
-
+--// Aimbot: silent aim, prediction, Wallbang, TP Aim, Backtrack + Ghost targeting.
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
     warn("[AirHub] 02_aimbot: core not loaded")
@@ -66,7 +50,7 @@ H.Aimbot = {
         LockPart = "Head",
         AimMethod = "Smooth",
         SilentAim = true,
-        SilentAimMode = "Auto",
+        SilentAimMode = "RayNew",           -- default (AutoScan gone)
         IgnoreFOV = false,
         CheckFromPlayerOnTP = true,
         PredictionEnabled = false,
@@ -85,23 +69,6 @@ H.Aimbot = {
             OnlyWhenAiming = true,
             AutoStop = { Enabled = false, Time = 0.1 },
         },
-        AutoEnabledMethods = {
-            Raycast = true,
-            RayNew = true, RayHook = true, ScreenPointToRay = true,
-            Vector3Unit = true, MouseFull = true, MouseHit = true,
-            GunHandler = true, FireServer = true,
-            MouseLock = true, Mouse = true,
-            CFrameHook = false, Vector3New = false,
-        },
-        AutoPriorityOrder = {
-            "RayNew", "RayHook", "ScreenPointToRay", "Vector3Unit",
-            "MouseFull", "MouseHit", "GunHandler", "FireServer",
-            "MouseLock", "Mouse", "Raycast", "CFrameHook", "Vector3New",
-        },
-        AutoTestDuration = 0.5,
-        AutoMinHookCalls = 1,
-        AutoFallback     = "Camera",
-        AutoRunOnLoad    = true,
 
         WallbangEnabled  = false,
         WallbangMethod   = "RemotePatch",
@@ -131,8 +98,7 @@ H.Aimbot = {
         LockedGhost  = nil,
         WatchdogAccum = 0,
         ModeCache    = {},
-        --// [FIX] recursion guard for Raycast redirect
-        RaycastRedirectActive = false,
+        RaycastRedirectActive = false,   -- re-entrancy guard for Raycast
         HookHandlers = {
             RayNew      = nil, RayNewOrig  = nil,
             V3New       = nil, V3NewOrig   = nil,
@@ -140,15 +106,6 @@ H.Aimbot = {
             V3Unit      = nil, V3UnitOrig  = nil,
             SPR         = nil, SPR_Orig    = nil,
         },
-    },
-
-    AutoDetect = {
-        Active         = false,
-        TestMode       = nil,
-        HookCallCount  = 0,
-        Results        = {},
-        SelectedMethod = nil,
-        LastScanTime   = 0,
     },
 
     TPAimInternal = {
@@ -871,14 +828,8 @@ local function MoveMouseAbs(x, y)
     return vimOk
 end
 
-local function ReportHookCall(mode)
-    if Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode == mode then
-        Aimbot.AutoDetect.HookCallCount = Aimbot.AutoDetect.HookCallCount + 1
-    end
-end
-
 --// ---------------------------------------------------------------------------
---// PatchShotArgs v2 — adaptive Vector3 role detection + recursion into tables
+--// PatchShotArgs — adaptive Vector3 role detection + recursion into tables
 --// ---------------------------------------------------------------------------
 local function PatchValueRecursive(v, camPos, aimPos, dirUnit, correctCF, depth)
     if depth > 4 then return v, 0 end
@@ -1088,26 +1039,16 @@ local function InvalidateModeCache()
 end
 
 local function GetEffectiveMode()
-    local m = Aimbot.Settings.SilentAimMode
-    if m == "Auto" then
-        return Aimbot.AutoDetect.SelectedMethod or Aimbot.Settings.AutoFallback or "Camera"
-    end
-    return m
+    return Aimbot.Settings.SilentAimMode
 end
 
 local function IsModeHooked(mode)
-    if Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode == mode then
-        return Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim
-    end
     return Aimbot.Settings.Enabled
        and Aimbot.Settings.SilentAim
-       and GetEffectiveMode() == mode
+       and Aimbot.Settings.SilentAimMode == mode
 end
 
 local function ShouldRedirect(mode)
-    if Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode == mode then
-        return true
-    end
     return IsModeHooked(mode) and Running
 end
 
@@ -1115,21 +1056,22 @@ local function IsModeActive(mode)
     return IsModeHooked(mode)
 end
 
-local function InScanFor(mode)
-    return Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode == mode
-end
-
 --// ---------------------------------------------------------------------------
 --// Autowork — cycling through working (enabled + available) methods
 --// ---------------------------------------------------------------------------
+local ALL_METHODS = {
+    "Raycast",
+    "RayNew", "RayHook", "ScreenPointToRay", "Vector3Unit",
+    "MouseFull", "MouseHit", "GunHandler", "FireServer",
+    "MouseLock", "Mouse", "CFrameHook", "Vector3New",
+}
+
 local function GetWorkingMethods()
     local list = {}
-    for _, mode in ipairs(Aimbot.Settings.AutoPriorityOrder or {}) do
-        if Aimbot.Settings.AutoEnabledMethods[mode] ~= false then
-            local ok = IsModeAvailable(mode)
-            if ok then
-                table.insert(list, mode)
-            end
+    for _, mode in ipairs(ALL_METHODS) do
+        local ok = IsModeAvailable(mode)
+        if ok then
+            table.insert(list, mode)
         end
     end
     return list
@@ -1143,10 +1085,6 @@ local function CycleAutowork(direction)
     end
 
     local current = Aimbot.Settings.SilentAimMode
-    if current == "Auto" then
-        current = Aimbot.AutoDetect.SelectedMethod or Aimbot.Settings.AutoFallback or list[1]
-    end
-
     local pos = 1
     for i, m in ipairs(list) do
         if m == current then pos = i; break end
@@ -1857,10 +1795,6 @@ local function SetupRayHook()
 
     local handler = function(t, k)
         if k == 'Direction' and not H.ShuttingDown and IsModeHooked("RayHook") then
-            if InScanFor("RayHook") then
-                ReportHookCall("RayHook")
-                return oldRayIndex(t, k)
-            end
             if not ShouldRedirect("RayHook") then
                 return oldRayIndex(t, k)
             end
@@ -1908,10 +1842,6 @@ local function SetupRayNewHook()
     local function handler(origin, direction)
         if not H.ShuttingDown and IsModeHooked("RayNew") then
             if not (checkC and checkC()) then
-                if InScanFor("RayNew") then
-                    ReportHookCall("RayNew")
-                    return RayNewOriginal(origin, direction)
-                end
                 if not ShouldRedirect("RayNew") then
                     return RayNewOriginal(origin, direction)
                 end
@@ -1977,10 +1907,6 @@ local function SetupVector3UnitHook()
         if k == "Unit" and not H.ShuttingDown and IsModeHooked("Vector3Unit") then
             local mag = math.sqrt(self.X*self.X + self.Y*self.Y + self.Z*self.Z)
             if math.abs(mag - 1) < 0.25 and mag > 0.0001 then
-                if InScanFor("Vector3Unit") then
-                    ReportHookCall("Vector3Unit")
-                    return V3_oldIndex(self, k)
-                end
                 if not ShouldRedirect("Vector3Unit") then
                     return V3_oldIndex(self, k)
                 end
@@ -2027,10 +1953,6 @@ local function SetupScreenPointToRayHook()
     local newc = getExec("newcclosure")
     local function handler(self, x, y)
         if not H.ShuttingDown and IsModeHooked("ScreenPointToRay") then
-            if InScanFor("ScreenPointToRay") then
-                ReportHookCall("ScreenPointToRay")
-                return SPR_Original(self, x, y)
-            end
             if not ShouldRedirect("ScreenPointToRay") then
                 return SPR_Original(self, x, y)
             end
@@ -2102,14 +2024,6 @@ local function SetupMouseHook()
                     local isFull = (k == "Hit" or k == "UnitRay" or k == "Target" or k == "TargetSurface")
                                    and IsModeHooked("MouseFull")
                     if isHit or isFull then
-                        if InScanFor("MouseHit") and k == "Hit" then
-                            ReportHookCall("MouseHit")
-                            return realMouse.Hit
-                        end
-                        if InScanFor("MouseFull") and (k == "Hit" or k == "UnitRay" or k == "Target") then
-                            ReportHookCall("MouseFull")
-                            return realMouse[k]
-                        end
                         local mode = isHit and "MouseHit" or "MouseFull"
                         if not ShouldRedirect(mode) then
                             return realMouse[k]
@@ -2167,9 +2081,6 @@ local function SetupFireServerHook()
 
         --// ====================== Raycast ======================
         if method == "Raycast" and not H.ShuttingDown then
-            --// [FIX v9] recursion guard: if we're already inside our own
-            --// redirect (e.g. GetMouseSpoof → IsPointVisible → workspace:Raycast),
-            --// pass straight to the original to avoid infinite loop + freeze.
             if Aimbot.Internal.RaycastRedirectActive then
                 return FS_Original(self, ...)
             end
@@ -2178,13 +2089,8 @@ local function SetupFireServerHook()
                and self == workspace
                and not (checkC and checkC()) then
                 if IsModeHooked("Raycast") then
-                    if InScanFor("Raycast") then
-                        ReportHookCall("Raycast")
-                        return FS_Original(self, ...)
-                    end
                     if ShouldRedirect("Raycast") then
                         local args = table.pack(...)
-                        --// relaxed validation: at least (origin: Vector3, dir: Vector3)
                         if args.n >= 2
                            and typeof(args[1]) == "Vector3"
                            and typeof(args[2]) == "Vector3" then
@@ -2222,15 +2128,6 @@ local function SetupFireServerHook()
         local isShot = (method == "FireServer" or method == "InvokeServer")
         if isShot and not H.ShuttingDown and IsModeHooked("FireServer") then
             if not (checkC and checkC()) then
-                if InScanFor("FireServer") then
-                    if typeof(self) == "Instance"
-                       and (self:IsA("RemoteEvent")
-                            or self:IsA("UnreliableRemoteEvent")
-                            or self:IsA("RemoteFunction")) then
-                        ReportHookCall("FireServer")
-                    end
-                    return FS_Original(self, ...)
-                end
                 if not ShouldRedirect("FireServer") then
                     return FS_Original(self, ...)
                 end
@@ -2292,12 +2189,6 @@ local function SetupGunHandlerHook()
     GunHandler.Shoot = function(p1, p2, p3, p4, p5, p6, p7, p8)
         local Hg = getgenv().AirHub
         if Hg and Hg.Aimbot and IsModeHooked("GunHandler") then
-            if InScanFor("GunHandler") then
-                if p1 == LocalPlayer then
-                    ReportHookCall("GunHandler")
-                end
-                return GunHandlerOldShoot(p1, p2, p3, p4, p5, p6, p7, p8)
-            end
             if not ShouldRedirect("GunHandler") then
                 return GunHandlerOldShoot(p1, p2, p3, p4, p5, p6, p7, p8)
             end
@@ -2346,12 +2237,6 @@ local function SetupCFrameHook()
     local function handler(at, lookAt, up)
         if not H.ShuttingDown and IsModeHooked("CFrameHook") then
             if not (checkC and checkC()) then
-                if InScanFor("CFrameHook") then
-                    if typeof(at) == "Vector3" and typeof(lookAt) == "Vector3" then
-                        ReportHookCall("CFrameHook")
-                    end
-                    return CFrameHookOriginal(at, lookAt, up)
-                end
                 if not ShouldRedirect("CFrameHook") then
                     return CFrameHookOriginal(at, lookAt, up)
                 end
@@ -2400,10 +2285,6 @@ local function SetupVector3NewHook()
                 if type(x) == "number" and type(y) == "number" and type(z) == "number" then
                     local mag = math.sqrt(x*x + y*y + z*z)
                     if math.abs(mag - 1) < 0.25 and mag > 0.0001 then
-                        if InScanFor("Vector3New") then
-                            ReportHookCall("Vector3New")
-                            return Vector3NewOriginal(x, y, z)
-                        end
                         if not ShouldRedirect("Vector3New") then
                             return Vector3NewOriginal(x, y, z)
                         end
@@ -2504,11 +2385,10 @@ local function VerifyAndFixHooks()
 end
 
 local function ManageHooks()
-    local autoScanMode = Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode or nil
     local desired = {}
 
     local function want(name)
-        return IsModeHooked(name) or (autoScanMode == name)
+        return IsModeHooked(name)
     end
 
     desired.RayHook          = want("RayHook")
@@ -2542,133 +2422,6 @@ local function ManageHooks()
     if desired.FireServer       then SetupFireServerHook()     else RemoveFireServerHook()     end
     if desired.CFrameHook       then SetupCFrameHook()         else RemoveCFrameHook()         end
     if desired.Vector3New       then SetupVector3NewHook()     else RemoveVector3NewHook()     end
-end
-
---// ---------------------------------------------------------------------------
---// AutoScan
---// ---------------------------------------------------------------------------
-local STATIC_MODES = {
-    -- Raycast removed — it must be dynamically tested (game must actually
-    -- fire workspace:Raycast during the scan window). Otherwise AutoScan
-    -- blindly selects it and, combined with the aimbot's own raycasts,
-    -- causes recursion.
-    RayNew           = true,
-    RayHook          = true,
-    Vector3Unit      = true,
-    ScreenPointToRay = true,
-    CFrameHook       = true,
-    Vector3New       = true,
-    Camera           = true,
-    MouseLock        = true,
-    Mouse            = true,
-}
-
-local function RunAutoScan()
-    if Aimbot.AutoDetect.Active then return end
-    Aimbot.AutoDetect.Active   = true
-    Aimbot.AutoDetect.SelectedMethod = nil
-    Aimbot.AutoDetect.Results  = {}
-    Aimbot.AutoDetect.LastScanTime = tick()
-    InvalidateModeCache()
-
-    warn("========================================")
-    warn("[AutoScan] Starting silent aim method detection...")
-    warn("========================================")
-
-    task.spawn(function()
-        local order = Aimbot.Settings.AutoPriorityOrder
-        local selected  = nil
-        local bestMode  = nil
-        local bestCalls = 0
-
-        for _, mode in ipairs(order) do
-            if not Aimbot.AutoDetect.Active then break end
-            if H.ShuttingDown then break end
-
-            if Aimbot.Settings.AutoEnabledMethods[mode] == false then
-                Aimbot.AutoDetect.Results[mode] = { available = false, reason = "disabled", calls = 0 }
-                warn("[AutoScan] " .. mode .. " -> SKIPPED (disabled by user)")
-            else
-                local available, reason = IsModeAvailable(mode)
-                if not available then
-                    Aimbot.AutoDetect.Results[mode] = { available = false, reason = reason, calls = 0 }
-                    warn("[AutoScan] " .. mode .. " -> UNAVAILABLE: " .. tostring(reason))
-                elseif STATIC_MODES[mode] then
-                    selected = mode
-                    Aimbot.AutoDetect.Results[mode] = { available = true, calls = 0, instant = true }
-                    warn("[AutoScan] " .. mode .. " -> OK (static availability) -> SELECTED")
-                    Aimbot.AutoDetect.TestMode = nil
-                    Aimbot.Internal.LastManageKey = nil
-                    task.wait(0.05)
-                    break
-                else
-                    warn("[AutoScan] Testing " .. mode .. " (" .. tostring(Aimbot.Settings.AutoTestDuration) .. "s)...")
-                    Aimbot.AutoDetect.TestMode      = mode
-                    Aimbot.AutoDetect.HookCallCount = 0
-                    Aimbot.Internal.LastManageKey = nil
-
-                    task.wait(0.05)
-
-                    local deadline = tick() + (Aimbot.Settings.AutoTestDuration or 0.5)
-                    while tick() < deadline
-                          and Aimbot.AutoDetect.Active
-                          and Aimbot.AutoDetect.TestMode == mode
-                          and not H.ShuttingDown do
-                        task.wait(0.02)
-                    end
-
-                    local calls = Aimbot.AutoDetect.HookCallCount
-                    Aimbot.AutoDetect.Results[mode] = { available = true, calls = calls }
-
-                    if calls > bestCalls then
-                        bestCalls = calls
-                        bestMode  = mode
-                    end
-
-                    if calls >= (Aimbot.Settings.AutoMinHookCalls or 1) then
-                        selected = mode
-                        warn("[AutoScan] " .. mode .. " -> OK (" .. calls .. " game hook calls) -> SELECTED")
-                        Aimbot.AutoDetect.TestMode = nil
-                        Aimbot.Internal.LastManageKey = nil
-                        task.wait(0.05)
-                        break
-                    else
-                        warn("[AutoScan] " .. mode .. " -> FAIL (" .. calls .. " game hook calls, need " .. tostring(Aimbot.Settings.AutoMinHookCalls or 1) .. ")")
-                        Aimbot.AutoDetect.TestMode = nil
-                        Aimbot.Internal.LastManageKey = nil
-                        task.wait(0.05)
-                    end
-                end
-            end
-        end
-
-        if selected then
-            Aimbot.AutoDetect.SelectedMethod = selected
-        elseif bestMode and bestCalls > 0 then
-            Aimbot.AutoDetect.SelectedMethod = bestMode
-            warn(string.format(
-                "[AutoScan] No method reached threshold — using best-effort: %s (%d calls)",
-                bestMode, bestCalls))
-        else
-            Aimbot.AutoDetect.SelectedMethod = Aimbot.Settings.AutoFallback or "Camera"
-        end
-        Aimbot.AutoDetect.Active = false
-        Aimbot.AutoDetect.TestMode = nil
-        Aimbot.Internal.LastManageKey = nil
-
-        warn("========================================")
-        warn("[AutoScan] RESULT: Silent Aim mode = " .. tostring(Aimbot.AutoDetect.SelectedMethod))
-        warn("========================================")
-    end)
-end
-
-local function CancelAutoScan()
-    if Aimbot.AutoDetect.Active then
-        warn("[AutoScan] Cancelled by user.")
-    end
-    Aimbot.AutoDetect.Active = false
-    Aimbot.AutoDetect.TestMode = nil
-    Aimbot.Internal.LastManageKey = nil
 end
 
 --// ---------------------------------------------------------------------------
@@ -2913,8 +2666,6 @@ Aimbot.GetWorkingMethods     = GetWorkingMethods
 Aimbot.CycleAutowork         = CycleAutowork
 Aimbot.GetNPCCharacters      = GetNPCCharacters
 Aimbot.GetLockedCharacter    = GetLockedCharacter
-Aimbot.RunAutoScan           = RunAutoScan
-Aimbot.CancelAutoScan        = CancelAutoScan
 Aimbot.IsModeAvailable       = IsModeAvailable
 Aimbot.ShouldBypassWallCheck = ShouldBypassWallCheck
 Aimbot.IsBacktrackEnabled    = IsBacktrackEnabled
@@ -2986,7 +2737,7 @@ local function Diagnose()
     end
 
     local exports = { "CancelLock", "GetVisiblePointOnPart", "PredictPartPosition",
-                      "RunAutoScan", "IsModeAvailable", "ShouldBypassWallCheck",
+                      "IsModeAvailable", "ShouldBypassWallCheck",
                       "IsBacktrackEnabled", "IsModeHooked", "ShouldRedirect",
                       "GetBacktrackGhostTargets", "ResolveOwnerCharacter", "ResolveOwnerPlayer",
                       "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
@@ -3011,11 +2762,3 @@ task.delay(1, function()
     if H.ShuttingDown then return end
     pcall(Diagnose)
 end)
-
-if Aimbot.Settings.AutoRunOnLoad and Aimbot.Settings.SilentAimMode == "Auto" then
-    task.delay(5, function()
-        if H.Aimbot and H.Aimbot.RunAutoScan then
-            H.Aimbot.RunAutoScan()
-        end
-    end)
-end
