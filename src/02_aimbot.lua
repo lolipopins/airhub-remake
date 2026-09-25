@@ -1,17 +1,16 @@
 --// AirHub - 02_aimbot.lua
 --// Aimbot: silent aim, prediction, Wallbang, TP Aim, Backtrack + Ghost targeting.
 --//
---// v11 (2026-09-26):
---//   * FIXED Raycast mode "shoots wrong direction":
---//     1) Ray length now extends to reach the target (was keeping the
---//        original tiny length, e.g. 5 studs melee reach → never hit).
---//     2) Only patches raycasts whose ORIGIN is near the local camera or HRP
---//        (filters out the dozens of unrelated LOS/physics/mesh raycasts
---//        the game casts per frame, which were being corrupted and broke
---//        aiming).
---//   * AutoScan fully removed (v10). Mode must be selected manually or via
---//     Next/Previous Autowork buttons.
---//   * Recursion guard (RaycastRedirectActive) retained.
+--// v12 (2026-09-26):
+--//   * Raycast mode FIXED — reverted origin filter (v11 broke real shots
+--//     because the muzzle/hand raycast origin is >10 studs from camera/HRP).
+--//     Raycast now patches EVERY workspace:Raycast call again, and preserves
+--//     the original direction length (like v8, the working version).
+--//   * Re-entrancy guard (RaycastRedirectActive) retained — prevents recursion
+--//     freeze when our own helpers call workspace:Raycast.
+--//   * AutoScan fully removed (v10). Mode selected manually or via
+--//     Next/Previous Autowork.
+--//   * Default SilentAimMode = "RayNew".
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -2094,6 +2093,8 @@ local function SetupFireServerHook()
 
         --// ====================== Raycast ======================
         if method == "Raycast" and not H.ShuttingDown then
+            --// Re-entrancy guard (prevents recursion when our helpers
+            --// trigger workspace:Raycast while we're already redirecting).
             if Aimbot.Internal.RaycastRedirectActive then
                 return FS_Original(self, ...)
             end
@@ -2107,48 +2108,34 @@ local function SetupFireServerHook()
                        and typeof(args[1]) == "Vector3"
                        and typeof(args[2]) == "Vector3" then
 
-                        --// [FIX v11] Only patch raycasts whose ORIGIN is near the
-                        --// local shooter (camera or HumanoidRootPart). This filters
-                        --// out the dozens of unrelated raycasts the game casts per
-                        --// frame (LOS checks, physics, mesh tests, aim-camera).
+                        --// [v12] Patch EVERY raycast (no origin filter).
+                        --// Preserve original direction length so we don't
+                        --// shorten long rays or extend melee-reach rays.
+                        --// Falls back to 1000 studs when the original length
+                        --// is degenerate (< 0.001).
                         local origin = args[1]
-                        local cam = workspace.CurrentCamera
-                        local camPos = cam and cam.CFrame.Position
-                        local char = LocalPlayer.Character
-                        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                        local originOk = false
-                        if camPos and (origin - camPos).Magnitude < 10 then
-                            originOk = true
-                        elseif hrp and (origin - hrp.Position).Magnitude < 10 then
-                            originOk = true
-                        end
+                        local origLen = args[2].Magnitude
+                        if origLen < 0.001 then origLen = 1000 end
 
-                        if originOk then
-                            Aimbot.Internal.RaycastRedirectActive = true
-                            local ok, result = pcall(function()
-                                local target = Aimbot.LockPartInstance
-                                if target and IsAlive(target) then
-                                    local aimPos = PredictPartPosition(target)
-                                    local dir = aimPos - origin
-                                    local dm = dir.Magnitude
-                                    if dm > 0.0001 then
-                                        --// [FIX v11] Extend ray so it ALWAYS reaches the
-                                        --// target, regardless of the original (usually
-                                        --// tiny) length. min 100 studs ensures short
-                                        --// melee-range rays still hit an enemy.
-                                        local newLen = math.max(dm * 1.05, 100)
-                                        args[2] = (dir / dm) * newLen
-                                    end
+                        Aimbot.Internal.RaycastRedirectActive = true
+                        local ok, result = pcall(function()
+                            local target = Aimbot.LockPartInstance
+                            if target and IsAlive(target) then
+                                local aimPos = PredictPartPosition(target)
+                                local dir = aimPos - origin
+                                local dm = dir.Magnitude
+                                if dm > 0.0001 then
+                                    args[2] = (dir / dm) * origLen
                                 end
-                                return FS_Original(self, table.unpack(args, 1, args.n))
-                            end)
-                            Aimbot.Internal.RaycastRedirectActive = false
-
-                            if ok then
-                                return result
                             end
-                            warn("[AirHub] Raycast redirect error: " .. tostring(result))
+                            return FS_Original(self, table.unpack(args, 1, args.n))
+                        end)
+                        Aimbot.Internal.RaycastRedirectActive = false
+
+                        if ok then
+                            return result
                         end
+                        warn("[AirHub] Raycast redirect error: " .. tostring(result))
                     end
                 end
             end
