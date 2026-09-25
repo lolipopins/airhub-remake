@@ -1,9 +1,12 @@
 --// AirHub - 02_aimbot.lua
---// v14 (2026-09-26):
---//   * Debug post-shot logging (Settings.Debug = true by default)
---//   * Safe namecall wrapper — any error inside our handler is caught,
---//     logged, and we fall through to the original without patching.
---//   * Strict Instance check — non-Instance self is passed straight through.
+--// v15 (2026-09-26):
+--//   * FIXED namecall wrapper dropping multi-return values.
+--//     Was: local ok, err = pcall(...) → only 1st return kept.
+--//     Now: table.pack(pcall(...)) → all returns preserved.
+--//     (WorldToScreenPoint, FindPartOnRay, etc. return 2+ values and were
+--//     getting truncated, breaking the game's shooting.)
+--//   * Cached executor functions at load time (were re-fetched per call).
+--//   * Debug post-shot logs.
 --//   * Default SilentAimMode = "Raycast".
 
 local H = getgenv().AirHub
@@ -41,6 +44,15 @@ local function getExec(name)
     return nil
 end
 
+--// Cache executor functions once
+local EXEC = {
+    hookmetamethod     = getExec("hookmetamethod"),
+    getnamecallmethod  = getExec("getnamecallmethod"),
+    newcclosure        = getExec("newcclosure"),
+    checkcaller        = getExec("checkcaller"),
+    getrawmetatable    = getExec("getrawmetatable"),
+}
+
 H.Aimbot = {
     Settings = {
         Enabled = false,
@@ -67,7 +79,7 @@ H.Aimbot = {
         NPCNameFilter = "",
         AimbotHz = 120,
         IgnoreGameProcessed = true,
-        Debug = true,   -- post-shot logging
+        Debug = true,
 
         AutoShoot = {
             Enabled = false,
@@ -106,7 +118,6 @@ H.Aimbot = {
         WatchdogAccum = 0,
         ModeCache    = {},
         RaycastRedirectActive = false,
-        LastShotInfo = nil,
         HookHandlers = {
             RayNew      = nil, RayNewOrig  = nil,
             V3New       = nil, V3NewOrig   = nil,
@@ -955,9 +966,7 @@ local function ComputeModeAvailability(mode)
         if type(ws.Raycast) ~= "function" then
             return false, "workspace.Raycast missing"
         end
-        local hookf = getExec("hookmetamethod")
-        local getMethod = getExec("getnamecallmethod")
-        if not hookf or not getMethod then
+        if not EXEC.hookmetamethod or not EXEC.getnamecallmethod then
             return false, "no hookmetamethod"
         end
         return true
@@ -989,9 +998,7 @@ local function ComputeModeAvailability(mode)
         end
         return true
     elseif mode == "FireServer" then
-        local hookf = getExec("hookmetamethod")
-        local getMethod = getExec("getnamecallmethod")
-        if not hookf or not getMethod then
+        if not EXEC.hookmetamethod or not EXEC.getnamecallmethod then
             return false, "no hookmetamethod"
         end
         return true
@@ -1162,12 +1169,10 @@ local function ScheduleHookRemoval(restoreFn, holdTime)
     end)
 end
 
---// ==== WALLBANG MODES ====
+--// ==== WALLBANG ====
 local function PerformWallbang_RemotePatch(targetPart, btn)
-    local hookf     = getExec("hookmetamethod")
-    local getMethod = getExec("getnamecallmethod")
-    local newc      = getExec("newcclosure")
-    local checkC    = getExec("checkcaller")
+    local hookf, getMethod, newc, checkC =
+        EXEC.hookmetamethod, EXEC.getnamecallmethod, EXEC.newcclosure, EXEC.checkcaller
     if not hookf or not getMethod or not newc then return false end
 
     local aimPos   = PredictPartPosition(targetPart)
@@ -1197,10 +1202,8 @@ local function PerformWallbang_RemotePatch(targetPart, btn)
 end
 
 local function PerformWallbang_RemotePatchFull(targetPart, btn)
-    local hookf     = getExec("hookmetamethod")
-    local getMethod = getExec("getnamecallmethod")
-    local newc      = getExec("newcclosure")
-    local checkC    = getExec("checkcaller")
+    local hookf, getMethod, newc, checkC =
+        EXEC.hookmetamethod, EXEC.getnamecallmethod, EXEC.newcclosure, EXEC.checkcaller
     if not hookf or not getMethod or not newc then return false end
 
     local aimPos   = PredictPartPosition(targetPart)
@@ -1256,10 +1259,8 @@ local function PerformWallbang_RemotePatchFull(targetPart, btn)
 end
 
 local function PerformWallbang_RayIgnore(targetPart, btn)
-    local hookf     = getExec("hookmetamethod")
-    local getMethod = getExec("getnamecallmethod")
-    local newc      = getExec("newcclosure")
-    local checkC    = getExec("checkcaller")
+    local hookf, getMethod, newc, checkC =
+        EXEC.hookmetamethod, EXEC.getnamecallmethod, EXEC.newcclosure, EXEC.checkcaller
     if not hookf or not getMethod or not newc then return false end
 
     local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
@@ -1304,7 +1305,7 @@ local function PerformWallbang_RayNewHook(targetPart, btn)
     local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
     WB.HoldUntil = tick() + holdTime
 
-    local newc = getExec("newcclosure")
+    local newc = EXEC.newcclosure
     local function handler(origin, direction)
         if tick() < WB.HoldUntil
            and typeof(origin) == "Vector3"
@@ -1336,10 +1337,8 @@ local function PerformWallbang_RayNewHook(targetPart, btn)
 end
 
 local function PerformWallbang_MuzzleTeleport(targetPart, btn)
-    local hookf     = getExec("hookmetamethod")
-    local getMethod = getExec("getnamecallmethod")
-    local newc      = getExec("newcclosure")
-    local checkC    = getExec("checkcaller")
+    local hookf, getMethod, newc, checkC =
+        EXEC.hookmetamethod, EXEC.getnamecallmethod, EXEC.newcclosure, EXEC.checkcaller
     if not hookf or not getMethod or not newc then return false end
 
     local aimPos   = PredictPartPosition(targetPart)
@@ -1424,7 +1423,7 @@ local function PerformWallbang_ScreenPointToRay(targetPart, btn)
     local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
     WB.HoldUntil = tick() + holdTime
 
-    local newc = getExec("newcclosure")
+    local newc = EXEC.newcclosure
     local function handler(self, x, y)
         if tick() < WB.HoldUntil then
             local camPos = self.CFrame.Position
@@ -1613,12 +1612,8 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     local startHealth = hum and hum.Health or 0
 
     local mode = GetEffectiveMode()
-    DebugPrint(string.format("shot start | mode=%s target=%s part=%s btn=%d visible=%s",
-        tostring(mode),
-        tostring(displayName),
-        tostring(targetPart.Name),
-        btn or -1,
-        tostring(wasVisible)))
+    DebugPrint(string.format("shot start | mode=%s target=%s part=%s btn=%d",
+        tostring(mode), tostring(displayName), tostring(targetPart.Name), btn or -1))
 
     if Aimbot.Settings.TPAimEnabled then
         if Aimbot.Settings.TPAimMethod == "MagicBullet" then
@@ -1827,8 +1822,8 @@ local function SetupRayNewHook()
     if type(old) ~= "function" then return end
     RayNewOriginal = old
 
-    local newc   = getExec("newcclosure")
-    local checkC = getExec("checkcaller")
+    local newc   = EXEC.newcclosure
+    local checkC = EXEC.checkcaller
 
     local function handler(origin, direction)
         if not H.ShuttingDown and IsModeHooked("RayNew") then
@@ -1941,7 +1936,7 @@ local function SetupScreenPointToRayHook()
     if type(old) ~= "function" then return end
     SPR_Original = old
 
-    local newc = getExec("newcclosure")
+    local newc = EXEC.newcclosure
     local function handler(self, x, y)
         if not H.ShuttingDown and IsModeHooked("ScreenPointToRay") then
             if not ShouldRedirect("ScreenPointToRay") then
@@ -2054,25 +2049,23 @@ local function RemoveMouseHook()
 end
 
 --// ---------------------------------------------------------------------------
---// Namecall hook — wrapped in pcall for safety
+--// Namecall hook — with multi-return preservation
 --// ---------------------------------------------------------------------------
 local FS_Active = false
 local FS_Original = nil
 
 local function NamecallImpl(self, ...)
-    local method = getExec("getnamecallmethod") and getExec("getnamecallmethod")() or nil
+    local method = EXEC.getnamecallmethod and EXEC.getnamecallmethod()
     if type(method) ~= "string" then
         return FS_Original(self, ...)
     end
-
-    local checkC = getExec("checkcaller")
 
     --// ====================== Raycast ======================
     if method == "Raycast"
        and not H.ShuttingDown
        and typeof(self) == "Instance"
        and self == workspace
-       and not (checkC and checkC())
+       and not (EXEC.checkcaller and EXEC.checkcaller())
        and not Aimbot.Internal.RaycastRedirectActive then
         if IsModeHooked("Raycast") and ShouldRedirect("Raycast") then
             local args = table.pack(...)
@@ -2092,9 +2085,8 @@ local function NamecallImpl(self, ...)
                         if origLen < 0.0001 then origLen = 1000 end
                         args[2] = dirUnit * origLen
                         DebugHookPrint(string.format(
-                            "Raycast patched | origin=(%.1f,%.1f,%.1f) target=%s len=%.1f",
-                            origin.X, origin.Y, origin.Z,
-                            tostring(target), origLen))
+                            "Raycast patched | origin=(%.1f,%.1f,%.1f) len=%.1f",
+                            origin.X, origin.Y, origin.Z, origLen))
                         return FS_Original(self, table.unpack(args, 1, args.n))
                     end
                 end
@@ -2109,7 +2101,7 @@ local function NamecallImpl(self, ...)
        and not H.ShuttingDown
        and typeof(self) == "Instance"
        and IsModeHooked("FireServer")
-       and not (checkC and checkC())
+       and not (EXEC.checkcaller and EXEC.checkcaller())
        and ShouldRedirect("FireServer") then
         local target = Aimbot.LockPartInstance
         if target and IsAlive(target) then
@@ -2121,9 +2113,7 @@ local function NamecallImpl(self, ...)
                 local args = table.pack(...)
                 local patched = PatchShotArgs(args, camPos, aimPos)
                 if patched > 0 then
-                    DebugHookPrint(string.format(
-                        "FireServer patched %d args | remote=%s target=%s",
-                        patched, tostring(self), tostring(target)))
+                    DebugHookPrint(string.format("FireServer patched %d args", patched))
                     return FS_Original(self, table.unpack(args, 1, args.n))
                 end
             end
@@ -2135,24 +2125,25 @@ end
 
 local function SetupFireServerHook()
     if FS_Active then return end
-    local hookf = getExec("hookmetamethod")
-    local newc  = getExec("newcclosure")
+    local hookf, newc = EXEC.hookmetamethod, EXEC.newcclosure
     if not hookf then return end
 
-    local safeHandler = function(self, ...)
+    local function safeHandler(self, ...)
+        --// Fast path: if re-entering, bypass
         if Aimbot.Internal.RaycastRedirectActive then
             return FS_Original(self, ...)
         end
 
-        local ok, err = pcall(NamecallImpl, self, ...)
-        if not ok then
-            DebugHookPrint("namecall error: " .. tostring(err))
+        --// pcall returning MULTIPLE values — preserved via table.pack
+        local r = table.pack(pcall(NamecallImpl, self, ...))
+        if not r[1] then
+            DebugHookPrint("namecall error: " .. tostring(r[2]))
             if FS_Original then
                 return FS_Original(self, ...)
             end
             return
         end
-        return err
+        return table.unpack(r, 2, r.n)
     end
     if newc then pcall(function() safeHandler = newc(safeHandler) end) end
 
@@ -2166,7 +2157,7 @@ end
 
 local function RemoveFireServerHook()
     if not FS_Active then return end
-    local hookf = getExec("hookmetamethod")
+    local hookf = EXEC.hookmetamethod
     if hookf and FS_Original then
         pcall(function() hookf(game, "__namecall", FS_Original) end)
     end
@@ -2236,8 +2227,8 @@ local function SetupCFrameHook()
     if type(old) ~= "function" then return end
     CFrameHookOriginal = old
 
-    local newc   = getExec("newcclosure")
-    local checkC = getExec("checkcaller")
+    local newc   = EXEC.newcclosure
+    local checkC = EXEC.checkcaller
 
     local function handler(at, lookAt, up)
         if not H.ShuttingDown and IsModeHooked("CFrameHook") then
@@ -2281,8 +2272,8 @@ local function SetupVector3NewHook()
     if type(old) ~= "function" then return end
     Vector3NewOriginal = old
 
-    local newc   = getExec("newcclosure")
-    local checkC = getExec("checkcaller")
+    local newc   = EXEC.newcclosure
+    local checkC = EXEC.checkcaller
 
     local function handler(x, y, z)
         if not H.ShuttingDown and IsModeHooked("Vector3New") then
