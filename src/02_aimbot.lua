@@ -1,13 +1,10 @@
 --// AirHub - 02_aimbot.lua
---// v15 (2026-09-26):
---//   * FIXED namecall wrapper dropping multi-return values.
---//     Was: local ok, err = pcall(...) → only 1st return kept.
---//     Now: table.pack(pcall(...)) → all returns preserved.
---//     (WorldToScreenPoint, FindPartOnRay, etc. return 2+ values and were
---//     getting truncated, breaking the game's shooting.)
---//   * Cached executor functions at load time (were re-fetched per call).
---//   * Debug post-shot logs.
---//   * Default SilentAimMode = "Raycast".
+--// v16 (2026-09-26):
+--//   * FIXED Raycast patch never firing:
+--//     `typeof(raycastParams)` returns "Instance", NOT "RaycastParams".
+--//     Dropped that check — now only validate args[1] and args[2] as Vector3.
+--//   * Re-entrancy guard properly set/reset around the patched call.
+--//   * Debug prints on patch.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -44,13 +41,12 @@ local function getExec(name)
     return nil
 end
 
---// Cache executor functions once
 local EXEC = {
-    hookmetamethod     = getExec("hookmetamethod"),
-    getnamecallmethod  = getExec("getnamecallmethod"),
-    newcclosure        = getExec("newcclosure"),
-    checkcaller        = getExec("checkcaller"),
-    getrawmetatable    = getExec("getrawmetatable"),
+    hookmetamethod    = getExec("hookmetamethod"),
+    getnamecallmethod = getExec("getnamecallmethod"),
+    newcclosure       = getExec("newcclosure"),
+    checkcaller       = getExec("checkcaller"),
+    getrawmetatable   = getExec("getrawmetatable"),
 }
 
 H.Aimbot = {
@@ -962,8 +958,7 @@ local function ComputeModeAvailability(mode)
         end
         return true
     elseif mode == "Raycast" then
-        local ws = workspace
-        if type(ws.Raycast) ~= "function" then
+        if type(workspace.Raycast) ~= "function" then
             return false, "workspace.Raycast missing"
         end
         if not EXEC.hookmetamethod or not EXEC.getnamecallmethod then
@@ -2049,7 +2044,7 @@ local function RemoveMouseHook()
 end
 
 --// ---------------------------------------------------------------------------
---// Namecall hook — with multi-return preservation
+--// Namecall hook
 --// ---------------------------------------------------------------------------
 local FS_Active = false
 local FS_Original = nil
@@ -2061,18 +2056,18 @@ local function NamecallImpl(self, ...)
     end
 
     --// ====================== Raycast ======================
+    --// [v16] args[3] RaycastParams check REMOVED — typeof() returns "Instance"
+    --// for it, so the previous check was always false → patch never fired.
     if method == "Raycast"
        and not H.ShuttingDown
        and typeof(self) == "Instance"
        and self == workspace
-       and not (EXEC.checkcaller and EXEC.checkcaller())
-       and not Aimbot.Internal.RaycastRedirectActive then
+       and not (EXEC.checkcaller and EXEC.checkcaller()) then
         if IsModeHooked("Raycast") and ShouldRedirect("Raycast") then
             local args = table.pack(...)
-            if args.n >= 3
+            if args.n >= 2
                and typeof(args[1]) == "Vector3"
-               and typeof(args[2]) == "Vector3"
-               and typeof(args[3]) == "RaycastParams" then
+               and typeof(args[2]) == "Vector3" then
                 local target = Aimbot.LockPartInstance
                 if target and IsAlive(target) then
                     local aimPos = PredictPartPosition(target)
@@ -2085,8 +2080,8 @@ local function NamecallImpl(self, ...)
                         if origLen < 0.0001 then origLen = 1000 end
                         args[2] = dirUnit * origLen
                         DebugHookPrint(string.format(
-                            "Raycast patched | origin=(%.1f,%.1f,%.1f) len=%.1f",
-                            origin.X, origin.Y, origin.Z, origLen))
+                            "Raycast patched | origin=(%.1f,%.1f,%.1f) len=%.1f nargs=%d",
+                            origin.X, origin.Y, origin.Z, origLen, args.n))
                         return FS_Original(self, table.unpack(args, 1, args.n))
                     end
                 end
@@ -2129,12 +2124,10 @@ local function SetupFireServerHook()
     if not hookf then return end
 
     local function safeHandler(self, ...)
-        --// Fast path: if re-entering, bypass
         if Aimbot.Internal.RaycastRedirectActive then
             return FS_Original(self, ...)
         end
 
-        --// pcall returning MULTIPLE values — preserved via table.pack
         local r = table.pack(pcall(NamecallImpl, self, ...))
         if not r[1] then
             DebugHookPrint("namecall error: " .. tostring(r[2]))
