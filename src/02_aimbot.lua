@@ -1,20 +1,13 @@
 --// AirHub - 02_aimbot.lua
 --// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, Backtrack + Ghost targeting.
 --//
---// v9 (2026-09-26):
---//   * FIXED infinite recursion in Raycast mode:
---//     workspace:Raycast hook was calling IsPointVisible → workspace:Raycast
---//     → hook → GetMouseSpoof → ... → freeze + console spam.
---//     Added Aimbot.Internal.RaycastRedirectActive flag as a re-entrancy guard.
---//   * Raycast REMOVED from STATIC_MODES: it must be dynamically tested,
---//     otherwise AutoScan blindly selects it before any game shot happened.
---//   * Relaxed Raycast arg validation to (Vector3, Vector3) — some executors
---//     hide RaycastParams ClassName behind checkcaller or return a fake.
---//   * Raycast args validation also allows a missing RaycastParams.
---//   * NEW "Raycast" mode (from v8): hooks workspace:Raycast(origin, dir, params)
---//     and patches dir to aim at the locked target.
+--// v8 (2026-09-26):
+--//   * NEW "Raycast" mode: hooks workspace:Raycast(origin, dir, params) and patches
+--//     dir to aim at the locked target. Uses strict argument validation.
 --//   * NEW CycleAutowork(dir) + GetWorkingMethods() — iterate through methods
 --//     that are BOTH enabled (AutoEnabledMethods) AND available (IsModeAvailable).
+--//     Designed for "Next/Prev Autowork" buttons in the UI.
+--//   * Raycast registered in AutoEnabledMethods / AutoPriorityOrder / STATIC_MODES.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -94,9 +87,10 @@ H.Aimbot = {
             CFrameHook = false, Vector3New = false,
         },
         AutoPriorityOrder = {
+            "Raycast",
             "RayNew", "RayHook", "ScreenPointToRay", "Vector3Unit",
             "MouseFull", "MouseHit", "GunHandler", "FireServer",
-            "MouseLock", "Mouse", "Raycast", "CFrameHook", "Vector3New",
+            "MouseLock", "Mouse", "CFrameHook", "Vector3New",
         },
         AutoTestDuration = 0.5,
         AutoMinHookCalls = 1,
@@ -131,8 +125,6 @@ H.Aimbot = {
         LockedGhost  = nil,
         WatchdogAccum = 0,
         ModeCache    = {},
-        --// [FIX] recursion guard for Raycast redirect
-        RaycastRedirectActive = false,
         HookHandlers = {
             RayNew      = nil, RayNewOrig  = nil,
             V3New       = nil, V3NewOrig   = nil,
@@ -2166,51 +2158,35 @@ local function SetupFireServerHook()
         local method = getMethod()
 
         --// ====================== Raycast ======================
-        if method == "Raycast" and not H.ShuttingDown then
-            --// [FIX v9] recursion guard: if we're already inside our own
-            --// redirect (e.g. GetMouseSpoof → IsPointVisible → workspace:Raycast),
-            --// pass straight to the original to avoid infinite loop + freeze.
-            if Aimbot.Internal.RaycastRedirectActive then
-                return FS_Original(self, ...)
-            end
-
-            if typeof(self) == "Instance"
-               and self == workspace
-               and not (checkC and checkC()) then
-                if IsModeHooked("Raycast") then
-                    if InScanFor("Raycast") then
-                        ReportHookCall("Raycast")
-                        return FS_Original(self, ...)
-                    end
-                    if ShouldRedirect("Raycast") then
-                        local args = table.pack(...)
-                        --// relaxed validation: at least (origin: Vector3, dir: Vector3)
-                        if args.n >= 2
-                           and typeof(args[1]) == "Vector3"
-                           and typeof(args[2]) == "Vector3" then
-
-                            Aimbot.Internal.RaycastRedirectActive = true
-                            local ok, result = pcall(function()
-                                local target = Aimbot.LockPartInstance
-                                if target and IsAlive(target) then
-                                    local aimPos = PredictPartPosition(target)
-                                    local origin = args[1]
-                                    local dir = aimPos - origin
-                                    local dm = dir.Magnitude
-                                    if dm > 0.0001 then
-                                        local origLen = args[2].Magnitude
-                                        if origLen < 0.0001 then origLen = 1000 end
-                                        args[2] = (dir / dm) * origLen
-                                    end
-                                end
+        if method == "Raycast"
+           and not H.ShuttingDown
+           and not (checkC and checkC())
+           and typeof(self) == "Instance"
+           and self == workspace then
+            if IsModeHooked("Raycast") then
+                if InScanFor("Raycast") then
+                    ReportHookCall("Raycast")
+                    return FS_Original(self, ...)
+                end
+                if ShouldRedirect("Raycast") then
+                    local args = table.pack(...)
+                    -- strict validation: Vector3 origin, Vector3 direction, RaycastParams
+                    if args.n >= 3
+                       and typeof(args[1]) == "Vector3"
+                       and typeof(args[2]) == "Vector3"
+                       and typeof(args[3]) == "RaycastParams" then
+                        local target = Aimbot.LockPartInstance
+                        if target and IsAlive(target) then
+                            local aimPos = GetMouseSpoof() or PredictPartPosition(target)
+                            local origin = args[1]
+                            local dir = aimPos - origin
+                            local dm = dir.Magnitude
+                            if dm > 0.0001 then
+                                local origLen = args[2].Magnitude
+                                if origLen < 0.0001 then origLen = 1000 end
+                                args[2] = (dir / dm) * origLen
                                 return FS_Original(self, table.unpack(args, 1, args.n))
-                            end)
-                            Aimbot.Internal.RaycastRedirectActive = false
-
-                            if ok then
-                                return result
                             end
-                            warn("[AirHub] Raycast redirect error: " .. tostring(result))
                         end
                     end
                 end
@@ -2548,10 +2524,7 @@ end
 --// AutoScan
 --// ---------------------------------------------------------------------------
 local STATIC_MODES = {
-    -- Raycast removed — it must be dynamically tested (game must actually
-    -- fire workspace:Raycast during the scan window). Otherwise AutoScan
-    -- blindly selects it and, combined with the aimbot's own raycasts,
-    -- causes recursion.
+    Raycast          = true,
     RayNew           = true,
     RayHook          = true,
     Vector3Unit      = true,
