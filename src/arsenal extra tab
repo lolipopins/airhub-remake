@@ -1,34 +1,34 @@
 --// ============================================================================
---// AirHub - 11_arsenal.lua
---// Extra tab "Arsenal" — ported from the Quotas Hub standalone script.
+--// AirHub - arsenal extra tab
+--// Extra tab "Quotas" — ported from the Quotas Hub standalone script.
 --//
 --// Features:
 --//   • Name Tags ESP    — player name above head with team/alive checks
---//   • Hitbox Expander  — "OP Silent Aim" style: enlarge enemy limbs client-side
---//   • Weapon Mods      — Infinite Ammo (StoredAmmo/Ammo), Fire Rate, Recoil
+--//   • Limb Hitbox      — "OP Silent Aim" style: enlarge enemy limbs client-side
+--//   • Weapon Mods      — Infinite Ammo, Fire Rate, Recoil (ReplicatedStorage.Weapons)
+--//                        + Auto Reload (spam Events.empty:FireServer(true) every frame)
 --//
 --// Requires: 01_core.lua, 07a_ui_core.lua
 --// ============================================================================
 
 local H = getgenv().AirHub
-if not H or not H._CoreLoaded then warn("[AirHub] 11_arsenal: core not loaded") return end
-if H.Arsenal and H.Arsenal._Loaded then return end
+if not H or not H._CoreLoaded then warn("[AirHub] arsenal extra tab: core not loaded") return end
+if H.Quotas and H.Quotas._Loaded then return end
 
 local Util               = H.Util
 local Players            = Util.Players
 local RunService         = Util.RunService
-local UserInputService   = Util.UserInputService
 local LocalPlayer        = Util.LocalPlayer
 local ReplicatedStorage  = Util.ReplicatedStorage
 local Track              = Util.Track
 local HandleError        = Util.HandleError
 local SanitizeColor      = Util.SanitizeColor
 
-H.Arsenal = H.Arsenal or {}
-local A = H.Arsenal
-A._Loaded = true
+H.Quotas = H.Quotas or {}
+local Q = H.Quotas
+Q._Loaded = true
 
-A.Settings = A.Settings or {
+Q.Settings = Q.Settings or {
     -- Name tags
     NameTagsEnabled       = false,
     NameTagsSize          = 9,
@@ -36,28 +36,28 @@ A.Settings = A.Settings or {
     NameTagsTeamCheck     = true,
     NameTagsAliveCheck    = true,
 
-    -- Hitbox Expander (OP Silent Aim)
-    HitboxExpanderEnabled     = false,
-    HitboxExpanderSize        = 13,
-    HitboxExpanderTransparency= 1,
-    HitboxExpanderTeamCheck   = true,
+    -- Limb hitbox
+    LimbHitboxEnabled     = false,
+    LimbHitboxSize        = 13,
+    LimbHitboxTransparency= 1,
+    LimbHitboxTeamCheck   = true,
 
     -- Weapon mods
     InfAmmoEnabled        = false,
-    InfAmmoValue          = 99,      -- // по умолчанию 99
     FireRateEnabled       = false,
     FireRateValue         = 0.02,
     RecoilEnabled         = false,
+    AutoReloadEnabled     = false,   -- [NEW] spam Events.empty:FireServer(true)
 }
-A.Internal = A.Internal or {
+Q.Internal = Q.Internal or {
     NameTags         = {},   -- [player] = BillboardGui
-    HitboxOriginals  = {},   -- [part]   = {Size, CanCollide, Transparency}
-    HitboxApplied    = {},   -- [player] = {parts...}
+    LimbOriginals    = {},   -- [part]   = {Size, CanCollide, Transparency}
+    LimbApplied      = {},   -- [player] = {parts...}
     Conns            = {},
     WeaponLoopActive = false,
-    LastAimTarget    = nil,  -- // следим за сменой цели aimbot'а
+    AutoReloadConn   = nil,  -- [NEW] RenderStepped connection
 }
-A.Functions = A.Functions or {}
+Q.Functions = Q.Functions or {}
 
 -- ===== Shared helpers =====
 local function IsAlive(char)
@@ -83,69 +83,69 @@ local function BuildNameTag(plr)
     if not head then return end
 
     local gui = Instance.new("BillboardGui")
-    gui.Name           = "AirHub_Arsenal_NameTag"
+    gui.Name          = "AirHub_Quotas_NameTag"
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    gui.AlwaysOnTop    = true
+    gui.AlwaysOnTop   = true
     gui.LightInfluence = 1
-    gui.Size           = UDim2.new(0, 300, 0, 30)
-    gui.StudsOffset    = Vector3.new(0, 3, 0)
-    gui.Parent         = head
+    gui.Size          = UDim2.new(0, 300, 0, 30)
+    gui.StudsOffset   = Vector3.new(0, 3, 0)
+    gui.Parent        = head
 
     local label = Instance.new("TextLabel")
-    label.Name                   = "NameLabel"
+    label.Name                  = "NameLabel"
     label.BackgroundTransparency = 1
-    label.Size                   = UDim2.new(1, 0, 1, 0)
-    label.Font                   = Enum.Font.Ubuntu
-    label.Text                   = plr.Name
-    label.TextColor3             = A.Settings.NameTagsColor
-    label.TextSize               = A.Settings.NameTagsSize
+    label.Size                  = UDim2.new(1, 0, 1, 0)
+    label.Font                  = Enum.Font.Ubuntu
+    label.Text                  = plr.Name
+    label.TextColor3            = Q.Settings.NameTagsColor
+    label.TextSize              = Q.Settings.NameTagsSize
     label.TextStrokeTransparency = 0
-    label.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
-    label.TextTransparency       = 1
-    label.Parent                 = gui
+    label.TextStrokeColor3      = Color3.fromRGB(0, 0, 0)
+    label.TextTransparency      = 1
+    label.Parent                = gui
 
-    A.Internal.NameTags[plr] = gui
+    Q.Internal.NameTags[plr] = gui
 end
 
 local function RemoveNameTag(plr)
-    local gui = A.Internal.NameTags[plr]
+    local gui = Q.Internal.NameTags[plr]
     if gui and gui.Parent then
         pcall(function() gui:Destroy() end)
     end
-    A.Internal.NameTags[plr] = nil
+    Q.Internal.NameTags[plr] = nil
 end
 
 local function RefreshNameTagVisibility(plr)
-    local gui = A.Internal.NameTags[plr]
+    local gui = Q.Internal.NameTags[plr]
     if not gui or not gui.Parent then return end
     local label = gui:FindFirstChild("NameLabel")
     if not label then return end
 
-    local visible = A.Settings.NameTagsEnabled
-    if visible and A.Settings.NameTagsAliveCheck then
+    local visible = Q.Settings.NameTagsEnabled
+    if visible and Q.Settings.NameTagsAliveCheck then
         visible = IsAlive(plr.Character)
     end
-    if visible and A.Settings.NameTagsTeamCheck then
+    if visible and Q.Settings.NameTagsTeamCheck then
         visible = IsEnemy(plr)
     end
     label.TextTransparency = visible and 0 or 1
-    label.TextSize         = A.Settings.NameTagsSize
-    label.TextColor3       = A.Settings.NameTagsColor
+    label.TextSize         = Q.Settings.NameTagsSize
+    label.TextColor3       = Q.Settings.NameTagsColor
 end
 
 local function StartNameTags()
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer then BuildNameTag(plr) end
     end
-    if not A.Internal.Conns.nameTagStep then
-        A.Internal.Conns.nameTagStep = RunService.RenderStepped:Connect(function()
+    if not Q.Internal.Conns.nameTagStep then
+        Q.Internal.Conns.nameTagStep = RunService.RenderStepped:Connect(function()
             if H.ShuttingDown then return end
-            if not A.Settings.NameTagsEnabled then return end
+            if not Q.Settings.NameTagsEnabled then return end
             for _, plr in ipairs(Players:GetPlayers()) do
                 if plr ~= LocalPlayer and plr.Character then
                     local head = plr.Character:FindFirstChild("Head")
                     if head then
-                        local gui = A.Internal.NameTags[plr]
+                        local gui = Q.Internal.NameTags[plr]
                         if not gui or not gui.Parent then
                             BuildNameTag(plr)
                         end
@@ -158,41 +158,37 @@ local function StartNameTags()
 end
 
 local function StopNameTags()
-    for plr in pairs(A.Internal.NameTags) do
+    for plr in pairs(Q.Internal.NameTags) do
         RemoveNameTag(plr)
     end
-    if A.Internal.Conns.nameTagStep then
-        pcall(function() A.Internal.Conns.nameTagStep:Disconnect() end)
-        A.Internal.Conns.nameTagStep = nil
+    if Q.Internal.Conns.nameTagStep then
+        pcall(function() Q.Internal.Conns.nameTagStep:Disconnect() end)
+        Q.Internal.Conns.nameTagStep = nil
     end
 end
 
 -- ============================================================================
---  HITBOX EXPANDER (OP Silent Aim)
+--  LIMB HITBOX (OP Silent Aim)
 -- ============================================================================
-local HITBOX_PARTS = {
+local LIMB_PARTS = {
     "RightUpperLeg", "LeftUpperLeg",
     "HeadHB", "Head",
     "HumanoidRootPart",
 }
 
-local function ApplyHitboxToPlayer(plr)
+local function ApplyLimbHitboxForPlayer(plr)
     if plr == LocalPlayer then return end
-    if A.Settings.HitboxExpanderTeamCheck and not IsEnemy(plr) then return end
+    if Q.Settings.LimbHitboxTeamCheck and not IsEnemy(plr) then return end
     local char = plr.Character
     if not char then return end
 
     local parts = {}
-    local size = Vector3.new(
-        A.Settings.HitboxExpanderSize,
-        A.Settings.HitboxExpanderSize,
-        A.Settings.HitboxExpanderSize
-    )
-    for _, name in ipairs(HITBOX_PARTS) do
+    local size = Vector3.new(Q.Settings.LimbHitboxSize, Q.Settings.LimbHitboxSize, Q.Settings.LimbHitboxSize)
+    for _, name in ipairs(LIMB_PARTS) do
         local p = char:FindFirstChild(name)
         if p and p:IsA("BasePart") then
-            if not A.Internal.HitboxOriginals[p] then
-                A.Internal.HitboxOriginals[p] = {
+            if not Q.Internal.LimbOriginals[p] then
+                Q.Internal.LimbOriginals[p] = {
                     Size         = p.Size,
                     CanCollide   = p.CanCollide,
                     Transparency = p.Transparency,
@@ -200,20 +196,20 @@ local function ApplyHitboxToPlayer(plr)
             end
             pcall(function()
                 p.CanCollide   = false
-                p.Transparency = A.Settings.HitboxExpanderTransparency
+                p.Transparency = Q.Settings.LimbHitboxTransparency
                 p.Size         = size
             end)
             parts[#parts + 1] = p
         end
     end
-    A.Internal.HitboxApplied[plr] = parts
+    Q.Internal.LimbApplied[plr] = parts
 end
 
-local function RestoreHitboxForPlayer(plr)
-    local parts = A.Internal.HitboxApplied[plr]
+local function RestoreLimbHitboxForPlayer(plr)
+    local parts = Q.Internal.LimbApplied[plr]
     if not parts then return end
     for _, p in ipairs(parts) do
-        local orig = A.Internal.HitboxOriginals[p]
+        local orig = Q.Internal.LimbOriginals[p]
         if orig and p.Parent then
             pcall(function()
                 p.Size         = orig.Size
@@ -221,45 +217,32 @@ local function RestoreHitboxForPlayer(plr)
                 p.Transparency = orig.Transparency
             end)
         end
-        A.Internal.HitboxOriginals[p] = nil
+        Q.Internal.LimbOriginals[p] = nil
     end
-    A.Internal.HitboxApplied[plr] = nil
+    Q.Internal.LimbApplied[plr] = nil
 end
 
-local function StartHitboxExpander()
+local function StartLimbHitbox()
     for _, plr in ipairs(Players:GetPlayers()) do
-        ApplyHitboxToPlayer(plr)
+        ApplyLimbHitboxForPlayer(plr)
     end
-    if not A.Internal.Conns.hitboxStep then
-        A.Internal.Conns.hitboxStep = RunService.Heartbeat:Connect(function()
+    if not Q.Internal.Conns.limbStep then
+        Q.Internal.Conns.limbStep = RunService.Heartbeat:Connect(function()
             if H.ShuttingDown then return end
-            if not A.Settings.HitboxExpanderEnabled then return end
-            local size = Vector3.new(
-                A.Settings.HitboxExpanderSize,
-                A.Settings.HitboxExpanderSize,
-                A.Settings.HitboxExpanderSize
-            )
-            for plr, parts in pairs(A.Internal.HitboxApplied) do
+            if not Q.Settings.LimbHitboxEnabled then return end
+            local size = Vector3.new(Q.Settings.LimbHitboxSize, Q.Settings.LimbHitboxSize, Q.Settings.LimbHitboxSize)
+            for plr, parts in pairs(Q.Internal.LimbApplied) do
                 if not plr.Parent or not plr.Character then
-                    RestoreHitboxForPlayer(plr)
-                elseif A.Settings.HitboxExpanderTeamCheck and not IsEnemy(plr) then
-                    RestoreHitboxForPlayer(plr)
+                    RestoreLimbHitboxForPlayer(plr)
                 else
                     for _, p in ipairs(parts) do
                         if p.Parent and p.Size ~= size then
                             pcall(function()
                                 p.Size         = size
                                 p.CanCollide   = false
-                                p.Transparency = A.Settings.HitboxExpanderTransparency
+                                p.Transparency = Q.Settings.LimbHitboxTransparency
                             end)
                         end
-                    end
-                end
-            end
-            for _, plr in ipairs(Players:GetPlayers()) do
-                if plr ~= LocalPlayer and not A.Internal.HitboxApplied[plr] then
-                    if not A.Settings.HitboxExpanderTeamCheck or IsEnemy(plr) then
-                        ApplyHitboxToPlayer(plr)
                     end
                 end
             end
@@ -267,93 +250,59 @@ local function StartHitboxExpander()
     end
 end
 
-local function StopHitboxExpander()
-    for plr in pairs(A.Internal.HitboxApplied) do
-        RestoreHitboxForPlayer(plr)
+local function StopLimbHitbox()
+    for plr in pairs(Q.Internal.LimbApplied) do
+        RestoreLimbHitboxForPlayer(plr)
     end
-    if A.Internal.Conns.hitboxStep then
-        pcall(function() A.Internal.Conns.hitboxStep:Disconnect() end)
-        A.Internal.Conns.hitboxStep = nil
+    if Q.Internal.Conns.limbStep then
+        pcall(function() Q.Internal.Conns.limbStep:Disconnect() end)
+        Q.Internal.Conns.limbStep = nil
     end
 end
 
 -- ============================================================================
 --  WEAPON MODS
 -- ============================================================================
-local function ApplyInfiniteAmmo()
-    local weapons = ReplicatedStorage:FindFirstChild("Weapons")
-    if not weapons then return 0 end
-
-    local value = tonumber(A.Settings.InfAmmoValue) or 99
-    local patched = 0
-
-    for _, weapon in ipairs(weapons:GetChildren()) do
-        local targets = {}
-
-        local directAmmo = weapon:FindFirstChild("Ammo")
-        if directAmmo then targets[#targets + 1] = directAmmo end
-
-        local directStored = weapon:FindFirstChild("StoredAmmo")
-        if directStored then targets[#targets + 1] = directStored end
-
-        if #targets == 0 then
-            for _, d in ipairs(weapon:GetDescendants()) do
-                if d.Name == "Ammo" or d.Name == "StoredAmmo" then
-                    targets[#targets + 1] = d
-                end
-            end
-        end
-
-        for _, t in ipairs(targets) do
-            pcall(function()
-                if t:IsA("IntValue") or t:IsA("NumberValue") then
-                    t.Value = value
-                elseif t:IsA("StringValue") then
-                    t.Value = tostring(value)
-                end
-                patched = patched + 1
-            end)
-        end
-    end
-
-    return patched
-end
-
-local function ApplyFireRateAndRecoil()
-    local weapons = ReplicatedStorage:FindFirstChild("Weapons")
-    if not weapons then return end
-
-    for _, v in ipairs(weapons:GetDescendants()) do
-        if A.Settings.FireRateEnabled then
-            if v.Name == "Auto"     then v.Value = true end
-            if v.Name == "FireRate" then v.Value = A.Settings.FireRateValue end
-        end
-        if A.Settings.RecoilEnabled then
-            if v.Name == "RecoilControl" then v.Value = 0 end
-            if v.Name == "MaxSpread"     then v.Value = 0 end
-        end
-    end
-end
-
 local function ApplyWeaponMods()
     pcall(function()
-        if A.Settings.InfAmmoEnabled then
-            ApplyInfiniteAmmo()
+        if Q.Settings.InfAmmoEnabled then
+            local pg = LocalPlayer:FindFirstChild("PlayerGui")
+            local gui = pg and pg:FindFirstChild("GUI")
+            local client = gui and gui:FindFirstChild("Client")
+            local vars = client and client:FindFirstChild("Variables")
+            if vars then
+                local a1 = vars:FindFirstChild("ammocount")
+                local a2 = vars:FindFirstChild("ammocount2")
+                if a1 then a1.Value = 999 end
+                if a2 then a2.Value = 999 end
+            end
         end
-        if A.Settings.FireRateEnabled or A.Settings.RecoilEnabled then
-            ApplyFireRateAndRecoil()
+        if Q.Settings.FireRateEnabled or Q.Settings.RecoilEnabled then
+            local weapons = ReplicatedStorage:FindFirstChild("Weapons")
+            if weapons then
+                for _, v in ipairs(weapons:GetDescendants()) do
+                    if Q.Settings.FireRateEnabled then
+                        if v.Name == "Auto"     then v.Value = true end
+                        if v.Name == "FireRate" then v.Value = Q.Settings.FireRateValue end
+                    end
+                    if Q.Settings.RecoilEnabled then
+                        if v.Name == "RecoilControl" then v.Value = 0 end
+                        if v.Name == "MaxSpread"     then v.Value = 0 end
+                    end
+                end
+            end
         end
     end)
 end
 
 local function StartWeaponMods()
-    if A.Internal.WeaponLoopActive then return end
-    A.Internal.WeaponLoopActive = true
+    if Q.Internal.WeaponLoopActive then return end
+    Q.Internal.WeaponLoopActive = true
     task.spawn(function()
-        while A.Internal.WeaponLoopActive and not H.ShuttingDown do
-            if A.Settings.InfAmmoEnabled
-               or A.Settings.FireRateEnabled
-               or A.Settings.RecoilEnabled then
+        while Q.Internal.WeaponLoopActive and not H.ShuttingDown do
+            if Q.Settings.InfAmmoEnabled
+               or Q.Settings.FireRateEnabled
+               or Q.Settings.RecoilEnabled then
                 ApplyWeaponMods()
             end
             task.wait(0.2)
@@ -362,93 +311,70 @@ local function StartWeaponMods()
 end
 
 local function StopWeaponMods()
-    A.Internal.WeaponLoopActive = false
+    Q.Internal.WeaponLoopActive = false
 end
 
---// ---------------------------------------------------------------------------
---// Auto-apply Ammo: при наведении aimbot'а ИЛИ клике ЛКМ.
---// Работает только когда InfAmmoEnabled = true.
---// ---------------------------------------------------------------------------
-local function TryRefreshAmmo()
-    if not A.Settings.InfAmmoEnabled then return end
-    task.spawn(function() ApplyInfiniteAmmo() end)
+-- ============================================================================
+--  AUTO RELOAD  — spam Events.empty:FireServer(true) every frame
+-- ============================================================================
+
+--// Универсальная добыча remote'а: сначала пробуем кэш, потом
+--// ReplicatedStorage.Events.empty. Возвращает nil если события ещё нет.
+local function GetAutoReloadRemote()
+    local events = ReplicatedStorage:FindFirstChild("Events")
+    if not events then return nil end
+    local empty = events:FindFirstChild("empty")
+    if not empty then return nil end
+    if not empty:IsA("RemoteEvent") and not empty:IsA("UnreliableRemoteEvent") then
+        return nil
+    end
+    return empty
 end
 
-local function StartAmmoAutoRefresh()
-    --// 1) Хук на ЛКМ: каждый клик — обновляем патроны
-    if not A.Internal.Conns.ammoClick then
-        A.Internal.Conns.ammoClick = UserInputService.InputBegan:Connect(function(input, gpe)
-            if gpe then return end
-            if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
-            TryRefreshAmmo()
-        end)
-    end
+local function StartAutoReload()
+    if Q.Internal.AutoReloadConn then return end
 
-    --// 2) Следим за сменой цели aimbot'а (H.Aimbot.Locked / LockPartInstance).
-    --// Как только aimbot захватил новую цель — обновляем патроны.
-    if not A.Internal.Conns.ammoAimWatch then
-        A.Internal.Conns.ammoAimWatch = RunService.Heartbeat:Connect(function()
-            if H.ShuttingDown then return end
-            local Aim = H.Aimbot
-            if not Aim then return end
-            local current = Aim.LockPartInstance
-            if current ~= A.Internal.LastAimTarget then
-                local wasEmpty = (A.Internal.LastAimTarget == nil)
-                A.Internal.LastAimTarget = current
-                --// Триггерим только на появление НОВОЙ цели (не на сброс)
-                if current ~= nil then
-                    TryRefreshAmmo()
-                end
-            end
-        end)
-    end
+    --// RenderStepped = "каждый кадр". pcall вокруг FireServer — на случай,
+    --// если remote пересоздаётся между раундами.
+    Q.Internal.AutoReloadConn = RunService.RenderStepped:Connect(function()
+        if H.ShuttingDown then return end
+        if not Q.Settings.AutoReloadEnabled then return end
+        local remote = GetAutoReloadRemote()
+        if not remote then return end
+        pcall(function() remote:FireServer(true) end)
+    end)
 end
 
-local function StopAmmoAutoRefresh()
-    if A.Internal.Conns.ammoClick then
-        pcall(function() A.Internal.Conns.ammoClick:Disconnect() end)
-        A.Internal.Conns.ammoClick = nil
-    end
-    if A.Internal.Conns.ammoAimWatch then
-        pcall(function() A.Internal.Conns.ammoAimWatch:Disconnect() end)
-        A.Internal.Conns.ammoAimWatch = nil
+local function StopAutoReload()
+    if Q.Internal.AutoReloadConn then
+        pcall(function() Q.Internal.AutoReloadConn:Disconnect() end)
+        Q.Internal.AutoReloadConn = nil
     end
 end
-
---// Публичный хелпер для ручного вызова
-A.Functions.ApplyInfiniteAmmo = ApplyInfiniteAmmo
 
 -- ============================================================================
 --  EVENTS
 -- ============================================================================
 Track(Players.PlayerAdded:Connect(function(plr)
-    if A.Settings.NameTagsEnabled then
+    if Q.Settings.NameTagsEnabled then
         task.wait(0.5)
         if H.ShuttingDown then return end
         BuildNameTag(plr)
-    end
-    if A.Settings.HitboxExpanderEnabled then
-        task.wait(0.5)
-        if H.ShuttingDown then return end
-        ApplyHitboxToPlayer(plr)
     end
 end))
 
 Track(Players.PlayerRemoving:Connect(function(plr)
     RemoveNameTag(plr)
-    RestoreHitboxForPlayer(plr)
+    RestoreLimbHitboxForPlayer(plr)
 end))
 
 Track(LocalPlayer.CharacterAdded:Connect(function()
     task.wait(0.5)
     if H.ShuttingDown then return end
-    if A.Settings.NameTagsEnabled then
-        for plr in pairs(A.Internal.NameTags) do
+    if Q.Settings.NameTagsEnabled then
+        for plr in pairs(Q.Internal.NameTags) do
             if plr ~= LocalPlayer then BuildNameTag(plr) end
         end
-    end
-    if A.Settings.HitboxExpanderEnabled then
-        StartHitboxExpander()
     end
 end))
 
@@ -459,95 +385,83 @@ local function FillUI()
     local MainFrame = H._UI and H._UI.MainFrame
     if not MainFrame then return false end
 
-    local tab = MainFrame:CreateTab({ Name = "Arsenal" })
+    local tab = MainFrame:CreateTab({ Name = "Quotas" })
 
     -- Name tags
     local secNT = tab:CreateSection({ Name = "Name Tags" })
-    secNT:AddToggle({ Name = "Enabled", Value = A.Settings.NameTagsEnabled,
+    secNT:AddToggle({ Name = "Enabled", Value = Q.Settings.NameTagsEnabled,
         Callback = function(v)
-            A.Settings.NameTagsEnabled = v
+            Q.Settings.NameTagsEnabled = v
             if v then StartNameTags() else StopNameTags() end
         end })
-    secNT:AddSlider({ Name = "Text Size", Value = A.Settings.NameTagsSize,
+    secNT:AddSlider({ Name = "Text Size", Value = Q.Settings.NameTagsSize,
         Min = 6, Max = 24,
-        Callback = function(v) A.Settings.NameTagsSize = v end })
-    secNT:AddColorpicker({ Name = "Text Color", Value = A.Settings.NameTagsColor,
-        Callback = function(v) A.Settings.NameTagsColor = SanitizeColor(v) end })
-    secNT:AddToggle({ Name = "Team Check", Value = A.Settings.NameTagsTeamCheck,
-        Callback = function(v) A.Settings.NameTagsTeamCheck = v end })
-    secNT:AddToggle({ Name = "Alive Check", Value = A.Settings.NameTagsAliveCheck,
-        Callback = function(v) A.Settings.NameTagsAliveCheck = v end })
+        Callback = function(v) Q.Settings.NameTagsSize = v end })
+    secNT:AddColorpicker({ Name = "Text Color", Value = Q.Settings.NameTagsColor,
+        Callback = function(v) Q.Settings.NameTagsColor = SanitizeColor(v) end })
+    secNT:AddToggle({ Name = "Team Check", Value = Q.Settings.NameTagsTeamCheck,
+        Callback = function(v) Q.Settings.NameTagsTeamCheck = v end })
+    secNT:AddToggle({ Name = "Alive Check", Value = Q.Settings.NameTagsAliveCheck,
+        Callback = function(v) Q.Settings.NameTagsAliveCheck = v end })
 
-    -- Hitbox Expander (OP Silent Aim)
-    local secHB = tab:CreateSection({ Name = "Hitbox Expander (OP Silent Aim)", Side = "Right" })
-    secHB:AddToggle({ Name = "Enabled", Value = A.Settings.HitboxExpanderEnabled,
+    -- Limb hitbox
+    local secLH = tab:CreateSection({ Name = "Limb Hitbox (OP Silent Aim)", Side = "Right" })
+    secLH:AddToggle({ Name = "Enabled", Value = Q.Settings.LimbHitboxEnabled,
         Callback = function(v)
-            A.Settings.HitboxExpanderEnabled = v
-            if v then StartHitboxExpander() else StopHitboxExpander() end
+            Q.Settings.LimbHitboxEnabled = v
+            if v then StartLimbHitbox() else StopLimbHitbox() end
         end })
-    secHB:AddSlider({ Name = "Hitbox Size", Value = A.Settings.HitboxExpanderSize,
+    secLH:AddSlider({ Name = "Hitbox Size", Value = Q.Settings.LimbHitboxSize,
         Min = 5, Max = 30,
         Callback = function(v)
-            A.Settings.HitboxExpanderSize = v
-            if A.Settings.HitboxExpanderEnabled then
-                StopHitboxExpander(); StartHitboxExpander()
+            Q.Settings.LimbHitboxSize = v
+            if Q.Settings.LimbHitboxEnabled then
+                StopLimbHitbox(); StartLimbHitbox()
             end
         end })
-    secHB:AddSlider({ Name = "Transparency", Value = A.Settings.HitboxExpanderTransparency,
+    secLH:AddSlider({ Name = "Transparency", Value = Q.Settings.LimbHitboxTransparency,
         Min = 0, Max = 1, Decimals = 2,
-        Callback = function(v) A.Settings.HitboxExpanderTransparency = v end })
-    secHB:AddToggle({ Name = "Team Check", Value = A.Settings.HitboxExpanderTeamCheck,
+        Callback = function(v) Q.Settings.LimbHitboxTransparency = v end })
+    secLH:AddToggle({ Name = "Team Check", Value = Q.Settings.LimbHitboxTeamCheck,
         Callback = function(v)
-            A.Settings.HitboxExpanderTeamCheck = v
-            if A.Settings.HitboxExpanderEnabled then
-                StopHitboxExpander(); StartHitboxExpander()
+            Q.Settings.LimbHitboxTeamCheck = v
+            if Q.Settings.LimbHitboxEnabled then
+                StopLimbHitbox(); StartLimbHitbox()
             end
         end })
 
     -- Weapon mods
     local secWM = tab:CreateSection({ Name = "Weapon Mods" })
-    secWM:AddToggle({ Name = "Infinite Ammo (Ammo + StoredAmmo)", Value = A.Settings.InfAmmoEnabled,
+    secWM:AddToggle({ Name = "Infinite Ammo", Value = Q.Settings.InfAmmoEnabled,
         Callback = function(v)
-            A.Settings.InfAmmoEnabled = v
-            if v then
-                StartWeaponMods()
-                StartAmmoAutoRefresh()
-                task.spawn(function()
-                    task.wait(0.05)
-                    ApplyInfiniteAmmo()
-                end)
-            else
-                StopAmmoAutoRefresh()
-            end
-        end })
-    secWM:AddTextbox({ Name = "Ammo Value (число)",
-        Value = tostring(A.Settings.InfAmmoValue),
-        Callback = function(v)
-            local n = tonumber(v)
-            if n and n > 0 then
-                A.Settings.InfAmmoValue = math.floor(n)
-                if A.Settings.InfAmmoEnabled then
-                    task.spawn(ApplyInfiniteAmmo)
-                end
-            end
-        end })
-    secWM:AddToggle({ Name = "Fire Rate Mod", Value = A.Settings.FireRateEnabled,
-        Callback = function(v)
-            A.Settings.FireRateEnabled = v
+            Q.Settings.InfAmmoEnabled = v
             if v then StartWeaponMods() end
         end })
-    secWM:AddSlider({ Name = "Fire Rate Value", Value = A.Settings.FireRateValue,
+    secWM:AddToggle({ Name = "Fire Rate Mod", Value = Q.Settings.FireRateEnabled,
+        Callback = function(v)
+            Q.Settings.FireRateEnabled = v
+            if v then StartWeaponMods() end
+        end })
+    secWM:AddSlider({ Name = "Fire Rate Value", Value = Q.Settings.FireRateValue,
         Min = 0.01, Max = 0.5, Decimals = 3,
-        Callback = function(v) A.Settings.FireRateValue = v end })
-    secWM:AddToggle({ Name = "Recoil Mod", Value = A.Settings.RecoilEnabled,
+        Callback = function(v) Q.Settings.FireRateValue = v end })
+    secWM:AddToggle({ Name = "Recoil Mod", Value = Q.Settings.RecoilEnabled,
         Callback = function(v)
-            A.Settings.RecoilEnabled = v
+            Q.Settings.RecoilEnabled = v
             if v then StartWeaponMods() end
+        end })
+
+    -- [NEW] Auto Reload
+    secWM:AddToggle({ Name = "Auto Reload (spam every frame)", Value = Q.Settings.AutoReloadEnabled,
+        Callback = function(v)
+            Q.Settings.AutoReloadEnabled = v
+            if v then StartAutoReload() else StopAutoReload() end
         end })
 
     return true
 end
 
+-- Wait for UI to be ready before adding the tab
 task.spawn(function()
     local deadline = tick() + 30
     while tick() < deadline do
@@ -556,27 +470,30 @@ task.spawn(function()
         task.wait(0.25)
     end
     if not H._UI or not H._UI.MainFrame then
-        warn("[AirHub] 11_arsenal: MainFrame never appeared, aborting")
+        warn("[AirHub] arsenal extra tab: MainFrame never appeared, aborting")
         return
     end
     if not FillUI() then
-        warn("[AirHub] 11_arsenal: FillUI failed")
+        warn("[AirHub] arsenal extra tab: FillUI failed")
         return
     end
-    print("[AirHub] 11_arsenal: loaded OK")
+    print("[AirHub] arsenal extra tab: loaded OK")
 end)
 
 -- ============================================================================
 --  PUBLIC API / CLEANUP
 -- ============================================================================
-A.Functions.StopAll = function()
-    A.Settings.NameTagsEnabled        = false
-    A.Settings.HitboxExpanderEnabled  = false
-    A.Settings.InfAmmoEnabled         = false
-    A.Settings.FireRateEnabled        = false
-    A.Settings.RecoilEnabled          = false
+Q.Functions.StopAll = function()
+    Q.Settings.NameTagsEnabled    = false
+    Q.Settings.LimbHitboxEnabled  = false
+    Q.Settings.InfAmmoEnabled     = false
+    Q.Settings.FireRateEnabled    = false
+    Q.Settings.RecoilEnabled      = false
+    Q.Settings.AutoReloadEnabled  = false    -- [NEW]
     StopNameTags()
-    StopHitboxExpander()
+    StopLimbHitbox()
     StopWeaponMods()
-    StopAmmoAutoRefresh()
+    StopAutoReload()                         -- [NEW]
 end
+
+Q.Functions.GetAutoReloadRemote = GetAutoReloadRemote
