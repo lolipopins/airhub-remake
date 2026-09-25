@@ -6,7 +6,6 @@
 --//   • Name Tags ESP    — player name above head with team/alive checks
 --//   • Limb Hitbox      — "OP Silent Aim" style: enlarge enemy limbs client-side
 --//   • Weapon Mods      — Infinite Ammo, Fire Rate, Recoil (ReplicatedStorage.Weapons)
---//                        + Auto Reload (spam Events.empty:FireServer(true) every frame)
 --//
 --// Requires: 01_core.lua, 07a_ui_core.lua
 --// ============================================================================
@@ -47,7 +46,6 @@ Q.Settings = Q.Settings or {
     FireRateEnabled       = false,
     FireRateValue         = 0.02,
     RecoilEnabled         = false,
-    AutoReloadEnabled     = false,   -- [NEW] spam Events.empty:FireServer(true)
 }
 Q.Internal = Q.Internal or {
     NameTags         = {},   -- [player] = BillboardGui
@@ -55,7 +53,6 @@ Q.Internal = Q.Internal or {
     LimbApplied      = {},   -- [player] = {parts...}
     Conns            = {},
     WeaponLoopActive = false,
-    AutoReloadConn   = nil,  -- [NEW] RenderStepped connection
 }
 Q.Functions = Q.Functions or {}
 
@@ -315,44 +312,6 @@ local function StopWeaponMods()
 end
 
 -- ============================================================================
---  AUTO RELOAD  — spam Events.empty:FireServer(true) every frame
--- ============================================================================
-
---// Универсальная добыча remote'а: сначала пробуем кэш, потом
---// ReplicatedStorage.Events.empty. Возвращает nil если события ещё нет.
-local function GetAutoReloadRemote()
-    local events = ReplicatedStorage:FindFirstChild("Events")
-    if not events then return nil end
-    local empty = events:FindFirstChild("empty")
-    if not empty then return nil end
-    if not empty:IsA("RemoteEvent") and not empty:IsA("UnreliableRemoteEvent") then
-        return nil
-    end
-    return empty
-end
-
-local function StartAutoReload()
-    if Q.Internal.AutoReloadConn then return end
-
-    --// RenderStepped = "каждый кадр". pcall вокруг FireServer — на случай,
-    --// если remote пересоздаётся между раундами.
-    Q.Internal.AutoReloadConn = RunService.RenderStepped:Connect(function()
-        if H.ShuttingDown then return end
-        if not Q.Settings.AutoReloadEnabled then return end
-        local remote = GetAutoReloadRemote()
-        if not remote then return end
-        pcall(function() remote:FireServer(true) end)
-    end)
-end
-
-local function StopAutoReload()
-    if Q.Internal.AutoReloadConn then
-        pcall(function() Q.Internal.AutoReloadConn:Disconnect() end)
-        Q.Internal.AutoReloadConn = nil
-    end
-end
-
--- ============================================================================
 --  EVENTS
 -- ============================================================================
 Track(Players.PlayerAdded:Connect(function(plr)
@@ -385,7 +344,7 @@ local function FillUI()
     local MainFrame = H._UI and H._UI.MainFrame
     if not MainFrame then return false end
 
-    local tab = MainFrame:CreateTab({ Name = "Quotas" })
+    local tab = MainFrame:CreateTab({ Name = "arsenal" })
 
     -- Name tags
     local secNT = tab:CreateSection({ Name = "Name Tags" })
@@ -451,13 +410,6 @@ local function FillUI()
             if v then StartWeaponMods() end
         end })
 
-    -- [NEW] Auto Reload
-    secWM:AddToggle({ Name = "Auto Reload (spam every frame)", Value = Q.Settings.AutoReloadEnabled,
-        Callback = function(v)
-            Q.Settings.AutoReloadEnabled = v
-            if v then StartAutoReload() else StopAutoReload() end
-        end })
-
     return true
 end
 
@@ -489,11 +441,7 @@ Q.Functions.StopAll = function()
     Q.Settings.InfAmmoEnabled     = false
     Q.Settings.FireRateEnabled    = false
     Q.Settings.RecoilEnabled      = false
-    Q.Settings.AutoReloadEnabled  = false    -- [NEW]
     StopNameTags()
     StopLimbHitbox()
     StopWeaponMods()
-    StopAutoReload()                         -- [NEW]
 end
-
-Q.Functions.GetAutoReloadRemote = GetAutoReloadRemote
