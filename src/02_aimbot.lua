@@ -1,22 +1,5 @@
 --// AirHub - 02_aimbot.lua
 --// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, Backtrack + Ghost targeting.
---//
---// v5 (2026-09-26):
---//   * Arsenal mode reworked based on live diagnostics. Confirmed shot remote is
---//     ReplicatedStorage.Events.empty:FireServer(true) — no direction/CFrame is
---//     sent by the client. Server derives shot direction from replicated client
---//     orientation (HRP + Head + Camera). Our hook therefore SNAPS the local
---//     camera / HRP / Head / Mouse.Hit onto Aimbot.LockPartInstance for the
---//     duration of ArsenalSnapDelay, calls the original FireServer, then restores.
---//   * Arsenal no longer relies on Crosshair.OnClientInvoke (never called in
---//     this game).
---//   * AutoScan succeeds Arsenal instantly when Events.empty exists (server does
---//     not InvokeClient within the scan window).
---//   * Shared __namecall hook: both FireServer and Arsenal branches live in
---//     SetupFireServerHook. ManageHooks installs the hook when either mode is
---//     desired.
---//   * ShouldAcquireTargets() — target acquisition now also runs when AutoShoot
---//     is enabled and OnlyWhenAiming=false, so Arsenal snap has a LockPart.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -79,10 +62,6 @@ H.Aimbot = {
         NPCNameFilter = "",
         AimbotHz = 120,
         IgnoreGameProcessed = true,
-        ArsenalDebug = false,
-        ArsenalSnapMode  = "HookEvent",
-        ArsenalSnapDelay = 0.02,
-        ArsenalRemoteNames = { "empty", "Fire", "Shoot", "HitPart", "MyHitPart" },
 
         AutoShoot = {
             Enabled = false,
@@ -97,10 +76,8 @@ H.Aimbot = {
             GunHandler = true, FireServer = true,
             MouseLock = true, Mouse = true,
             CFrameHook = false, Vector3New = false,
-            Arsenal = true,
         },
         AutoPriorityOrder = {
-            "Arsenal",
             "RayNew", "RayHook", "ScreenPointToRay", "Vector3Unit",
             "MouseFull", "MouseHit", "GunHandler", "FireServer",
             "MouseLock", "Mouse", "CFrameHook", "Vector3New",
@@ -151,17 +128,6 @@ H.Aimbot = {
         KeyHeld       = false,
         TargetChar    = nil,
     },
-
-    --// Arsenal state
-    Arsenal = {
-        Active          = false,
-        CallsServed     = 0,
-        LoggedCalls     = 0,
-        -- kept for backwards-compat with 07a export names
-        Remote          = nil,
-        OriginalOnCall  = nil,
-        OurCallback     = nil,
-    },
 }
 local Aimbot = H.Aimbot
 
@@ -178,56 +144,6 @@ local VISIBLE_PARTS = {
     "Head", "HumanoidRootPart", "UpperTorso", "LowerTorso",
     "Torso", "Left Arm", "Right Arm",
 }
-
---// ---------------------------------------------------------------------------
---// Arsenal detection helpers
---// ---------------------------------------------------------------------------
-
-local function IsArsenalCrosshair(obj)
-    -- legacy helper, still exported for diagnostics
-    if typeof(obj) ~= "Instance" then return false end
-    local lname = string.lower(obj.Name)
-    if not string.find(lname, "crosshair", 1, true) then return false end
-    if obj.ClassName ~= "RemoteFunction" then return false end
-    if ReplicatedStorage and obj:IsDescendantOf(ReplicatedStorage) then return true end
-    return false
-end
-
-local function FindArsenalCrosshair()
-    if not ReplicatedStorage then return nil end
-    for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-        if IsArsenalCrosshair(obj) then return obj end
-    end
-    return nil
-end
-
-local function IsArsenalShotRemote(obj)
-    if typeof(obj) ~= "Instance" then return false end
-    local evFolder = ReplicatedStorage and ReplicatedStorage:FindFirstChild("Events")
-    if not evFolder or not obj:IsDescendantOf(evFolder) then return false end
-    local names = Aimbot.Settings.ArsenalRemoteNames or {}
-    for _, name in ipairs(names) do
-        if obj.Name == name then return true end
-    end
-    return false
-end
-
-local function FindArsenalShotRemote()
-    local evFolder = ReplicatedStorage and ReplicatedStorage:FindFirstChild("Events")
-    if not evFolder then return nil end
-    local names = Aimbot.Settings.ArsenalRemoteNames or {}
-    for _, name in ipairs(names) do
-        local r = evFolder:FindFirstChild(name)
-        if r and (r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent")) then
-            return r
-        end
-    end
-    return nil
-end
-
---// ---------------------------------------------------------------------------
---// Common helpers
---// ---------------------------------------------------------------------------
 
 local function ShouldBypassWallCheck()
     return Aimbot.Settings.TPAimEnabled or Aimbot.Settings.WallbangEnabled
@@ -974,22 +890,6 @@ local function IsModeAvailable(mode)
             return false, "no hookmetamethod"
         end
         return true
-    elseif mode == "Arsenal" then
-        local hookf = getExec("hookmetamethod")
-        local getMethod = getExec("getnamecallmethod")
-        if not hookf or not getMethod then
-            return false, "no hookmetamethod"
-        end
-        local evFolder = ReplicatedStorage:FindFirstChild("Events")
-        if not evFolder then return false, "no ReplicatedStorage.Events" end
-        local found = false
-        for _, name in ipairs(Aimbot.Settings.ArsenalRemoteNames or {}) do
-            if evFolder:FindFirstChild(name) then found = true; break end
-        end
-        if not found then
-            return false, "no Events.empty (shot remote) — check ArsenalRemoteNames"
-        end
-        return true
     elseif mode == "MouseLock" or mode == "Mouse" then
         if not VirtualInputManager then return false, "no VIM" end
         return true
@@ -1041,76 +941,6 @@ end
 
 local function InScanFor(mode)
     return Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode == mode
-end
-
---// ---------------------------------------------------------------------------
---// ARSENAL SNAP HOOK
---// ---------------------------------------------------------------------------
---// The shot remote (ReplicatedStorage.Events.empty) is fired with `true` only.
---// Direction comes from replicated client orientation, so we snap:
---//   camera.CFrame, HRP.CFrame, Head.CFrame, LocalPlayer.GetMouse() result
---// to point at LockPartInstance for the shot frame, then restore.
-
-local function Arsenal_SnapAndFire(original, self, argsPack, aimPos)
-    local cam = workspace.CurrentCamera
-    if not cam then
-        return original(self, table.unpack(argsPack, 1, argsPack.n))
-    end
-
-    local char = LocalPlayer.Character
-    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-    local head = char and char:FindFirstChild("Head")
-
-    local savedCam  = cam.CFrame
-    local savedHrp  = hrp  and hrp.CFrame
-    local savedHead = head and head.CFrame
-
-    local correctCamCF  = CFrame.lookAt(cam.CFrame.Position, aimPos)
-    local correctHrpCF  = hrp and CFrame.lookAt(hrp.Position, aimPos)
-    local correctHeadCF = head and CFrame.lookAt(head.Position, aimPos)
-
-    pcall(function() cam.CFrame = correctCamCF end)
-    if hrp  then pcall(function() hrp.CFrame = correctHrpCF end) end
-    if head then pcall(function() head.CFrame = correctHeadCF end) end
-
-    --// Spoof LocalPlayer:GetMouse() for tools that read Mouse.Hit / UnitRay
-    local oldGetMouse = LocalPlayer.GetMouse
-    local spoofer
-    if type(oldGetMouse) == "function" then
-        local okM, realMouse = pcall(oldGetMouse, LocalPlayer)
-        if okM and realMouse then
-            spoofer = setmetatable({}, {
-                __index = function(_, k)
-                    if k == "Hit"           then return aimPos end
-                    if k == "Target"        then return Aimbot.LockPartInstance end
-                    if k == "TargetSurface" then return Vector3.new(0, 1, 0) end
-                    if k == "UnitRay" then
-                        local camPos = cam.CFrame.Position
-                        local d = aimPos - camPos
-                        if d.Magnitude > 0.001 then
-                            return Ray.new(camPos, d.Unit)
-                        end
-                    end
-                    return realMouse[k]
-                end,
-            })
-            pcall(function() LocalPlayer.GetMouse = function() return spoofer end end)
-        end
-    end
-
-    local result = original(self, table.unpack(argsPack, 1, argsPack.n))
-
-    local delay = Aimbot.Settings.ArsenalSnapDelay or 0.02
-    task.delay(delay, function()
-        pcall(function() cam.CFrame = savedCam end)
-        if hrp  then pcall(function() hrp.CFrame = savedHrp end) end
-        if head then pcall(function() head.CFrame = savedHead end) end
-        if spoofer and type(oldGetMouse) == "function" then
-            pcall(function() LocalPlayer.GetMouse = oldGetMouse end)
-        end
-    end)
-
-    return result
 end
 
 --// ---------------------------------------------------------------------------
@@ -1758,8 +1588,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
        or mode == "MouseHit" or mode == "MouseFull"
        or mode == "Vector3Unit" or mode == "ScreenPointToRay"
        or mode == "FireServer"
-       or mode == "CFrameHook" or mode == "Vector3New"
-       or mode == "Arsenal" then
+       or mode == "CFrameHook" or mode == "Vector3New" then
         FireClickNoDesync(btn, 0.25)
         task.delay(0.15, function()
             LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
@@ -1788,7 +1617,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 end
 
 --// ---------------------------------------------------------------------------
---// Other hooks (Ray / Mouse / Vector3 / CFrame / GunHandler)
+--// Hooks
 --// ---------------------------------------------------------------------------
 
 local RayHookActive = false
@@ -2066,9 +1895,6 @@ local function RemoveMouseHook()
     MouseHooked = false
 end
 
---// ---------------------------------------------------------------------------
---// FireServer + Arsenal SHARED namecall hook
---// ---------------------------------------------------------------------------
 local FS_Active = false
 local FS_Original = nil
 
@@ -2082,37 +1908,6 @@ local function SetupFireServerHook()
 
     local function handler(self, ...)
         local method = getMethod()
-
-        --// ---- Branch A: Arsenal shot (Events.empty etc.) ----
-        if method == "FireServer"
-           and not H.ShuttingDown
-           and not (checkC and checkC())
-           and typeof(self) == "Instance"
-           and IsArsenalShotRemote(self) then
-            if InScanFor("Arsenal") then
-                ReportHookCall("Arsenal")
-                return FS_Original(self, ...)
-            end
-            if IsModeHooked("Arsenal") then
-                local target = Aimbot.LockPartInstance
-                if target and IsAlive(target) then
-                    local aimPos = PredictPartPosition(target)
-                    local A = Aimbot.Arsenal
-                    A.CallsServed = A.CallsServed + 1
-                    if A.LoggedCalls < 5 or Aimbot.Settings.ArsenalDebug then
-                        A.LoggedCalls = A.LoggedCalls + 1
-                        warn(string.format(
-                            "[Arsenal] snap #%d remote=%s target=%s pos=(%.1f,%.1f,%.1f)",
-                            A.CallsServed, self.Name, tostring(target),
-                            aimPos.X, aimPos.Y, aimPos.Z
-                        ))
-                    end
-                    return Arsenal_SnapAndFire(FS_Original, self, table.pack(...), aimPos)
-                end
-            end
-        end
-
-        --// ---- Branch B: classic FireServer silent aim ----
         if method == "FireServer" and not H.ShuttingDown and IsModeHooked("FireServer") then
             if not (checkC and checkC()) then
                 if InScanFor("FireServer") then
@@ -2149,7 +1944,6 @@ local function SetupFireServerHook()
                 end
             end
         end
-
         return FS_Original(self, ...)
     end
     if newc then pcall(function() handler = newc(handler) end) end
@@ -2169,27 +1963,6 @@ local function RemoveFireServerHook()
     FS_Active = false
     FS_Original = nil
 end
-
---// Arsenal entry points (used by ManageHooks and 07a export names)
-local function SetupArsenalHook()
-    local A = Aimbot.Arsenal
-    A.Active = true
-    if FS_Active then return true end
-    SetupFireServerHook()
-    return FS_Active
-end
-
-local function RemoveArsenalHook()
-    local A = Aimbot.Arsenal
-    A.Active = false
-    A.CallsServed = 0
-    A.LoggedCalls = 0
-    -- keep FS_Original as-is; ManageHooks will remove it if FireServer also unwanted
-end
-
--- legacy names
-local SetupArsenalOnClientInvoke = SetupArsenalHook
-local RemoveArsenalOnClientInvoke = RemoveArsenalHook
 
 local GunHandlerHooked = false
 local GunHandlerRef = nil
@@ -2377,10 +2150,9 @@ local function ManageHooks()
     desired.Vector3Unit      = want("Vector3Unit")
     desired.ScreenPointToRay = want("ScreenPointToRay")
     desired.Mouse            = want("MouseHit") or want("MouseFull")
-    desired.FireServer       = want("FireServer") or want("Arsenal")
+    desired.FireServer       = want("FireServer")
     desired.CFrameHook       = want("CFrameHook")
     desired.Vector3New       = want("Vector3New")
-    desired.Arsenal          = want("Arsenal")
 
     local key = table.concat({
         tostring(desired.RayHook),
@@ -2391,13 +2163,9 @@ local function ManageHooks()
         tostring(desired.FireServer),
         tostring(desired.CFrameHook),
         tostring(desired.Vector3New),
-        tostring(desired.Arsenal),
     }, "|")
 
-    if Aimbot.Internal.LastManageKey == key then
-        if desired.Arsenal then pcall(SetupArsenalHook) end
-        return
-    end
+    if Aimbot.Internal.LastManageKey == key then return end
     Aimbot.Internal.LastManageKey = key
 
     if desired.RayHook          then SetupRayHook()            else RemoveRayHook()            end
@@ -2408,12 +2176,8 @@ local function ManageHooks()
     if desired.FireServer       then SetupFireServerHook()     else RemoveFireServerHook()     end
     if desired.CFrameHook       then SetupCFrameHook()         else RemoveCFrameHook()         end
     if desired.Vector3New       then SetupVector3NewHook()     else RemoveVector3NewHook()     end
-    if desired.Arsenal          then SetupArsenalHook()        else RemoveArsenalHook()        end
 end
 
---// ---------------------------------------------------------------------------
---// AutoScan (Arsenal succeeds instantly when Events.empty exists)
---// ---------------------------------------------------------------------------
 local function RunAutoScan()
     if Aimbot.AutoDetect.Active then return end
     Aimbot.AutoDetect.Active   = true
@@ -2442,49 +2206,36 @@ local function RunAutoScan()
                     Aimbot.AutoDetect.Results[mode] = { available = false, reason = reason, calls = 0 }
                     warn("[AutoScan] " .. mode .. " -> UNAVAILABLE: " .. tostring(reason))
                 else
-                    if mode == "Arsenal" then
-                        local remote = FindArsenalShotRemote()
-                        if remote then
-                            selected = mode
-                            Aimbot.AutoDetect.Results[mode] = { available = true, calls = 0, instant = true }
-                            warn("[AutoScan] Arsenal -> OK (shot remote " .. remote.Name .. " found) -> SELECTED")
-                            Aimbot.AutoDetect.TestMode = nil
-                            Aimbot.Internal.LastManageKey = nil
-                            task.wait(0.1)
-                            break
-                        end
-                    else
-                        warn("[AutoScan] Testing " .. mode .. " (" .. tostring(Aimbot.Settings.AutoTestDuration) .. "s)...")
-                        Aimbot.AutoDetect.TestMode      = mode
-                        Aimbot.AutoDetect.HookCallCount = 0
+                    warn("[AutoScan] Testing " .. mode .. " (" .. tostring(Aimbot.Settings.AutoTestDuration) .. "s)...")
+                    Aimbot.AutoDetect.TestMode      = mode
+                    Aimbot.AutoDetect.HookCallCount = 0
+                    Aimbot.Internal.LastManageKey = nil
+
+                    task.wait(0.15)
+
+                    local deadline = tick() + (Aimbot.Settings.AutoTestDuration or 4)
+                    while tick() < deadline
+                          and Aimbot.AutoDetect.Active
+                          and Aimbot.AutoDetect.TestMode == mode
+                          and not H.ShuttingDown do
+                        task.wait(0.05)
+                    end
+
+                    local calls = Aimbot.AutoDetect.HookCallCount
+                    Aimbot.AutoDetect.Results[mode] = { available = true, calls = calls }
+
+                    if calls >= (Aimbot.Settings.AutoMinHookCalls or 3) then
+                        selected = mode
+                        warn("[AutoScan] " .. mode .. " -> OK (" .. calls .. " game hook calls) -> SELECTED")
+                        Aimbot.AutoDetect.TestMode = nil
                         Aimbot.Internal.LastManageKey = nil
-
-                        task.wait(0.15)
-
-                        local deadline = tick() + (Aimbot.Settings.AutoTestDuration or 4)
-                        while tick() < deadline
-                              and Aimbot.AutoDetect.Active
-                              and Aimbot.AutoDetect.TestMode == mode
-                              and not H.ShuttingDown do
-                            task.wait(0.05)
-                        end
-
-                        local calls = Aimbot.AutoDetect.HookCallCount
-                        Aimbot.AutoDetect.Results[mode] = { available = true, calls = calls }
-
-                        if calls >= (Aimbot.Settings.AutoMinHookCalls or 3) then
-                            selected = mode
-                            warn("[AutoScan] " .. mode .. " -> OK (" .. calls .. " game hook calls) -> SELECTED")
-                            Aimbot.AutoDetect.TestMode = nil
-                            Aimbot.Internal.LastManageKey = nil
-                            task.wait(0.1)
-                            break
-                        else
-                            warn("[AutoScan] " .. mode .. " -> FAIL (" .. calls .. " game hook calls, need " .. tostring(Aimbot.Settings.AutoMinHookCalls or 3) .. ")")
-                            Aimbot.AutoDetect.TestMode = nil
-                            Aimbot.Internal.LastManageKey = nil
-                            task.wait(0.1)
-                        end
+                        task.wait(0.1)
+                        break
+                    else
+                        warn("[AutoScan] " .. mode .. " -> FAIL (" .. calls .. " game hook calls, need " .. tostring(Aimbot.Settings.AutoMinHookCalls or 3) .. ")")
+                        Aimbot.AutoDetect.TestMode = nil
+                        Aimbot.Internal.LastManageKey = nil
+                        task.wait(0.1)
                     end
                 end
             end
@@ -2514,28 +2265,6 @@ local function CancelAutoScan()
     Aimbot.Internal.LastManageKey = nil
 end
 
---// ---------------------------------------------------------------------------
---// Target acquisition policy
---// ---------------------------------------------------------------------------
-local function ShouldAcquireTargets()
-    if not Aimbot.Settings.Enabled then return false end
-    if Running then return true end
-    local autoShoot = Aimbot.Settings.AutoShoot
-    if autoShoot and autoShoot.Enabled and not autoShoot.OnlyWhenAiming then
-        return true
-    end
-    -- Arsenal mode: even if not Running, if AutoShoot is on we want a lock
-    -- so the snap has something to snap to.
-    local mode = GetEffectiveMode()
-    if mode == "Arsenal" and autoShoot and autoShoot.Enabled then
-        return true
-    end
-    return false
-end
-
---// ---------------------------------------------------------------------------
---// LoadAimbot
---// ---------------------------------------------------------------------------
 local function LoadAimbot()
     Track(RunService.RenderStepped:Connect(function()
         if H.ShuttingDown then return end
@@ -2567,7 +2296,7 @@ local function LoadAimbot()
         if Aimbot.Internal.TargetAccum >= interval then
             Aimbot.Internal.TargetAccum = 0
 
-            if ShouldAcquireTargets() then
+            if Aimbot.Settings.Enabled and Running then
                 GetClosestPlayer()
                 Aimbot.FOVCircle.Color = Color3.fromRGB(255, 255, 255)
                 if Aimbot.Locked and Aimbot.LockPartInstance and IsAlive(Aimbot.LockPartInstance) then
@@ -2576,7 +2305,7 @@ local function LoadAimbot()
                     local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
                     if visiblePoint then
                         Aimbot.FOVCircle.Color = Color3.fromRGB(255, 200, 70)
-                        if not Aimbot.Settings.SilentAim and Running then
+                        if not Aimbot.Settings.SilentAim then
                             local targetPos = visiblePoint
                             if Aimbot.Settings.AimMethod == "Instant" then
                                 workspace.CurrentCamera.CFrame = CFrame.new(workspace.CurrentCamera.CFrame.Position, targetPos)
@@ -2742,9 +2471,6 @@ end))
 
 LoadAimbot()
 
---// ---------------------------------------------------------------------------
---// Public exports
---// ---------------------------------------------------------------------------
 Aimbot.CancelLock            = CancelLock
 Aimbot.RemoveRayHook         = RemoveRayHook
 Aimbot.RemoveRayNewHook      = RemoveRayNewHook
@@ -2770,19 +2496,9 @@ Aimbot.ShouldBypassWallCheck = ShouldBypassWallCheck
 Aimbot.IsBacktrackEnabled    = IsBacktrackEnabled
 Aimbot.IsModeHooked          = IsModeHooked
 Aimbot.ShouldRedirect        = ShouldRedirect
-Aimbot.ShouldAcquireTargets  = ShouldAcquireTargets
 Aimbot.GetBacktrackGhostTargets = GetBacktrackGhostTargets
 Aimbot.ResolveOwnerCharacter = ResolveOwnerCharacter
 Aimbot.ResolveOwnerPlayer    = ResolveOwnerPlayer
-Aimbot.IsArsenalCrosshair    = IsArsenalCrosshair
-Aimbot.FindArsenalCrosshair  = FindArsenalCrosshair
-Aimbot.IsArsenalShotRemote   = IsArsenalShotRemote
-Aimbot.FindArsenalShotRemote = FindArsenalShotRemote
-Aimbot.SetupArsenal          = SetupArsenalHook
-Aimbot.RemoveArsenal         = RemoveArsenalHook
--- legacy export names
-Aimbot.SetupArsenalOnClientInvoke = SetupArsenalOnClientInvoke
-Aimbot.RemoveArsenalOnClientInvoke = RemoveArsenalOnClientInvoke
 
 Aimbot.PerformWallbang          = PerformWallbang
 Aimbot.PerformMagicBullet       = PerformMagicBullet
@@ -2793,6 +2509,7 @@ Aimbot.FireClickNoDesync        = FireClickNoDesync
 --// ---------------------------------------------------------------------------
 --// DIAGNOSTICS
 --// ---------------------------------------------------------------------------
+
 local function Check(cond, label, detail)
     local mark = cond and "[OK]  " or "[FAIL]"
     local line = mark .. " " .. label
@@ -2834,19 +2551,8 @@ local function Diagnose()
         T(getExec(name) ~= nil, "executor: " .. name)
     end
 
-    local shotRemote = FindArsenalShotRemote()
-    T(shotRemote ~= nil, "Arsenal shot remote found",
-      shotRemote and shotRemote:GetFullName() or "not present")
-
-    local crosshair = FindArsenalCrosshair()
-    if crosshair then
-        warn("[OK]   Arsenal Crosshair remote found (unused, diagnostic only): "
-            .. crosshair:GetFullName())
-    end
-
     if Aimbot.IsModeAvailable then
-        local modes = { "Arsenal", "RayHook", "RayNew", "Vector3Unit",
-                        "ScreenPointToRay",
+        local modes = { "RayHook", "RayNew", "Vector3Unit", "ScreenPointToRay",
                         "MouseHit", "MouseFull", "GunHandler", "FireServer",
                         "MouseLock", "Mouse", "Camera", "CFrameHook", "Vector3New" }
         for _, m in ipairs(modes) do
@@ -2858,13 +2564,9 @@ local function Diagnose()
     local exports = { "CancelLock", "GetVisiblePointOnPart", "PredictPartPosition",
                       "RunAutoScan", "IsModeAvailable", "ShouldBypassWallCheck",
                       "IsBacktrackEnabled", "IsModeHooked", "ShouldRedirect",
-                      "ShouldAcquireTargets",
                       "GetBacktrackGhostTargets", "ResolveOwnerCharacter", "ResolveOwnerPlayer",
                       "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
-                      "DisableDesyncDuringShot", "FireClickNoDesync",
-                      "IsArsenalCrosshair", "FindArsenalCrosshair",
-                      "IsArsenalShotRemote", "FindArsenalShotRemote",
-                      "SetupArsenal", "RemoveArsenal" }
+                      "DisableDesyncDuringShot", "FireClickNoDesync" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
     end
