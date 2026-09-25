@@ -93,8 +93,8 @@ H.Aimbot = {
             "MouseFull", "MouseHit", "GunHandler", "FireServer",
             "MouseLock", "Mouse", "CFrameHook", "Vector3New",
         },
-        AutoTestDuration = 4,
-        AutoMinHookCalls = 3,
+        AutoTestDuration = 0.5,
+        AutoMinHookCalls = 1,
         AutoFallback     = "Camera",
         AutoRunOnLoad    = true,
 
