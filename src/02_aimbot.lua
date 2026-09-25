@@ -19,12 +19,23 @@
 --//
 --// NEW (2026-09-26):
 --//   * "Arsenal" silent-aim mode. Hooks __namecall and patches InvokeServer/
---//     FireServer args on ReplicatedStorage.Crosshair (RemoteFunction/RemoteEvent)
---//     to redirect aim towards Aimbot.LockPartInstance. Ported from the
---//     Manji DX11 pseudo-aimbot pattern (hookmetamethod + getnamecallmethod).
---//     Falls back to a no-op when Crosshair is absent.
---//     The namecall hook is SHARED with the "FireServer" mode (only one
---//     __namecall hook can be installed at a time in this build).
+--//     FireServer args on ReplicatedStorage.*Crosshair* remotes to redirect
+--//     aim towards Aimbot.LockPartInstance. Ported from the Manji DX11
+--//     pseudo-aimbot pattern (hookmetamethod + getnamecallmethod).
+--//
+--//   * [FIX v2] The previous version only patched the FIRST matching Vector3
+--//     and did not touch camera/character. Now:
+--//       - ALL Vector3 / CFrame / Ray args are patched (not just the first).
+--//       - Vector3 magnitude > 2  → target position
+--//       - Vector3 magnitude ≤ 2  → unit direction to target
+--//       - CFrame                 → CFrame.lookAt(camPos, aimPos)
+--//       - Ray                    → Ray.new(camPos, dirToTarget)
+--//       - If NO Vector3 args    → direction appended (games expecting it)
+--//       - Camera + HRP + Head are SNAPPED to the target before firing and
+--//         RESTORED right after InvokeServer returns (needed for games that
+--//         derive shot direction from view/character, not from args).
+--//       - IsArsenalCrosshair matches case-insensitive substring "crosshair"
+--//         and works with remotes nested inside folders.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -101,10 +112,9 @@ H.Aimbot = {
             GunHandler = true, FireServer = true,
             MouseLock = true, Mouse = true,
             CFrameHook = false, Vector3New = false,
-            Arsenal = true, -- [NEW]
+            Arsenal = true,
         },
         AutoPriorityOrder = {
-            -- [NEW] game-specific, tried first; auto-skips if Crosshair missing
             "Arsenal",
             "RayNew", "RayHook", "ScreenPointToRay", "Vector3Unit",
             "MouseFull", "MouseHit", "GunHandler", "FireServer",
@@ -159,7 +169,6 @@ H.Aimbot = {
 }
 local Aimbot = H.Aimbot
 
---// Shared wallbang state — keeps hooks alive during post-shot window
 local WB = {
     HoldUntil = 0,
 }
@@ -174,11 +183,12 @@ local VISIBLE_PARTS = {
     "Torso", "Left Arm", "Right Arm",
 }
 
---// [NEW] Detect the game "Arsenal" Crosshair remote. Name match + class check
---// + ancestor check (must be inside ReplicatedStorage).
+--// [NEW v2] Match any remote whose name CONTAINS "crosshair" (case-insensitive)
+--// and is a RemoteFunction/RemoteEvent inside ReplicatedStorage.
 local function IsArsenalCrosshair(obj)
     if typeof(obj) ~= "Instance" then return false end
-    if obj.Name ~= "Crosshair" then return false end
+    local lname = string.lower(obj.Name)
+    if not string.find(lname, "crosshair", 1, true) then return false end
     local c = obj.ClassName
     if c ~= "RemoteFunction" and c ~= "RemoteEvent" and c ~= "UnreliableRemoteEvent" then
         return false
@@ -187,6 +197,14 @@ local function IsArsenalCrosshair(obj)
         return true
     end
     return false
+end
+
+local function FindArsenalCrosshair()
+    if not ReplicatedStorage then return nil end
+    for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+        if IsArsenalCrosshair(obj) then return obj end
+    end
+    return nil
 end
 
 local function ShouldBypassWallCheck()
@@ -516,7 +534,6 @@ local function GetVisiblePointOnPart(origin, part)
     return nil
 end
 
---// Non-blocking variant used inside hooks (GunHandler etc.) — never yields.
 local function TryGetVisiblePointOnPart(origin, part)
     if not part or not part:IsA("BasePart") or not IsAlive(part) then return nil end
     local aimPos = PredictPartPosition(part)
@@ -817,9 +834,6 @@ end
 --// ---------------------------------------------------------------------------
 --// DISABLE DESYNC DURING SHOT
 --// ---------------------------------------------------------------------------
---// Временно выключает AntiAim.Desync (останавливает render-step смещение),
---// чтобы исходящий выстрел считался от РЕАЛЬНОЙ позиции. Возвращает
---// idempotent restore-функцию, либо nil если AntiAim не загружен.
 local function DisableDesyncDuringShot()
     local Hg = getgenv().AirHub
     if not Hg or not Hg.AntiAim or not Hg.AntiAim.Desync then return nil end
@@ -954,19 +968,14 @@ local function IsModeAvailable(mode)
         end
         return true
     elseif mode == "Arsenal" then
-        -- [NEW] Requires hookmetamethod + ReplicatedStorage.Crosshair Remote
+        -- [NEW v2] recursive search + case-insensitive substring
         local hookf = getExec("hookmetamethod")
         local getMethod = getExec("getnamecallmethod")
         if not hookf or not getMethod then
             return false, "no hookmetamethod"
         end
-        local rs = ReplicatedStorage
-        local ch = rs and rs:FindFirstChild("Crosshair")
-        if not ch then return false, "no ReplicatedStorage.Crosshair" end
-        local c = ch.ClassName
-        if c ~= "RemoteFunction" and c ~= "RemoteEvent" and c ~= "UnreliableRemoteEvent" then
-            return false, "Crosshair is not a Remote"
-        end
+        local found = FindArsenalCrosshair()
+        if not found then return false, "no ReplicatedStorage.*Crosshair* remote" end
         return true
     elseif mode == "MouseLock" or mode == "Mouse" then
         if not VirtualInputManager then return false, "no VIM" end
@@ -1073,7 +1082,6 @@ local function TeleportToTarget(targetPart)
     return true
 end
 
---// Send a raw click through VirtualInputManager
 local function FireClick(btn)
     local mousePos = UserInputService:GetMouseLocation()
     VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
@@ -1081,8 +1089,6 @@ local function FireClick(btn)
     VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
 end
 
---// FireClick with Desync temporarily disabled so the shot leaves from the
---// real position; Desync restored on a short timer.
 local function FireClickNoDesync(btn, restoreDelay)
     local restore = DisableDesyncDuringShot()
     FireClick(btn)
@@ -1091,14 +1097,13 @@ local function FireClickNoDesync(btn, restoreDelay)
     end
 end
 
---// Schedule hook removal after HoldTime (+small slack)
 local function ScheduleHookRemoval(restoreFn, holdTime)
     task.delay((holdTime or Aimbot.Settings.WallbangHoldTime or 0.1) + 0.05, function()
         pcall(restoreFn)
     end)
 end
 
---// ==== MODE 1: RemotePatch — patch direction Vector3 in FireServer args ====
+--// ==== MODE 1: RemotePatch ====
 local function PerformWallbang_RemotePatch(targetPart, btn)
     local hookf     = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
@@ -1136,7 +1141,7 @@ local function PerformWallbang_RemotePatch(targetPart, btn)
     return true
 end
 
---// ==== MODE 2: RemotePatchFull — patches Vector3 + CFrame + table args ====
+--// ==== MODE 2: RemotePatchFull ====
 local function PerformWallbang_RemotePatchFull(targetPart, btn)
     local hookf     = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
@@ -1196,7 +1201,7 @@ local function PerformWallbang_RemotePatchFull(targetPart, btn)
     return true
 end
 
---// ==== MODE 3: RayIgnore — extend raycast filter to exclude world ====
+--// ==== MODE 3: RayIgnore ====
 local function PerformWallbang_RayIgnore(targetPart, btn)
     local hookf     = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
@@ -1239,7 +1244,7 @@ local function PerformWallbang_RayIgnore(targetPart, btn)
     return true
 end
 
---// ==== MODE 4: RayNewHook — hook Ray.new constructor ====
+--// ==== MODE 4: RayNewHook ====
 local function PerformWallbang_RayNewHook(targetPart, btn)
     if type(Ray) ~= "table" or type(Ray.new) ~= "function" then return false end
     local old = Ray.new
@@ -1273,7 +1278,7 @@ local function PerformWallbang_RayNewHook(targetPart, btn)
     return true
 end
 
---// ==== MODE 5: MuzzleTeleport — move FireServer origin next to target ====
+--// ==== MODE 5: MuzzleTeleport ====
 local function PerformWallbang_MuzzleTeleport(targetPart, btn)
     local hookf     = getExec("hookmetamethod")
     local getMethod = getExec("getnamecallmethod")
@@ -1318,7 +1323,7 @@ local function PerformWallbang_MuzzleTeleport(targetPart, btn)
     return true
 end
 
---// ==== MODE 6: MouseHit — spoof LocalPlayer:GetMouse() during shot ====
+--// ==== MODE 6: MouseHit ====
 local function PerformWallbang_MouseHit(targetPart, btn)
     local oldGetMouse = LocalPlayer.GetMouse
     if type(oldGetMouse) ~= "function" then
@@ -1354,7 +1359,7 @@ local function PerformWallbang_MouseHit(targetPart, btn)
     return true
 end
 
---// ==== MODE 7: ScreenPointToRay — hook camera method ====
+--// ==== MODE 7: ScreenPointToRay ====
 local function PerformWallbang_ScreenPointToRay(targetPart, btn)
     local cam = workspace.CurrentCamera
     if not cam then return false end
@@ -1386,7 +1391,7 @@ local function PerformWallbang_ScreenPointToRay(targetPart, btn)
     return true
 end
 
---// ==== MODE 8: CameraTP — move camera to look at target during shot ====
+--// ==== MODE 8: CameraTP ====
 local function PerformWallbang_CameraTP(targetPart, btn)
     local cam = workspace.CurrentCamera
     if not cam then return false end
@@ -1442,7 +1447,7 @@ local function PerformWallbang(targetPart, btn)
     return ok
 end
 
---// ==== MagicBullet — НАМЕРЕННО включает Desync (скрывает телепорт) ====
+--// ==== MagicBullet ====
 local function PerformMagicBullet(targetPart, btn)
     if not Aimbot.Settings.TPAimEnabled or Aimbot.Settings.TPAimMethod ~= "MagicBullet" then return end
     if not targetPart then return end
@@ -1469,7 +1474,6 @@ local function PerformMagicBullet(targetPart, btn)
     TeleportToTarget(targetPart)
     task.wait(0.01)
 
-    --// NOTE: обычный FireClick — здесь Desync ДОЛЖЕН быть включён.
     FireClick(btn)
 
     task.wait(0.02)
@@ -1572,7 +1576,6 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 
     RefreshOldPositionIfNeeded()
 
-    --// Отключаем Desync на время выстрела, чтобы пакет ушёл с реальной позиции.
     local restoreDesync = DisableDesyncDuringShot()
     if restoreDesync then
         task.delay(0.25, restoreDesync)
@@ -1669,14 +1672,12 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         return
     end
 
-    --// Hook-based redirects: our namecall hook already rewrites the outgoing
-    --// FireServer/InvokeServer args, we just need to send the click.
     if mode == "GunHandler" or mode == "RayHook" or mode == "RayNew"
        or mode == "MouseHit" or mode == "MouseFull"
        or mode == "Vector3Unit" or mode == "ScreenPointToRay"
        or mode == "FireServer"
        or mode == "CFrameHook" or mode == "Vector3New"
-       or mode == "Arsenal" then -- [NEW]
+       or mode == "Arsenal" then
         FireClickNoDesync(btn, 0.25)
         task.delay(0.15, function()
             LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
@@ -1986,11 +1987,75 @@ end
 --// ---------------------------------------------------------------------------
 --// FireServer + Arsenal — SHARED namecall hook
 --// ---------------------------------------------------------------------------
---// Only ONE __namecall hook can be installed at a time in this build, so the
---// "FireServer" and "Arsenal" modes share a single handler. Inside the handler
---// each mode is checked independently.
 local FS_Active = false
 local FS_Original = nil
+
+--// [NEW v2] Пробуем заменить КАЖДЫЙ Vector3/CFrame/Ray аргумент.
+--// Vector3 с magnitude > 2  → aimPos (позиция цели)
+-- Vector3 с magnitude ≤ 2  → dirUnit (юнит-направление)
+-- CFrame                   → CFrame.lookAt(camPos, aimPos)
+-- Ray                      → Ray.new(camPos, dirUnit)
+-- Плюс: снапим camera / HRP / Head перед InvokeServer и восстанавливаем после.
+local function PatchArsenalArgs(args, aimPos, camPos, dirUnit, correctCF)
+    local patched = 0
+    for i = 1, args.n do
+        local v = args[i]
+        local t = typeof(v)
+        if t == "Vector3" then
+            local vm = v.Magnitude
+            if vm > 2 then
+                args[i] = aimPos
+            else
+                args[i] = dirUnit
+            end
+            patched = patched + 1
+        elseif t == "CFrame" then
+            args[i] = correctCF
+            patched = patched + 1
+        elseif t == "Ray" then
+            args[i] = Ray.new(camPos, dirUnit)
+            patched = patched + 1
+        end
+    end
+    return patched
+end
+
+local function SnapLocalCharacter(cam, aimPos, correctCF)
+    local saved = {
+        cam = cam and cam.CFrame or nil,
+        hrp = nil,
+        head = nil,
+    }
+    local char = LocalPlayer.Character
+    if char then
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local head = char:FindFirstChild("Head")
+        if hrp then saved.hrp = hrp.CFrame end
+        if head then saved.head = head.CFrame end
+        pcall(function()
+            if cam then cam.CFrame = correctCF end
+            if hrp then hrp.CFrame = CFrame.lookAt(hrp.Position, aimPos) end
+            if head then head.CFrame = CFrame.lookAt(head.Position, aimPos) end
+        end)
+    elseif cam then
+        pcall(function() cam.CFrame = correctCF end)
+    end
+    return saved
+end
+
+local function RestoreLocalCharacter(cam, saved)
+    if not saved then return end
+    pcall(function()
+        if cam and saved.cam then cam.CFrame = saved.cam end
+        local char = LocalPlayer.Character
+        if char then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            local head = char:FindFirstChild("Head")
+            if hrp and saved.hrp then hrp.CFrame = saved.hrp end
+            if head and saved.head then head.CFrame = saved.head end
+        end
+    end)
+end
 
 local function SetupFireServerHook()
     if FS_Active then return end
@@ -2006,7 +2071,8 @@ local function SetupFireServerHook()
         --// ---- Branch 1: classic FireServer silent aim ----
         if method == "FireServer"
            and not H.ShuttingDown
-           and IsModeHooked("FireServer") then
+           and IsModeHooked("FireServer")
+           and not (typeof(self) == "Instance" and IsArsenalCrosshair(self)) then
             if not (checkC and checkC()) then
                 if InScanFor("FireServer") then
                     if typeof(self) == "Instance"
@@ -2043,7 +2109,7 @@ local function SetupFireServerHook()
             end
         end
 
-        --// ---- Branch 2 [NEW]: Arsenal silent aim via ReplicatedStorage.Crosshair ----
+        --// ---- Branch 2: Arsenal silent aim via ReplicatedStorage.*Crosshair* ----
         if (method == "InvokeServer" or method == "FireServer")
            and not H.ShuttingDown
            and IsModeHooked("Arsenal")
@@ -2060,45 +2126,34 @@ local function SetupFireServerHook()
                 local target = Aimbot.LockPartInstance
                 if target and IsAlive(target) then
                     local aimPos = GetMouseSpoof() or PredictPartPosition(target)
-                    local camPos = workspace.CurrentCamera.CFrame.Position
-                    local correctDir = aimPos - camPos
-                    if correctDir.Magnitude > 0.001 then
-                        correctDir = correctDir.Unit
+                    local cam = workspace.CurrentCamera
+                    local camPos = cam.CFrame.Position
+                    local toTarget = aimPos - camPos
+                    local dirUnit = toTarget.Magnitude > 0.001 and toTarget.Unit or cam.CFrame.LookVector
+                    local correctCF = CFrame.lookAt(camPos, aimPos)
+
+                    --// [v2] Snap camera / HRP / Head on the local character
+                    --// so games that derive shot direction from view direction
+                    --// also fire at the target.
+                    local savedState = SnapLocalCharacter(cam, aimPos, correctCF)
+
+                    --// [v2] Patch all arg types
+                    local args = table.pack(...)
+                    local patched = PatchArsenalArgs(args, aimPos, camPos, dirUnit, correctCF)
+
+                    --// If no args matched, append direction (some games expect
+                    --// the direction as an extra trailing argument).
+                    if patched == 0 then
+                        args[args.n + 1] = dirUnit
+                        args.n = args.n + 1
                     end
 
-                    local args = { ... }
-                    local patched = false
-                    for i, v in ipairs(args) do
-                        local t = typeof(v)
-                        if t == "Vector3" then
-                            local vm = v.Magnitude
-                            if math.abs(vm - 1) < 0.3 then
-                                -- unit vector → direction
-                                if not patched then
-                                    args[i] = correctDir
-                                    patched = true
-                                end
-                            elseif vm > 5 then
-                                -- world position → target position
-                                if not patched then
-                                    args[i] = aimPos
-                                    patched = true
-                                end
-                            end
-                        elseif t == "CFrame" then
-                            if not patched then
-                                args[i] = CFrame.lookAt(camPos, aimPos)
-                                patched = true
-                            end
-                        end
-                    end
-                    --// Fallback: if nothing matched but there's at least one arg,
-                    --// replace the first arg with a direction (best-guess).
-                    if not patched and #args > 0 then
-                        args[1] = correctDir
-                    end
+                    local result = FS_Original(self, table.unpack(args, 1, args.n))
 
-                    return FS_Original(self, table.unpack(args, 1, #args))
+                    --// Restore camera / character immediately after server response
+                    RestoreLocalCharacter(cam, savedState)
+
+                    return result
                 end
             end
         end
@@ -2309,7 +2364,6 @@ local function ManageHooks()
     desired.Vector3Unit      = want("Vector3Unit")
     desired.ScreenPointToRay = want("ScreenPointToRay")
     desired.Mouse            = want("MouseHit") or want("MouseFull")
-    --// [NEW] single shared namecall hook covers both FireServer and Arsenal
     desired.FireServer       = want("FireServer") or want("Arsenal")
     desired.CFrameHook       = want("CFrameHook")
     desired.Vector3New       = want("Vector3New")
@@ -2549,7 +2603,6 @@ local function LoadAimbot()
                     if not vp then return end
                 end
                 RefreshOldPositionIfNeeded()
-                --// Manual click path: disable Desync for the shot.
                 FireClickNoDesync(btn, 0.25)
             end
         end
@@ -2662,7 +2715,8 @@ Aimbot.ShouldRedirect        = ShouldRedirect
 Aimbot.GetBacktrackGhostTargets = GetBacktrackGhostTargets
 Aimbot.ResolveOwnerCharacter = ResolveOwnerCharacter
 Aimbot.ResolveOwnerPlayer    = ResolveOwnerPlayer
-Aimbot.IsArsenalCrosshair    = IsArsenalCrosshair -- [NEW]
+Aimbot.IsArsenalCrosshair    = IsArsenalCrosshair
+Aimbot.FindArsenalCrosshair  = FindArsenalCrosshair
 
 Aimbot.PerformWallbang          = PerformWallbang
 Aimbot.PerformMagicBullet       = PerformMagicBullet
@@ -2731,7 +2785,8 @@ local function Diagnose()
                       "IsBacktrackEnabled", "IsModeHooked", "ShouldRedirect",
                       "GetBacktrackGhostTargets", "ResolveOwnerCharacter", "ResolveOwnerPlayer",
                       "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
-                      "DisableDesyncDuringShot", "FireClickNoDesync", "IsArsenalCrosshair" }
+                      "DisableDesyncDuringShot", "FireClickNoDesync",
+                      "IsArsenalCrosshair", "FindArsenalCrosshair" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
     end
