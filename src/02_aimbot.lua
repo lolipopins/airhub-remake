@@ -1,5 +1,16 @@
 --// AirHub - 02_aimbot.lua
 --// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, Backtrack + Ghost targeting.
+--//
+--// v6 (2026-09-26):
+--//   * PatchShotArgs() — shared patcher: Vector3 (mag~1 → unit dir; mag>5 → aim pos),
+--//     CFrame → lookAt(camPos, aimPos), Ray → Ray.new(camPos, dirUnit).
+--//   * SetupFireServerHook now intercepts BOTH FireServer AND InvokeServer and
+--//     uses PatchShotArgs (previously patched only the first Vector3).
+--//   * RayNew: guards against zero-magnitude direction and position-as-direction.
+--//   * Vector3New: guards against near-zero magnitude (avoids NaN unit vectors).
+--//   * ScreenPointToRay: nil-camera guard.
+--//   * RunAutoScan: best-effort fallback — if no method reaches AutoMinHookCalls,
+--//     picks the one with the most calls instead of hard-falling to Camera.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -847,6 +858,46 @@ local function ReportHookCall(mode)
     end
 end
 
+--// ---------------------------------------------------------------------------
+--// PatchShotArgs — universal shot-arg patcher
+--// ---------------------------------------------------------------------------
+local function PatchShotArgs(args, camPos, aimPos)
+    local cam = workspace.CurrentCamera
+    local camPos2 = camPos or (cam and cam.CFrame.Position)
+    if not camPos2 then return 0 end
+
+    local toTarget = aimPos - camPos2
+    if toTarget.Magnitude < 0.001 then return 0 end
+    local dirUnit = toTarget.Unit
+    local correctCF = CFrame.lookAt(camPos2, aimPos)
+
+    local n = 0
+    for i = 1, args.n do
+        local v = args[i]
+        local t = typeof(v)
+        if t == "Vector3" then
+            local vm = v.Magnitude
+            if math.abs(vm - 1) < 0.4 then
+                args[i] = dirUnit
+                n = n + 1
+            elseif vm > 5 then
+                args[i] = aimPos
+                n = n + 1
+            end
+        elseif t == "CFrame" then
+            args[i] = correctCF
+            n = n + 1
+        elseif t == "Ray" then
+            local okRay, ray = pcall(Ray.new, camPos2, dirUnit)
+            if okRay and ray then
+                args[i] = ray
+                n = n + 1
+            end
+        end
+    end
+    return n
+end
+
 local function IsModeAvailable(mode)
     if mode == "RayHook" then
         local ok, mt = pcall(getrawmetatable, Ray.new(Vector3.zero, Vector3.zero))
@@ -1034,17 +1085,13 @@ local function PerformWallbang_RemotePatch(targetPart, btn)
         if method == "FireServer"
            and not (checkC and checkC())
            and tick() < WB.HoldUntil then
-            local args = { ... }
-            local cPos = workspace.CurrentCamera.CFrame.Position
-            for i, v in ipairs(args) do
-                if typeof(v) == "Vector3" then
-                    local vm = v.Magnitude
-                    if math.abs(vm - 1) < 0.15 then
-                        args[i] = (aimPos - cPos).Unit
-                    end
-                end
+            local args = table.pack(...)
+            local cam = workspace.CurrentCamera
+            local cPos = cam and cam.CFrame.Position or GetCheckOrigin()
+            local patched = PatchShotArgs(args, cPos, aimPos)
+            if patched > 0 then
+                return original(self, table.unpack(args, 1, args.n))
             end
-            return original(self, table.unpack(args, 1, #args))
         end
         return original(self, ...)
     end))
@@ -1691,11 +1738,20 @@ local function SetupRayNewHook()
                 if target and IsAlive(target) then
                     local aimPos = PredictPartPosition(target)
                     local dir = aimPos - origin
-                    if dir.Magnitude > 0.001 then
+                    local dm = dir.Magnitude
+                    if dm > 0.001 then
+                        local dirUnit = dir / dm
                         if type(direction) == "Vector3" then
-                            return RayNewOriginal(origin, dir.Unit * direction.Magnitude)
+                            local origMag = direction.Magnitude
+                            if origMag < 0.001 then
+                                return RayNewOriginal(origin, dirUnit)
+                            elseif origMag > 100 then
+                                return RayNewOriginal(origin, dir)
+                            else
+                                return RayNewOriginal(origin, dirUnit * origMag)
+                            end
                         else
-                            return RayNewOriginal(origin, dir.Unit)
+                            return RayNewOriginal(origin, dirUnit)
                         end
                     end
                 end
@@ -1788,12 +1844,13 @@ local function SetupScreenPointToRayHook()
                 return SPR_Original(self, x, y)
             end
             local target = Aimbot.LockPartInstance
-            if target and IsAlive(target) then
+            if target and IsAlive(target) and self and self.CFrame then
                 local aimPos = PredictPartPosition(target)
                 local camPos = self.CFrame.Position
                 local dir = aimPos - camPos
                 if dir.Magnitude > 0.001 then
-                    return Ray.new(camPos, dir.Unit)
+                    local okRay, ray = pcall(Ray.new, camPos, dir.Unit)
+                    if okRay and ray then return ray end
                 end
             end
         end
@@ -1895,6 +1952,9 @@ local function RemoveMouseHook()
     MouseHooked = false
 end
 
+--// ---------------------------------------------------------------------------
+--// FireServer / InvokeServer SHARED namecall hook
+--// ---------------------------------------------------------------------------
 local FS_Active = false
 local FS_Original = nil
 
@@ -1908,11 +1968,14 @@ local function SetupFireServerHook()
 
     local function handler(self, ...)
         local method = getMethod()
-        if method == "FireServer" and not H.ShuttingDown and IsModeHooked("FireServer") then
+        local isShot = (method == "FireServer" or method == "InvokeServer")
+        if isShot and not H.ShuttingDown and IsModeHooked("FireServer") then
             if not (checkC and checkC()) then
                 if InScanFor("FireServer") then
                     if typeof(self) == "Instance"
-                       and (self:IsA("RemoteEvent") or self:IsA("UnreliableRemoteEvent")) then
+                       and (self:IsA("RemoteEvent")
+                            or self:IsA("UnreliableRemoteEvent")
+                            or self:IsA("RemoteFunction")) then
                         ReportHookCall("FireServer")
                     end
                     return FS_Original(self, ...)
@@ -1924,23 +1987,15 @@ local function SetupFireServerHook()
                 local target = Aimbot.LockPartInstance
                 if target and IsAlive(target) then
                     local aimPos = GetMouseSpoof() or PredictPartPosition(target)
-                    local camPos = workspace.CurrentCamera.CFrame.Position
-                    local correctDir = (aimPos - camPos)
-                    if correctDir.Magnitude > 0.001 then
-                        correctDir = correctDir.Unit
+                    local cam = workspace.CurrentCamera
+                    local camPos = cam and cam.CFrame.Position or GetCheckOrigin()
+
+                    local args = table.pack(...)
+                    local patched = PatchShotArgs(args, camPos, aimPos)
+
+                    if patched > 0 then
+                        return FS_Original(self, table.unpack(args, 1, args.n))
                     end
-                    local args = { ... }
-                    local patched = false
-                    for i, v in ipairs(args) do
-                        if typeof(v) == "Vector3" then
-                            local vm = v.Magnitude
-                            if math.abs(vm - 1) < 0.3 and not patched then
-                                args[i] = correctDir
-                                patched = true
-                            end
-                        end
-                    end
-                    return FS_Original(self, table.unpack(args, 1, #args))
                 end
             end
         end
@@ -2091,7 +2146,7 @@ local function SetupVector3NewHook()
             if not (checkC and checkC()) then
                 if type(x) == "number" and type(y) == "number" and type(z) == "number" then
                     local mag = math.sqrt(x*x + y*y + z*z)
-                    if math.abs(mag - 1) < 0.25 then
+                    if math.abs(mag - 1) < 0.25 and mag > 0.001 then
                         if InScanFor("Vector3New") then
                             ReportHookCall("Vector3New")
                             return Vector3NewOriginal(x, y, z)
@@ -2178,6 +2233,9 @@ local function ManageHooks()
     if desired.Vector3New       then SetupVector3NewHook()     else RemoveVector3NewHook()     end
 end
 
+--// ---------------------------------------------------------------------------
+--// AutoScan
+--// ---------------------------------------------------------------------------
 local function RunAutoScan()
     if Aimbot.AutoDetect.Active then return end
     Aimbot.AutoDetect.Active   = true
@@ -2191,7 +2249,9 @@ local function RunAutoScan()
 
     task.spawn(function()
         local order = Aimbot.Settings.AutoPriorityOrder
-        local selected = nil
+        local selected  = nil
+        local bestMode  = nil
+        local bestCalls = 0
 
         for _, mode in ipairs(order) do
             if not Aimbot.AutoDetect.Active then break end
@@ -2224,6 +2284,11 @@ local function RunAutoScan()
                     local calls = Aimbot.AutoDetect.HookCallCount
                     Aimbot.AutoDetect.Results[mode] = { available = true, calls = calls }
 
+                    if calls > bestCalls then
+                        bestCalls = calls
+                        bestMode  = mode
+                    end
+
                     if calls >= (Aimbot.Settings.AutoMinHookCalls or 3) then
                         selected = mode
                         warn("[AutoScan] " .. mode .. " -> OK (" .. calls .. " game hook calls) -> SELECTED")
@@ -2241,17 +2306,22 @@ local function RunAutoScan()
             end
         end
 
-        Aimbot.AutoDetect.SelectedMethod = selected or Aimbot.Settings.AutoFallback or "Camera"
+        if selected then
+            Aimbot.AutoDetect.SelectedMethod = selected
+        elseif bestMode and bestCalls > 0 then
+            Aimbot.AutoDetect.SelectedMethod = bestMode
+            warn(string.format(
+                "[AutoScan] No method reached threshold — using best-effort: %s (%d calls)",
+                bestMode, bestCalls))
+        else
+            Aimbot.AutoDetect.SelectedMethod = Aimbot.Settings.AutoFallback or "Camera"
+        end
         Aimbot.AutoDetect.Active = false
         Aimbot.AutoDetect.TestMode = nil
         Aimbot.Internal.LastManageKey = nil
 
         warn("========================================")
-        if selected then
-            warn("[AutoScan] RESULT: Silent Aim mode set to " .. tostring(selected))
-        else
-            warn("[AutoScan] RESULT: No hook detected. Falling back to " .. tostring(Aimbot.AutoDetect.SelectedMethod))
-        end
+        warn("[AutoScan] RESULT: Silent Aim mode = " .. tostring(Aimbot.AutoDetect.SelectedMethod))
         warn("========================================")
     end)
 end
@@ -2265,6 +2335,9 @@ local function CancelAutoScan()
     Aimbot.Internal.LastManageKey = nil
 end
 
+--// ---------------------------------------------------------------------------
+--// LoadAimbot
+--// ---------------------------------------------------------------------------
 local function LoadAimbot()
     Track(RunService.RenderStepped:Connect(function()
         if H.ShuttingDown then return end
@@ -2487,6 +2560,7 @@ Aimbot.GetMousePos           = GetMousePos
 Aimbot.PredictPartPosition   = PredictPartPosition
 Aimbot.MoveMouseAbs          = MoveMouseAbs
 Aimbot.WorldToMouseVIM       = WorldToMouseVIM
+Aimbot.PatchShotArgs         = PatchShotArgs
 Aimbot.GetNPCCharacters      = GetNPCCharacters
 Aimbot.GetLockedCharacter    = GetLockedCharacter
 Aimbot.RunAutoScan           = RunAutoScan
@@ -2566,7 +2640,8 @@ local function Diagnose()
                       "IsBacktrackEnabled", "IsModeHooked", "ShouldRedirect",
                       "GetBacktrackGhostTargets", "ResolveOwnerCharacter", "ResolveOwnerPlayer",
                       "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
-                      "DisableDesyncDuringShot", "FireClickNoDesync" }
+                      "DisableDesyncDuringShot", "FireClickNoDesync",
+                      "PatchShotArgs" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
     end
