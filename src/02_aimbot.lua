@@ -1,19 +1,17 @@
 --// AirHub - 02_aimbot.lua
 --// Aimbot: silent aim, prediction, auto-detect, Wallbang, TP Aim, Backtrack + Ghost targeting.
 --//
---// v7 (2026-09-26):
---//   * PatchShotArgs v2 — adaptive Vector3 role detection (direction vs origin
---//     based on relative magnitudes when 2+ Vector3 are present). Recursive
---//     into tables (depth 4). Buffer-safe (skips).
---//   * Hook Health + Watchdog (2s) — re-installs RayNew/Vector3New/RayHook/
---//     Vector3Unit if the game overwrites our hook.
---//   * Mode availability caching (60s TTL) — no more pcall(getrawmetatable)
---//     every frame from ManageHooks.
---//   * AutoScan v2 — INSTANT detection for statically-available modes
---//     (RayNew, RayHook, Vector3Unit, ScreenPointToRay, CFrameHook, Vector3New).
---//     Only dynamic modes (FireServer, GunHandler, Mouse) get timing-based scan.
---//   * Tighter guards in RayNew (mag<0.0001, >50), Vector3New, CFrameHook.
---//   * ShouldPatch() guard in FireServer — skip if aimPos ≈ camPos.
+--// v8 (2026-09-26):
+--//   * NEW "Raycast" mode: hooks workspace:Raycast(origin, dir, params) and patches
+--//     dir to aim at the locked target. Uses strict argument validation
+--//     (Vector3, Vector3, RaycastParams).
+--//   * NEW HitChance setting (0-100): random per-shot skip of argument patching.
+--//     Applies to FireServer, Raycast and RayNew. Modeled on the
+--//     "Universal Silent Aim" CalculateChance() pattern.
+--//   * NEW CycleAutowork(dir) + GetWorkingMethods() — iterate through methods
+--//     that are BOTH enabled (AutoEnabledMethods) AND available (IsModeAvailable).
+--//     Designed for "Next/Prev Autowork" buttons in the UI.
+--//   * Raycast registered in AutoEnabledMethods / AutoPriorityOrder / STATIC_MODES.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -76,6 +74,7 @@ H.Aimbot = {
         NPCNameFilter = "",
         AimbotHz = 120,
         IgnoreGameProcessed = true,
+        HitChance = 100,                 -- [NEW] 0-100 % per-shot patch chance
 
         AutoShoot = {
             Enabled = false,
@@ -85,6 +84,7 @@ H.Aimbot = {
             AutoStop = { Enabled = false, Time = 0.1 },
         },
         AutoEnabledMethods = {
+            Raycast = true,
             RayNew = true, RayHook = true, ScreenPointToRay = true,
             Vector3Unit = true, MouseFull = true, MouseHit = true,
             GunHandler = true, FireServer = true,
@@ -92,6 +92,7 @@ H.Aimbot = {
             CFrameHook = false, Vector3New = false,
         },
         AutoPriorityOrder = {
+            "Raycast",
             "RayNew", "RayHook", "ScreenPointToRay", "Vector3Unit",
             "MouseFull", "MouseHit", "GunHandler", "FireServer",
             "MouseLock", "Mouse", "CFrameHook", "Vector3New",
@@ -115,7 +116,6 @@ H.Aimbot = {
         UseBacktrack     = false,
         BacktrackAimAtGhost = false,
 
-        --// v7 additions
         HookWatchdogInterval = 2.0,
         ModeCacheTTL         = 60.0,
     },
@@ -131,17 +131,11 @@ H.Aimbot = {
         WatchdogAccum = 0,
         ModeCache    = {},
         HookHandlers = {
-            -- set by Setup* functions, used by watchdog
-            RayNew      = nil,
-            RayNewOrig  = nil,
-            V3New       = nil,
-            V3NewOrig   = nil,
-            RayHook     = nil,
-            RayHookOrig = nil,
-            V3Unit      = nil,
-            V3UnitOrig  = nil,
-            SPR         = nil,
-            SPR_Orig    = nil,
+            RayNew      = nil, RayNewOrig  = nil,
+            V3New       = nil, V3NewOrig   = nil,
+            RayHook     = nil, RayHookOrig = nil,
+            V3Unit      = nil, V3UnitOrig  = nil,
+            SPR         = nil, SPR_Orig    = nil,
         },
     },
 
@@ -881,17 +875,18 @@ local function ReportHookCall(mode)
 end
 
 --// ---------------------------------------------------------------------------
+--// HitChance
+--// ---------------------------------------------------------------------------
+local function CalculateChance(percentage)
+    local p = math.floor(tonumber(percentage) or 100)
+    if p >= 100 then return true end
+    if p <= 0 then return false end
+    return math.random(1, 100) <= p
+end
+
+--// ---------------------------------------------------------------------------
 --// PatchShotArgs v2 — adaptive Vector3 role detection + recursion into tables
 --// ---------------------------------------------------------------------------
---// Strategy:
---//   1. Collect all top-level Vector3 args.
---//   2. If we have 2+, order them by magnitude: the smallest is treated as
---//      direction, the largest as origin. Patches each accordingly.
---//   3. If only 1 Vector3: mag≈1 → direction, mag>5 → origin.
---//   4. CFrame args → lookAt(camPos, aimPos).
---//   5. Ray args → Ray.new(camPos, dirUnit).
---//   6. Table args → recurse into them (depth ≤ 4).
---//   7. Buffer args → skipped (no safe way to detect direction inside).
 local function PatchValueRecursive(v, camPos, aimPos, dirUnit, correctCF, depth)
     if depth > 4 then return v, 0 end
     local t = typeof(v)
@@ -932,7 +927,6 @@ local function PatchShotArgs(args, camPos, aimPos)
     local dirUnit = toTarget.Unit
     local correctCF = CFrame.lookAt(camPos2, aimPos)
 
-    --// 1. Collect top-level Vector3 indices and their magnitudes
     local v3Indices = {}
     for i = 1, args.n do
         if typeof(args[i]) == "Vector3" then
@@ -940,27 +934,15 @@ local function PatchShotArgs(args, camPos, aimPos)
         end
     end
 
-    --// 2. Adaptive role assignment when 2+ Vector3 present
     local dirIdx, posIdx
     if #v3Indices >= 2 then
-        -- sort ascending by magnitude
         table.sort(v3Indices, function(a, b) return a.mag < b.mag end)
-        dirIdx = v3Indices[1].idx   -- smallest → direction
-        posIdx = v3Indices[#v3Indices].idx -- largest → origin/position
-
-        -- Sanity: if the largest isn't actually big enough, don't touch it
-        if v3Indices[#v3Indices].mag < 5 then
-            posIdx = nil
-        end
-        -- Sanity: if the smallest isn't direction-like, don't touch it
+        dirIdx = v3Indices[1].idx
+        posIdx = v3Indices[#v3Indices].idx
+        if v3Indices[#v3Indices].mag < 5 then posIdx = nil end
         if math.abs(v3Indices[1].mag - 1) > 0.4 then
-            -- but only if largest is a position-like value
-            if posIdx then
-                dirIdx = nil
-            else
-                dirIdx = nil
-                posIdx = nil
-            end
+            if posIdx then dirIdx = nil
+            else dirIdx = nil posIdx = nil end
         end
     end
 
@@ -976,7 +958,6 @@ local function PatchShotArgs(args, camPos, aimPos)
                 args[i] = aimPos
                 totalPatched = totalPatched + 1
             else
-                --// fallback single-Vector3 heuristic
                 local vm = v.Magnitude
                 if math.abs(vm - 1) < 0.4 then
                     args[i] = dirUnit
@@ -1000,7 +981,6 @@ local function PatchShotArgs(args, camPos, aimPos)
             args[i] = newT
             totalPatched = totalPatched + n
         end
-        -- buffer, string, number, bool, Instance — leave alone
     end
 
     return totalPatched
@@ -1034,6 +1014,18 @@ local function ComputeModeAvailability(mode)
     elseif mode == "RayNew" then
         if type(Ray) ~= "table" or type(Ray.new) ~= "function" then
             return false, "Ray.new unavailable"
+        end
+        return true
+    elseif mode == "Raycast" then
+        -- [NEW] workspace:Raycast must exist and accept 3 args
+        local ws = workspace
+        if type(ws.Raycast) ~= "function" then
+            return false, "workspace.Raycast missing"
+        end
+        local hookf = getExec("hookmetamethod")
+        local getMethod = getExec("getnamecallmethod")
+        if not hookf or not getMethod then
+            return false, "no hookmetamethod"
         end
         return true
     elseif mode == "ScreenPointToRay" then
@@ -1133,6 +1125,55 @@ end
 
 local function InScanFor(mode)
     return Aimbot.AutoDetect.Active and Aimbot.AutoDetect.TestMode == mode
+end
+
+--// ---------------------------------------------------------------------------
+--// Autowork — cycling through working (enabled + available) methods
+--// ---------------------------------------------------------------------------
+local function GetWorkingMethods()
+    local list = {}
+    for _, mode in ipairs(Aimbot.Settings.AutoPriorityOrder or {}) do
+        if Aimbot.Settings.AutoEnabledMethods[mode] ~= false then
+            local ok = IsModeAvailable(mode)
+            if ok then
+                table.insert(list, mode)
+            end
+        end
+    end
+    return list
+end
+
+local function CycleAutowork(direction)
+    direction = tonumber(direction) or 1
+    local list = GetWorkingMethods()
+    if #list == 0 then
+        return nil, list
+    end
+
+    local current = Aimbot.Settings.SilentAimMode
+    if current == "Auto" then
+        current = Aimbot.AutoDetect.SelectedMethod or Aimbot.Settings.AutoFallback or list[1]
+    end
+
+    local pos = 1
+    for i, m in ipairs(list) do
+        if m == current then pos = i; break end
+    end
+
+    pos = pos + direction
+    if pos < 1 then pos = #list end
+    if pos > #list then pos = 1 end
+
+    local newMode = list[pos]
+    Aimbot.Settings.SilentAimMode = newMode
+    Aimbot.Internal.LastManageKey = nil  -- force ManageHooks to reconfigure
+
+    if Aimbot.Internal.HookHandlers then
+        -- tear down hooks that are no longer relevant
+        -- (ManageHooks in next frame will set up the right ones)
+    end
+
+    return newMode, list
 end
 
 --// ---------------------------------------------------------------------------
@@ -1780,7 +1821,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if mode == "GunHandler" or mode == "RayHook" or mode == "RayNew"
        or mode == "MouseHit" or mode == "MouseFull"
        or mode == "Vector3Unit" or mode == "ScreenPointToRay"
-       or mode == "FireServer"
+       or mode == "FireServer" or mode == "Raycast"
        or mode == "CFrameHook" or mode == "Vector3New" then
         FireClickNoDesync(btn, 0.25)
         task.delay(0.15, function()
@@ -1885,6 +1926,9 @@ local function SetupRayNewHook()
                     return RayNewOriginal(origin, direction)
                 end
                 if not ShouldRedirect("RayNew") then
+                    return RayNewOriginal(origin, direction)
+                end
+                if not CalculateChance(Aimbot.Settings.HitChance) then
                     return RayNewOriginal(origin, direction)
                 end
                 local target = Aimbot.LockPartInstance
@@ -2024,7 +2068,7 @@ local function SetupScreenPointToRayHook()
     local ok = pcall(function() cam.ScreenPointToRay = handler end)
     if ok then
         SPR_Active = true
-        Aimbot.Internal.HookHandlers.SPR     = handler
+        Aimbot.Internal.HookHandlers.SPR      = handler
         Aimbot.Internal.HookHandlers.SPR_Orig = old
     end
 end
@@ -2121,7 +2165,7 @@ local function RemoveMouseHook()
 end
 
 --// ---------------------------------------------------------------------------
---// FireServer / InvokeServer SHARED namecall hook
+--// FireServer / InvokeServer / Raycast SHARED namecall hook
 --// ---------------------------------------------------------------------------
 local FS_Active = false
 local FS_Original = nil
@@ -2136,6 +2180,47 @@ local function SetupFireServerHook()
 
     local function handler(self, ...)
         local method = getMethod()
+
+        --// ====================== Raycast ======================
+        if method == "Raycast"
+           and not H.ShuttingDown
+           and not (checkC and checkC())
+           and typeof(self) == "Instance"
+           and self == workspace then
+            if IsModeHooked("Raycast") then
+                if InScanFor("Raycast") then
+                    ReportHookCall("Raycast")
+                    return FS_Original(self, ...)
+                end
+                if ShouldRedirect("Raycast") then
+                    local args = table.pack(...)
+                    -- strict validation: Vector3 origin, Vector3 direction, RaycastParams
+                    if args.n >= 3
+                       and typeof(args[1]) == "Vector3"
+                       and typeof(args[2]) == "Vector3"
+                       and typeof(args[3]) == "RaycastParams" then
+                        if CalculateChance(Aimbot.Settings.HitChance) then
+                            local target = Aimbot.LockPartInstance
+                            if target and IsAlive(target) then
+                                local aimPos = GetMouseSpoof() or PredictPartPosition(target)
+                                local origin = args[1]
+                                local dir = aimPos - origin
+                                local dm = dir.Magnitude
+                                if dm > 0.0001 then
+                                    local origLen = args[2].Magnitude
+                                    if origLen < 0.0001 then origLen = 1000 end
+                                    args[2] = (dir / dm) * origLen
+                                    return FS_Original(self, table.unpack(args, 1, args.n))
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            return FS_Original(self, ...)
+        end
+
+        --// ====================== FireServer / InvokeServer ======================
         local isShot = (method == "FireServer" or method == "InvokeServer")
         if isShot and not H.ShuttingDown and IsModeHooked("FireServer") then
             if not (checkC and checkC()) then
@@ -2152,13 +2237,16 @@ local function SetupFireServerHook()
                     return FS_Original(self, ...)
                 end
 
+                if not CalculateChance(Aimbot.Settings.HitChance) then
+                    return FS_Original(self, ...)
+                end
+
                 local target = Aimbot.LockPartInstance
                 if target and IsAlive(target) then
                     local aimPos = GetMouseSpoof() or PredictPartPosition(target)
                     local cam = workspace.CurrentCamera
                     local camPos = cam and cam.CFrame.Position or GetCheckOrigin()
 
-                    --// Skip patch if aimPos ≈ camPos (would create zero vector)
                     if (aimPos - camPos).Magnitude > 0.1 then
                         local args = table.pack(...)
                         local patched = PatchShotArgs(args, camPos, aimPos)
@@ -2169,6 +2257,7 @@ local function SetupFireServerHook()
                 end
             end
         end
+
         return FS_Original(self, ...)
     end
     if newc then pcall(function() handler = newc(handler) end) end
@@ -2367,14 +2456,11 @@ task.spawn(function()
     end
 end)
 
---// ---------------------------------------------------------------------------
---// Hook watchdog — re-install hooks if game overwrote them
---// ---------------------------------------------------------------------------
+--// Hook watchdog
 local function VerifyAndFixHooks()
     if H.ShuttingDown then return end
     local Hh = Aimbot.Internal.HookHandlers
 
-    -- RayNew
     if RayNewActive and Hh.RayNew then
         local ok, cur = pcall(function() return Ray.new end)
         if ok and cur ~= Hh.RayNew then
@@ -2384,7 +2470,6 @@ local function VerifyAndFixHooks()
         end
     end
 
-    -- Vector3New
     if Vector3NewActive and Hh.V3New then
         local ok, cur = pcall(function() return Vector3.new end)
         if ok and cur ~= Hh.V3New then
@@ -2394,7 +2479,6 @@ local function VerifyAndFixHooks()
         end
     end
 
-    -- RayHook (metatable)
     if RayHookActive and Hh.RayHook and Hh.RayHookOrig then
         local ok, mt = pcall(getrawmetatable, Ray.new(Vector3.zero, Vector3.zero))
         if ok and mt and mt.__index ~= Hh.RayHook then
@@ -2404,7 +2488,6 @@ local function VerifyAndFixHooks()
         end
     end
 
-    -- Vector3Unit (metatable)
     if V3UnitActive and Hh.V3Unit and Hh.V3UnitOrig then
         local ok, mt = pcall(getrawmetatable, Vector3.new(1, 0, 0))
         if ok and mt and mt.__index ~= Hh.V3Unit then
@@ -2414,7 +2497,6 @@ local function VerifyAndFixHooks()
         end
     end
 
-    -- ScreenPointToRay
     if SPR_Active and Hh.SPR then
         local cam = workspace.CurrentCamera
         if cam then
@@ -2441,7 +2523,8 @@ local function ManageHooks()
     desired.Vector3Unit      = want("Vector3Unit")
     desired.ScreenPointToRay = want("ScreenPointToRay")
     desired.Mouse            = want("MouseHit") or want("MouseFull")
-    desired.FireServer       = want("FireServer")
+    -- namecall hook serves FireServer + InvokeServer + Raycast
+    desired.FireServer       = want("FireServer") or want("Raycast")
     desired.CFrameHook       = want("CFrameHook")
     desired.Vector3New       = want("Vector3New")
 
@@ -2470,9 +2553,10 @@ local function ManageHooks()
 end
 
 --// ---------------------------------------------------------------------------
---// AutoScan v2 — instant detection for static-availability modes
+--// AutoScan
 --// ---------------------------------------------------------------------------
 local STATIC_MODES = {
+    Raycast          = true,
     RayNew           = true,
     RayHook          = true,
     Vector3Unit      = true,
@@ -2515,7 +2599,6 @@ local function RunAutoScan()
                     Aimbot.AutoDetect.Results[mode] = { available = false, reason = reason, calls = 0 }
                     warn("[AutoScan] " .. mode .. " -> UNAVAILABLE: " .. tostring(reason))
                 elseif STATIC_MODES[mode] then
-                    --// [v7] instant detection — no timing needed
                     selected = mode
                     Aimbot.AutoDetect.Results[mode] = { available = true, calls = 0, instant = true }
                     warn("[AutoScan] " .. mode .. " -> OK (static availability) -> SELECTED")
@@ -2524,7 +2607,6 @@ local function RunAutoScan()
                     task.wait(0.05)
                     break
                 else
-                    --// dynamic: run timing-based test
                     warn("[AutoScan] Testing " .. mode .. " (" .. tostring(Aimbot.Settings.AutoTestDuration) .. "s)...")
                     Aimbot.AutoDetect.TestMode      = mode
                     Aimbot.AutoDetect.HookCallCount = 0
@@ -2622,7 +2704,6 @@ local function LoadAimbot()
             end
         end
 
-        --// Watchdog — every HookWatchdogInterval seconds
         Aimbot.Internal.WatchdogAccum = (Aimbot.Internal.WatchdogAccum or 0) + dt
         if Aimbot.Internal.WatchdogAccum >= (Aimbot.Settings.HookWatchdogInterval or 2.0) then
             Aimbot.Internal.WatchdogAccum = 0
@@ -2810,6 +2891,9 @@ end))
 
 LoadAimbot()
 
+--// ---------------------------------------------------------------------------
+--// Public exports
+--// ---------------------------------------------------------------------------
 Aimbot.CancelLock            = CancelLock
 Aimbot.RemoveRayHook         = RemoveRayHook
 Aimbot.RemoveRayNewHook      = RemoveRayNewHook
@@ -2830,6 +2914,9 @@ Aimbot.PatchShotArgs         = PatchShotArgs
 Aimbot.PatchValueRecursive   = PatchValueRecursive
 Aimbot.VerifyAndFixHooks     = VerifyAndFixHooks
 Aimbot.InvalidateModeCache   = InvalidateModeCache
+Aimbot.CalculateChance       = CalculateChance
+Aimbot.GetWorkingMethods     = GetWorkingMethods
+Aimbot.CycleAutowork         = CycleAutowork
 Aimbot.GetNPCCharacters      = GetNPCCharacters
 Aimbot.GetLockedCharacter    = GetLockedCharacter
 Aimbot.RunAutoScan           = RunAutoScan
@@ -2852,7 +2939,6 @@ Aimbot.FireClickNoDesync        = FireClickNoDesync
 --// ---------------------------------------------------------------------------
 --// DIAGNOSTICS
 --// ---------------------------------------------------------------------------
-
 local function Check(cond, label, detail)
     local mark = cond and "[OK]  " or "[FAIL]"
     local line = mark .. " " .. label
@@ -2896,7 +2982,7 @@ local function Diagnose()
 
     InvalidateModeCache()
     if Aimbot.IsModeAvailable then
-        local modes = { "RayHook", "RayNew", "Vector3Unit", "ScreenPointToRay",
+        local modes = { "Raycast", "RayHook", "RayNew", "Vector3Unit", "ScreenPointToRay",
                         "MouseHit", "MouseFull", "GunHandler", "FireServer",
                         "MouseLock", "Mouse", "Camera", "CFrameHook", "Vector3New" }
         for _, m in ipairs(modes) do
@@ -2912,7 +2998,8 @@ local function Diagnose()
                       "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
                       "DisableDesyncDuringShot", "FireClickNoDesync",
                       "PatchShotArgs", "PatchValueRecursive",
-                      "VerifyAndFixHooks", "InvalidateModeCache" }
+                      "VerifyAndFixHooks", "InvalidateModeCache",
+                      "CalculateChance", "GetWorkingMethods", "CycleAutowork" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
     end
