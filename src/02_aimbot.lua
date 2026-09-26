@@ -1,12 +1,13 @@
 --// AirHub - 02_aimbot.lua
---// v17 (2026-09-26):
---//   * Raycast patching restricted to a SHOT WINDOW (150ms after FireClick).
---//     Previously EVERY per-frame raycast (LOS / physics / reach checks)
---//     was corrupted, causing the server to reject the shot.
---//   * Additional length filter: only rays with |dir| >= 100 studs are
---//     patched. Short rays (40-50 studs) are reach/LOS checks and are left
---//     untouched.
---//   * Debug logs still active (Settings.Debug = true).
+--// v18 (2026-09-26):
+--//   * FIX: FireServer args now patched even when SilentAimMode == "Raycast".
+--//     v17 gated FireServer patching behind IsModeHooked("FireServer"), but
+--//     the FireServer hook was installed when mode was Raycast too (see
+--//     ManageHooks). Result: local workspace:Raycast was patched, but the
+--//     RemoteEvent:FireServer(...) still sent original mouse direction, so
+--//     the server ran its own raycast and rejected the shot.
+--//   * Raycast patching still restricted to SHOT WINDOW (150ms) and long
+--//     rays (>= RaycastMinLength) to avoid corrupting LOS/physics raycasts.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -2069,9 +2070,9 @@ local function NamecallImpl(self, ...)
     end
 
     --// ====================== Raycast ======================
-    --// [v17] Patch raycasts ONLY during the shot window (0.15s after
-    --// FireClick) AND only long rays (|dir| >= 100 studs). Per-frame LOS /
-    --// physics raycasts (short rays fired all the time) are left untouched.
+    --// [v17] Patch raycasts ONLY during the shot window (150ms after
+    --// FireClick) AND only long rays (|dir| >= RaycastMinLength). Per-frame
+    --// LOS / physics raycasts are left untouched.
     if method == "Raycast"
        and not H.ShuttingDown
        and typeof(self) == "Instance"
@@ -2108,13 +2109,18 @@ local function NamecallImpl(self, ...)
     end
 
     --// ====================== FireServer / InvokeServer ======================
+    --// [v18 FIX] Also patch FireServer when mode is "Raycast" — otherwise
+    --// the RemoteEvent still sends the original mouse direction and the
+    --// server rejects the shot. The FireServer hook is installed whenever
+    --// mode is FireServer OR Raycast (see ManageHooks).
     local isShot = (method == "FireServer" or method == "InvokeServer")
+    local fireServerActive = IsModeHooked("FireServer") or IsModeHooked("Raycast")
     if isShot
        and not H.ShuttingDown
        and typeof(self) == "Instance"
-       and IsModeHooked("FireServer")
+       and fireServerActive
        and not (EXEC.checkcaller and EXEC.checkcaller())
-       and ShouldRedirect("FireServer") then
+       and ShouldRedirect(GetEffectiveMode()) then
         local target = Aimbot.LockPartInstance
         if target and IsAlive(target) then
             local aimPos = GetMouseSpoof() or PredictPartPosition(target)
@@ -2125,7 +2131,8 @@ local function NamecallImpl(self, ...)
                 local args = table.pack(...)
                 local patched = PatchShotArgs(args, camPos, aimPos)
                 if patched > 0 then
-                    DebugHookPrint(string.format("FireServer patched %d args", patched))
+                    DebugHookPrint(string.format("FireServer patched %d args (mode=%s)",
+                        patched, tostring(GetEffectiveMode())))
                     return FS_Original(self, table.unpack(args, 1, args.n))
                 end
             end
