@@ -1,10 +1,12 @@
 --// AirHub - 02_aimbot.lua
---// v16 (2026-09-26):
---//   * FIXED Raycast patch never firing:
---//     `typeof(raycastParams)` returns "Instance", NOT "RaycastParams".
---//     Dropped that check — now only validate args[1] and args[2] as Vector3.
---//   * Re-entrancy guard properly set/reset around the patched call.
---//   * Debug prints on patch.
+--// v17 (2026-09-26):
+--//   * Raycast patching restricted to a SHOT WINDOW (150ms after FireClick).
+--//     Previously EVERY per-frame raycast (LOS / physics / reach checks)
+--//     was corrupted, causing the server to reject the shot.
+--//   * Additional length filter: only rays with |dir| >= 100 studs are
+--//     patched. Short rays (40-50 studs) are reach/LOS checks and are left
+--//     untouched.
+--//   * Debug logs still active (Settings.Debug = true).
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -101,6 +103,13 @@ H.Aimbot = {
 
         HookWatchdogInterval = 2.0,
         ModeCacheTTL         = 60.0,
+
+        --// [v17] Shot window: only patch raycasts fired within this many
+        --// seconds after FireClick. Filters per-frame LOS raycasts.
+        RaycastShotWindow    = 0.15,
+        --// [v17] Minimum |direction| for a raycast to be considered a shot
+        --// ray. Short rays (< 100 studs) are reach/LOS checks → ignored.
+        RaycastMinLength     = 100,
     },
     FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
     FOVCircle   = Drawing.new("Circle"),
@@ -114,6 +123,7 @@ H.Aimbot = {
         WatchdogAccum = 0,
         ModeCache    = {},
         RaycastRedirectActive = false,
+        ShotPendingUntil      = 0,
         HookHandlers = {
             RayNew      = nil, RayNewOrig  = nil,
             V3New       = nil, V3NewOrig   = nil,
@@ -1152,6 +1162,9 @@ end
 
 local function FireClickNoDesync(btn, restoreDelay)
     local restore = DisableDesyncDuringShot()
+    --// [v17] open the shot window: only raycasts fired in the next N ms
+    --// will be patched. Per-frame LOS/physics raycasts are ignored.
+    Aimbot.Internal.ShotPendingUntil = tick() + (Aimbot.Settings.RaycastShotWindow or 0.15)
     FireClick(btn)
     if restore then
         task.delay(restoreDelay or 0.25, restore)
@@ -2056,33 +2069,37 @@ local function NamecallImpl(self, ...)
     end
 
     --// ====================== Raycast ======================
-    --// [v16] args[3] RaycastParams check REMOVED — typeof() returns "Instance"
-    --// for it, so the previous check was always false → patch never fired.
+    --// [v17] Patch raycasts ONLY during the shot window (0.15s after
+    --// FireClick) AND only long rays (|dir| >= 100 studs). Per-frame LOS /
+    --// physics raycasts (short rays fired all the time) are left untouched.
     if method == "Raycast"
        and not H.ShuttingDown
        and typeof(self) == "Instance"
        and self == workspace
        and not (EXEC.checkcaller and EXEC.checkcaller()) then
-        if IsModeHooked("Raycast") and ShouldRedirect("Raycast") then
+        local shotWindowOpen = tick() < (Aimbot.Internal.ShotPendingUntil or 0)
+        if shotWindowOpen
+           and IsModeHooked("Raycast")
+           and ShouldRedirect("Raycast") then
             local args = table.pack(...)
             if args.n >= 2
                and typeof(args[1]) == "Vector3"
                and typeof(args[2]) == "Vector3" then
-                local target = Aimbot.LockPartInstance
-                if target and IsAlive(target) then
-                    local aimPos = PredictPartPosition(target)
-                    local origin = args[1]
-                    local origDir = args[2]
-                    local dm = (aimPos - origin).Magnitude
-                    if dm > 0.0001 then
-                        local dirUnit = (aimPos - origin) / dm
-                        local origLen = origDir.Magnitude
-                        if origLen < 0.0001 then origLen = 1000 end
-                        args[2] = dirUnit * origLen
-                        DebugHookPrint(string.format(
-                            "Raycast patched | origin=(%.1f,%.1f,%.1f) len=%.1f nargs=%d",
-                            origin.X, origin.Y, origin.Z, origLen, args.n))
-                        return FS_Original(self, table.unpack(args, 1, args.n))
+                local origLen = args[2].Magnitude
+                if origLen >= (Aimbot.Settings.RaycastMinLength or 100) then
+                    local target = Aimbot.LockPartInstance
+                    if target and IsAlive(target) then
+                        local aimPos = PredictPartPosition(target)
+                        local origin = args[1]
+                        local dm = (aimPos - origin).Magnitude
+                        if dm > 0.0001 then
+                            local dirUnit = (aimPos - origin) / dm
+                            args[2] = dirUnit * origLen
+                            DebugHookPrint(string.format(
+                                "Raycast patched (shot window) | origin=(%.1f,%.1f,%.1f) len=%.1f nargs=%d",
+                                origin.X, origin.Y, origin.Z, origLen, args.n))
+                            return FS_Original(self, table.unpack(args, 1, args.n))
+                        end
                     end
                 end
             end
