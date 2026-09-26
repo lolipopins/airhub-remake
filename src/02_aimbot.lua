@@ -1,13 +1,14 @@
 --// AirHub - 02_aimbot.lua
---// v18 (2026-09-26):
---//   * FIX: FireServer args now patched even when SilentAimMode == "Raycast".
---//     v17 gated FireServer patching behind IsModeHooked("FireServer"), but
---//     the FireServer hook was installed when mode was Raycast too (see
---//     ManageHooks). Result: local workspace:Raycast was patched, but the
---//     RemoteEvent:FireServer(...) still sent original mouse direction, so
---//     the server ran its own raycast and rejected the shot.
---//   * Raycast patching still restricted to SHOT WINDOW (150ms) and long
---//     rays (>= RaycastMinLength) to avoid corrupting LOS/physics raycasts.
+--// v19 (2026-09-26):
+--//   * Removed "Raycast" SilentAim method entirely (per user request).
+--//     Local workspace:Raycast hooks were unreliable — many games route
+--//     shots through FireServer / Ray.new / ScreenPointToRay, not through
+--//     workspace:Raycast. Default mode is now "FireServer".
+--//   * FireServer arg patching no longer coupled to Raycast mode.
+--//   * Shot window concept removed from namecall (no more Raycast branch).
+--//   * All other hooks (RayNew, RayHook, ScreenPointToRay, Vector3Unit,
+--//     MouseHit/MouseFull, FireServer, CFrameHook, Vector3New, GunHandler)
+--//     remain intact.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -67,7 +68,7 @@ H.Aimbot = {
         LockPart = "Head",
         AimMethod = "Smooth",
         SilentAim = true,
-        SilentAimMode = "Raycast",
+        SilentAimMode = "FireServer",
         IgnoreFOV = false,
         CheckFromPlayerOnTP = true,
         PredictionEnabled = false,
@@ -105,11 +106,8 @@ H.Aimbot = {
         HookWatchdogInterval = 2.0,
         ModeCacheTTL         = 60.0,
 
-        --// [v17] Shot window: only patch raycasts fired within this many
-        --// seconds after FireClick. Filters per-frame LOS raycasts.
+        --// [v19] Kept for backwards compat but unused now that Raycast is gone.
         RaycastShotWindow    = 0.15,
-        --// [v17] Minimum |direction| for a raycast to be considered a shot
-        --// ray. Short rays (< 100 studs) are reach/LOS checks → ignored.
         RaycastMinLength     = 100,
     },
     FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
@@ -968,14 +966,6 @@ local function ComputeModeAvailability(mode)
             return false, "Ray.new unavailable"
         end
         return true
-    elseif mode == "Raycast" then
-        if type(workspace.Raycast) ~= "function" then
-            return false, "workspace.Raycast missing"
-        end
-        if not EXEC.hookmetamethod or not EXEC.getnamecallmethod then
-            return false, "no hookmetamethod"
-        end
-        return true
     elseif mode == "ScreenPointToRay" then
         local cam = workspace.CurrentCamera
         if not cam then return false, "no camera" end
@@ -1058,10 +1048,11 @@ end
 --// ---------------------------------------------------------------------------
 --// Autowork
 --// ---------------------------------------------------------------------------
+--// [v19] "Raycast" removed from ALL_METHODS.
 local ALL_METHODS = {
-    "Raycast",
+    "FireServer",
     "RayNew", "RayHook", "ScreenPointToRay", "Vector3Unit",
-    "MouseFull", "MouseHit", "GunHandler", "FireServer",
+    "MouseFull", "MouseHit", "GunHandler",
     "MouseLock", "Mouse", "CFrameHook", "Vector3New",
 }
 
@@ -1163,9 +1154,6 @@ end
 
 local function FireClickNoDesync(btn, restoreDelay)
     local restore = DisableDesyncDuringShot()
-    --// [v17] open the shot window: only raycasts fired in the next N ms
-    --// will be patched. Per-frame LOS/physics raycasts are ignored.
-    Aimbot.Internal.ShotPendingUntil = tick() + (Aimbot.Settings.RaycastShotWindow or 0.15)
     FireClick(btn)
     if restore then
         task.delay(restoreDelay or 0.25, restore)
@@ -1736,10 +1724,11 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         return
     end
 
+    --// [v19] "Raycast" removed from this branch.
     if mode == "GunHandler" or mode == "RayHook" or mode == "RayNew"
        or mode == "MouseHit" or mode == "MouseFull"
        or mode == "Vector3Unit" or mode == "ScreenPointToRay"
-       or mode == "FireServer" or mode == "Raycast"
+       or mode == "FireServer"
        or mode == "CFrameHook" or mode == "Vector3New" then
         FireClickNoDesync(btn, 0.25)
         DebugPrint("shot fired (hook mode=" .. tostring(mode) .. ")")
@@ -2058,7 +2047,7 @@ local function RemoveMouseHook()
 end
 
 --// ---------------------------------------------------------------------------
---// Namecall hook
+--// Namecall hook  [v19] Raycast branch removed entirely.
 --// ---------------------------------------------------------------------------
 local FS_Active = false
 local FS_Original = nil
@@ -2069,58 +2058,14 @@ local function NamecallImpl(self, ...)
         return FS_Original(self, ...)
     end
 
-    --// ====================== Raycast ======================
-    --// [v17] Patch raycasts ONLY during the shot window (150ms after
-    --// FireClick) AND only long rays (|dir| >= RaycastMinLength). Per-frame
-    --// LOS / physics raycasts are left untouched.
-    if method == "Raycast"
-       and not H.ShuttingDown
-       and typeof(self) == "Instance"
-       and self == workspace
-       and not (EXEC.checkcaller and EXEC.checkcaller()) then
-        local shotWindowOpen = tick() < (Aimbot.Internal.ShotPendingUntil or 0)
-        if shotWindowOpen
-           and IsModeHooked("Raycast")
-           and ShouldRedirect("Raycast") then
-            local args = table.pack(...)
-            if args.n >= 2
-               and typeof(args[1]) == "Vector3"
-               and typeof(args[2]) == "Vector3" then
-                local origLen = args[2].Magnitude
-                if origLen >= (Aimbot.Settings.RaycastMinLength or 100) then
-                    local target = Aimbot.LockPartInstance
-                    if target and IsAlive(target) then
-                        local aimPos = PredictPartPosition(target)
-                        local origin = args[1]
-                        local dm = (aimPos - origin).Magnitude
-                        if dm > 0.0001 then
-                            local dirUnit = (aimPos - origin) / dm
-                            args[2] = dirUnit * origLen
-                            DebugHookPrint(string.format(
-                                "Raycast patched (shot window) | origin=(%.1f,%.1f,%.1f) len=%.1f nargs=%d",
-                                origin.X, origin.Y, origin.Z, origLen, args.n))
-                            return FS_Original(self, table.unpack(args, 1, args.n))
-                        end
-                    end
-                end
-            end
-        end
-        return FS_Original(self, ...)
-    end
-
     --// ====================== FireServer / InvokeServer ======================
-    --// [v18 FIX] Also patch FireServer when mode is "Raycast" — otherwise
-    --// the RemoteEvent still sends the original mouse direction and the
-    --// server rejects the shot. The FireServer hook is installed whenever
-    --// mode is FireServer OR Raycast (see ManageHooks).
     local isShot = (method == "FireServer" or method == "InvokeServer")
-    local fireServerActive = IsModeHooked("FireServer") or IsModeHooked("Raycast")
     if isShot
        and not H.ShuttingDown
        and typeof(self) == "Instance"
-       and fireServerActive
+       and IsModeHooked("FireServer")
        and not (EXEC.checkcaller and EXEC.checkcaller())
-       and ShouldRedirect(GetEffectiveMode()) then
+       and ShouldRedirect("FireServer") then
         local target = Aimbot.LockPartInstance
         if target and IsAlive(target) then
             local aimPos = GetMouseSpoof() or PredictPartPosition(target)
@@ -2131,8 +2076,7 @@ local function NamecallImpl(self, ...)
                 local args = table.pack(...)
                 local patched = PatchShotArgs(args, camPos, aimPos)
                 if patched > 0 then
-                    DebugHookPrint(string.format("FireServer patched %d args (mode=%s)",
-                        patched, tostring(GetEffectiveMode())))
+                    DebugHookPrint(string.format("FireServer patched %d args", patched))
                     return FS_Original(self, table.unpack(args, 1, args.n))
                 end
             end
@@ -2409,7 +2353,8 @@ local function ManageHooks()
     desired.Vector3Unit      = want("Vector3Unit")
     desired.ScreenPointToRay = want("ScreenPointToRay")
     desired.Mouse            = want("MouseHit") or want("MouseFull")
-    desired.FireServer       = want("FireServer") or want("Raycast")
+    --// [v19] No Raycast coupling — FireServer is only installed for FireServer mode.
+    desired.FireServer       = want("FireServer")
     desired.CFrameHook       = want("CFrameHook")
     desired.Vector3New       = want("Vector3New")
 
@@ -2741,7 +2686,8 @@ local function Diagnose()
 
     InvalidateModeCache()
     if Aimbot.IsModeAvailable then
-        local modes = { "Raycast", "RayHook", "RayNew", "Vector3Unit", "ScreenPointToRay",
+        --// [v19] "Raycast" removed from diagnostics.
+        local modes = { "RayHook", "RayNew", "Vector3Unit", "ScreenPointToRay",
                         "MouseHit", "MouseFull", "GunHandler", "FireServer",
                         "MouseLock", "Mouse", "Camera", "CFrameHook", "Vector3New" }
         for _, m in ipairs(modes) do
