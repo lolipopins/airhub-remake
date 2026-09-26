@@ -1,5 +1,6 @@
 --// AirHub - 07a_ui_core.lua
 --// UI library load, window, tabs, Aimbot tab + Wallbang + TP Aim sections.
+--// v19: Removed "Raycast" silent aim mode and Autowork cycler.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
@@ -316,10 +317,9 @@ task.delay(math.random(1, 3), function()
     local teamModes      = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
     local wallCheckModes = { "Fast", "Perfect" }
 
-    -- [v8] Raycast added to top of list, matches the new silent-aim method
+    -- [v19] "Raycast" removed.
     local silentAimModes = {
         "Auto",
-        "Raycast",
         "Camera",
         "Mouse", "MouseLock",
         "MouseHit", "MouseFull",
@@ -455,7 +455,8 @@ task.delay(math.random(1, 3), function()
             if v ~= "Vector3Unit"      and Aimbot.RemoveVector3UnitHook then pcall(Aimbot.RemoveVector3UnitHook) end
             if v ~= "ScreenPointToRay" and Aimbot.RemoveSPRHook         then pcall(Aimbot.RemoveSPRHook)         end
             if v ~= "MouseHit" and v ~= "MouseFull" and Aimbot.RemoveMouseHook then pcall(Aimbot.RemoveMouseHook)   end
-            if v ~= "FireServer" and v ~= "Raycast" and Aimbot.RemoveFireServerHook then pcall(Aimbot.RemoveFireServerHook) end
+            -- [v19] Raycast removed: FireServer hook is kept only when mode is FireServer.
+            if v ~= "FireServer" and Aimbot.RemoveFireServerHook then pcall(Aimbot.RemoveFireServerHook) end
             if v ~= "CFrameHook"       and Aimbot.RemoveCFrameHook      then pcall(Aimbot.RemoveCFrameHook)      end
             if v ~= "Vector3New"       and Aimbot.RemoveVector3NewHook  then pcall(Aimbot.RemoveVector3NewHook)  end
 
@@ -488,31 +489,7 @@ task.delay(math.random(1, 3), function()
         if not okLabel then modeStatusLabel = nil end
     end
 
-    --// [v8] Autowork cyclers replace Run/Cancel AutoScan
-    secD:AddButton({ Name = "Next Autowork", Callback = function()
-        if Aimbot.CycleAutowork then
-            local newMode, list = Aimbot.CycleAutowork(1)
-            if newMode then
-                warn(string.format("[AirHub] Autowork -> %s  (%d working methods)",
-                    tostring(newMode), #list))
-            else
-                warn("[AirHub] No working methods available")
-            end
-            refreshModeLabel()
-        end
-    end })
-    secD:AddButton({ Name = "Previous Autowork", Callback = function()
-        if Aimbot.CycleAutowork then
-            local newMode, list = Aimbot.CycleAutowork(-1)
-            if newMode then
-                warn(string.format("[AirHub] Autowork <- %s  (%d working methods)",
-                    tostring(newMode), #list))
-            else
-                warn("[AirHub] No working methods available")
-            end
-            refreshModeLabel()
-        end
-    end })
+    --// [v19] Autowork buttons removed. Kept only "Run Auto-Scan" if available.
     secD:AddButton({ Name = "Run Auto-Scan", Callback = function()
         if Aimbot.RunAutoScan then
             Aimbot.RunAutoScan()
