@@ -1,6 +1,6 @@
 --// AirHub - 07a_ui_core.lua
 --// UI library load, window, tabs, Aimbot tab + Wallbang + TP Aim sections.
---// v19: Removed "Raycast" silent aim mode and Autowork cycler.
+--// v20: Re-added "Raycast" silent aim mode (Averiias port).
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
@@ -317,13 +317,14 @@ task.delay(math.random(1, 3), function()
     local teamModes      = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
     local wallCheckModes = { "Fast", "Perfect" }
 
-    -- [v19] "Raycast" removed.
+    -- [v20 RAYCAST] "Raycast" re-added (Averiias port).
     local silentAimModes = {
         "Auto",
         "Camera",
         "Mouse", "MouseLock",
         "MouseHit", "MouseFull",
         "RayHook", "RayNew",
+        "Raycast",
         "ScreenPointToRay",
         "Vector3Unit", "Vector3New",
         "FireServer", "GunHandler",
@@ -455,8 +456,10 @@ task.delay(math.random(1, 3), function()
             if v ~= "Vector3Unit"      and Aimbot.RemoveVector3UnitHook then pcall(Aimbot.RemoveVector3UnitHook) end
             if v ~= "ScreenPointToRay" and Aimbot.RemoveSPRHook         then pcall(Aimbot.RemoveSPRHook)         end
             if v ~= "MouseHit" and v ~= "MouseFull" and Aimbot.RemoveMouseHook then pcall(Aimbot.RemoveMouseHook)   end
-            -- [v19] Raycast removed: FireServer hook is kept only when mode is FireServer.
-            if v ~= "FireServer" and Aimbot.RemoveFireServerHook then pcall(Aimbot.RemoveFireServerHook) end
+            -- [v20 RAYCAST] FireServer hook is kept for both FireServer and Raycast modes.
+            if v ~= "FireServer" and v ~= "Raycast" and Aimbot.RemoveFireServerHook then
+                pcall(Aimbot.RemoveFireServerHook)
+            end
             if v ~= "CFrameHook"       and Aimbot.RemoveCFrameHook      then pcall(Aimbot.RemoveCFrameHook)      end
             if v ~= "Vector3New"       and Aimbot.RemoveVector3NewHook  then pcall(Aimbot.RemoveVector3NewHook)  end
 
@@ -489,7 +492,6 @@ task.delay(math.random(1, 3), function()
         if not okLabel then modeStatusLabel = nil end
     end
 
-    --// [v19] Autowork buttons removed. Kept only "Run Auto-Scan" if available.
     secD:AddButton({ Name = "Run Auto-Scan", Callback = function()
         if Aimbot.RunAutoScan then
             Aimbot.RunAutoScan()
