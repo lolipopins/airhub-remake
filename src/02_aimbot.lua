@@ -95,7 +95,7 @@ H.Aimbot = {
         HookWatchdogInterval = 2.0,
         ModeCacheTTL         = 60.0,
 
-        --// [v19] Kept for backwards compat but unused now that Raycast is gone.
+        --// [v20 RAYCAST] Raycast mode re-added (ported from Averiias silent aim).
         RaycastShotWindow    = 0.15,
         RaycastMinLength     = 100,
     },
@@ -987,6 +987,16 @@ local function ComputeModeAvailability(mode)
             return false, "no hookmetamethod"
         end
         return true
+    --// [v20 RAYCAST] Raycast mode availability check
+    elseif mode == "Raycast" then
+        if not EXEC.hookmetamethod or not EXEC.getnamecallmethod then
+            return false, "no hookmetamethod"
+        end
+        if type(workspace.Raycast) ~= "function" then
+            return false, "workspace.Raycast missing"
+        end
+        return true
+    --// [/v20 RAYCAST]
     elseif mode == "MouseLock" or mode == "Mouse" then
         if not VirtualInputManager then return false, "no VIM" end
         return true
@@ -1037,13 +1047,14 @@ end
 --// ---------------------------------------------------------------------------
 --// Autowork
 --// ---------------------------------------------------------------------------
---// [v19] "Raycast" removed from ALL_METHODS.
+--// [v20 RAYCAST] "Raycast" re-added to ALL_METHODS.
 local ALL_METHODS = {
-    "FireServer",
+    "FireServer", "Raycast",
     "RayNew", "RayHook", "ScreenPointToRay", "Vector3Unit",
     "MouseFull", "MouseHit", "GunHandler",
     "MouseLock", "Mouse", "CFrameHook", "Vector3New",
 }
+--// [/v20 RAYCAST]
 
 local function GetWorkingMethods()
     local list = {}
@@ -1713,8 +1724,9 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         return
     end
 
-    --// [v19] "Raycast" removed from this branch.
+    --// [v20 RAYCAST] "Raycast" included in the hook-mode branch.
     if mode == "GunHandler" or mode == "RayHook" or mode == "RayNew"
+       or mode == "Raycast"
        or mode == "MouseHit" or mode == "MouseFull"
        or mode == "Vector3Unit" or mode == "ScreenPointToRay"
        or mode == "FireServer"
@@ -2036,7 +2048,7 @@ local function RemoveMouseHook()
 end
 
 --// ---------------------------------------------------------------------------
---// Namecall hook  [v19] Raycast branch removed entirely.
+--// Namecall hook  [v20] Raycast branch re-added.
 --// ---------------------------------------------------------------------------
 local FS_Active = false
 local FS_Original = nil
@@ -2072,6 +2084,38 @@ local function NamecallImpl(self, ...)
         end
     end
 
+    --// [v20 RAYCAST] ====================== Raycast (Averiias port) ======================
+    --// Arguments layout for workspace:Raycast(origin, direction, params):
+    --//   args[1] = origin    (Vector3)
+    --//   args[2] = direction (Vector3)  <-- we redirect this
+    --//   args[3] = params    (RaycastParams)
+    if method == "Raycast"
+       and not H.ShuttingDown
+       and typeof(self) == "Instance"
+       and self == workspace
+       and IsModeHooked("Raycast")
+       and not (EXEC.checkcaller and EXEC.checkcaller())
+       and ShouldRedirect("Raycast") then
+        local target = Aimbot.LockPartInstance
+        if target and IsAlive(target) then
+            local args = table.pack(...)
+            local origin = args[1]
+            if typeof(origin) == "Vector3" then
+                local aimPos = GetMouseSpoof() or PredictPartPosition(target)
+                local dir = aimPos - origin
+                local dm = dir.Magnitude
+                if dm > 0.001 then
+                    -- Averiias uses (Position - Origin).Unit * 1000; we keep the
+                    -- same behaviour but extend if the target is farther away.
+                    args[2] = dir.Unit * math.max(1000, dm + 50)
+                    DebugHookPrint("Raycast redirected to target")
+                    return FS_Original(self, table.unpack(args, 1, args.n))
+                end
+            end
+        end
+    end
+    --// [/v20 RAYCAST]
+
     return FS_Original(self, ...)
 end
 
@@ -2081,10 +2125,6 @@ local function SetupFireServerHook()
     if not hookf then return end
 
     local function safeHandler(self, ...)
-        if Aimbot.Internal.RaycastRedirectActive then
-            return FS_Original(self, ...)
-        end
-
         local r = table.pack(pcall(NamecallImpl, self, ...))
         if not r[1] then
             DebugHookPrint("namecall error: " .. tostring(r[2]))
@@ -2342,8 +2382,8 @@ local function ManageHooks()
     desired.Vector3Unit      = want("Vector3Unit")
     desired.ScreenPointToRay = want("ScreenPointToRay")
     desired.Mouse            = want("MouseHit") or want("MouseFull")
-    --// [v19] No Raycast coupling — FireServer is only installed for FireServer mode.
-    desired.FireServer       = want("FireServer")
+    --// [v20 RAYCAST] FireServer hook also serves Raycast (both are __namecall).
+    desired.FireServer       = want("FireServer") or want("Raycast")
     desired.CFrameHook       = want("CFrameHook")
     desired.Vector3New       = want("Vector3New")
 
@@ -2675,9 +2715,9 @@ local function Diagnose()
 
     InvalidateModeCache()
     if Aimbot.IsModeAvailable then
-        --// [v19] "Raycast" removed from diagnostics.
+        --// [v20 RAYCAST] "Raycast" re-added to diagnostics.
         local modes = { "RayHook", "RayNew", "Vector3Unit", "ScreenPointToRay",
-                        "MouseHit", "MouseFull", "GunHandler", "FireServer",
+                        "MouseHit", "MouseFull", "GunHandler", "FireServer", "Raycast",
                         "MouseLock", "Mouse", "Camera", "CFrameHook", "Vector3New" }
         for _, m in ipairs(modes) do
             local ok, reason = Aimbot.IsModeAvailable(m)
