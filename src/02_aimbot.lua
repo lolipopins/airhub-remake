@@ -94,10 +94,6 @@ H.Aimbot = {
 
         HookWatchdogInterval = 2.0,
         ModeCacheTTL         = 60.0,
-
-        --// [v20 RAYCAST] Raycast mode re-added (ported from Averiias silent aim).
-        RaycastShotWindow    = 0.15,
-        RaycastMinLength     = 100,
     },
     FOVSettings = { Enabled = true, Visible = true, Amount = 90 },
     FOVCircle   = Drawing.new("Circle"),
@@ -110,10 +106,6 @@ H.Aimbot = {
         LockedGhost  = nil,
         WatchdogAccum = 0,
         ModeCache    = {},
-        --// [v20 RAYCAST] Re-entry guard + shot window + throttled debug.
-        RaycastRedirectActive = false,
-        ShotPendingUntil      = 0,
-        _lastRayPrint         = 0,
         HookHandlers = {
             RayNew      = nil, RayNewOrig  = nil,
             V3New       = nil, V3NewOrig   = nil,
@@ -385,8 +377,6 @@ end
 
 local function IsPointVisible(origin, pt, params)
     if (pt - origin).Magnitude < 0.001 then return true end
-    --// [v20 RAYCAST] Guard: while redirecting, treat as visible to avoid re-entry.
-    if Aimbot.Internal.RaycastRedirectActive then return true end
     return workspace:Raycast(origin, pt - origin, params) == nil
 end
 
@@ -991,16 +981,6 @@ local function ComputeModeAvailability(mode)
             return false, "no hookmetamethod"
         end
         return true
-    --// [v20 RAYCAST] Raycast mode availability check
-    elseif mode == "Raycast" then
-        if not EXEC.hookmetamethod or not EXEC.getnamecallmethod then
-            return false, "no hookmetamethod"
-        end
-        if type(workspace.Raycast) ~= "function" then
-            return false, "workspace.Raycast missing"
-        end
-        return true
-    --// [/v20 RAYCAST]
     elseif mode == "MouseLock" or mode == "Mouse" then
         if not VirtualInputManager then return false, "no VIM" end
         return true
@@ -1051,14 +1031,12 @@ end
 --// ---------------------------------------------------------------------------
 --// Autowork
 --// ---------------------------------------------------------------------------
---// [v20 RAYCAST] "Raycast" re-added to ALL_METHODS.
 local ALL_METHODS = {
-    "FireServer", "Raycast",
+    "FireServer",
     "RayNew", "RayHook", "ScreenPointToRay", "Vector3Unit",
     "MouseFull", "MouseHit", "GunHandler",
     "MouseLock", "Mouse", "CFrameHook", "Vector3New",
 }
---// [/v20 RAYCAST]
 
 local function GetWorkingMethods()
     local list = {}
@@ -1150,11 +1128,6 @@ local function TeleportToTarget(targetPart)
 end
 
 local function FireClick(btn)
-    --// [v20 RAYCAST FIX] Open a short window during which Raycast redirect
-    --// is allowed. This prevents hijacking the game's Projectile module
-    --// Raycasts (which would throw "argument #1 expects a string").
-    Aimbot.Internal.ShotPendingUntil = tick() + 0.15
-
     local mousePos = UserInputService:GetMouseLocation()
     VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
     task.wait(0.001)
@@ -1733,9 +1706,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         return
     end
 
-    --// [v20 RAYCAST] "Raycast" included in the hook-mode branch.
     if mode == "GunHandler" or mode == "RayHook" or mode == "RayNew"
-       or mode == "Raycast"
        or mode == "MouseHit" or mode == "MouseFull"
        or mode == "Vector3Unit" or mode == "ScreenPointToRay"
        or mode == "FireServer"
@@ -2057,24 +2028,17 @@ local function RemoveMouseHook()
 end
 
 --// ---------------------------------------------------------------------------
---// Namecall hook  [v20] Raycast branch + shot-window guard.
+--// Namecall hook
 --// ---------------------------------------------------------------------------
 local FS_Active = false
 local FS_Original = nil
 
 local function NamecallImpl(self, ...)
-    --// Absolute top-level re-entry guard: if we're already inside a redirect
-    --// (our own visibility checks call workspace:Raycast), bail immediately.
-    if Aimbot.Internal.RaycastRedirectActive then
-        return FS_Original(self, ...)
-    end
-
     local method = EXEC.getnamecallmethod and EXEC.getnamecallmethod()
     if type(method) ~= "string" then
         return FS_Original(self, ...)
     end
 
-    --// ====================== FireServer / InvokeServer ======================
     local isShot = (method == "FireServer" or method == "InvokeServer")
     if isShot
        and not H.ShuttingDown
@@ -2093,54 +2057,6 @@ local function NamecallImpl(self, ...)
                 local patched = PatchShotArgs(args, camPos, aimPos)
                 if patched > 0 then
                     DebugHookPrint(string.format("FireServer patched %d args", patched))
-                    return FS_Original(self, table.unpack(args, 1, args.n))
-                end
-            end
-        end
-    end
-
-    --// ====================== Raycast (Averiias port) ======================
-    --// CRITICAL: only redirect Raycast DURING OUR SHOT WINDOW.
-    --// Otherwise the game's Projectile module Raycasts get hijacked, which
-    --// corrupts its internal state and throws "argument #1 expects a string".
-    if method == "Raycast"
-       and not H.ShuttingDown
-       and Aimbot.Internal.ShotPendingUntil
-       and tick() < Aimbot.Internal.ShotPendingUntil
-       and typeof(self) == "Instance"
-       and self == workspace
-       and IsModeHooked("Raycast")
-       and not (EXEC.checkcaller and EXEC.checkcaller())
-       and ShouldRedirect("Raycast") then
-
-        local target = Aimbot.LockPartInstance
-        if target and IsAlive(target) then
-            local args = table.pack(...)
-            if args.n >= 2
-               and typeof(args[1]) == "Vector3"
-               and typeof(args[2]) == "Vector3" then
-
-                Aimbot.Internal.RaycastRedirectActive = true
-                local aimPos = PredictPartPosition(target)
-                Aimbot.Internal.RaycastRedirectActive = false
-
-                local origin = args[1]
-                local dir = aimPos - origin
-                local dm = dir.Magnitude
-                if dm > 0.001 then
-                    local origMag = args[2].Magnitude
-                    local range = math.max(1000, dm + 50)
-                    if origMag > 100 then range = origMag end
-                    args[2] = dir.Unit * range
-
-                    if Aimbot.Settings.Debug then
-                        local now = tick()
-                        if now - (Aimbot.Internal._lastRayPrint or 0) > 0.5 then
-                            Aimbot.Internal._lastRayPrint = now
-                            DebugHookPrint("Raycast redirected to target")
-                        end
-                    end
-
                     return FS_Original(self, table.unpack(args, 1, args.n))
                 end
             end
@@ -2419,8 +2335,7 @@ local function ManageHooks()
     desired.Vector3Unit      = want("Vector3Unit")
     desired.ScreenPointToRay = want("ScreenPointToRay")
     desired.Mouse            = want("MouseHit") or want("MouseFull")
-    --// [v20 RAYCAST] FireServer hook also serves Raycast (both are __namecall).
-    desired.FireServer       = want("FireServer") or want("Raycast")
+    desired.FireServer       = want("FireServer")
     desired.CFrameHook       = want("CFrameHook")
     desired.Vector3New       = want("Vector3New")
 
@@ -2752,9 +2667,8 @@ local function Diagnose()
 
     InvalidateModeCache()
     if Aimbot.IsModeAvailable then
-        --// [v20 RAYCAST] "Raycast" re-added to diagnostics.
         local modes = { "RayHook", "RayNew", "Vector3Unit", "ScreenPointToRay",
-                        "MouseHit", "MouseFull", "GunHandler", "FireServer", "Raycast",
+                        "MouseHit", "MouseFull", "GunHandler", "FireServer",
                         "MouseLock", "Mouse", "Camera", "CFrameHook", "Vector3New" }
         for _, m in ipairs(modes) do
             local ok, reason = Aimbot.IsModeAvailable(m)
