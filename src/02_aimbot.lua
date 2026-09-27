@@ -110,7 +110,9 @@ H.Aimbot = {
         LockedGhost  = nil,
         WatchdogAccum = 0,
         ModeCache    = {},
+        --// [v20 RAYCAST] Re-entry guard + throttled debug timestamp.
         RaycastRedirectActive = false,
+        _lastRayPrint = 0,
         ShotPendingUntil      = 0,
         HookHandlers = {
             RayNew      = nil, RayNewOrig  = nil,
@@ -383,6 +385,8 @@ end
 
 local function IsPointVisible(origin, pt, params)
     if (pt - origin).Magnitude < 0.001 then return true end
+    --// [v20 RAYCAST] Guard: while redirecting, treat as visible to avoid re-entry.
+    if Aimbot.Internal.RaycastRedirectActive then return true end
     return workspace:Raycast(origin, pt - origin, params) == nil
 end
 
@@ -2048,7 +2052,7 @@ local function RemoveMouseHook()
 end
 
 --// ---------------------------------------------------------------------------
---// Namecall hook  [v20] Raycast branch re-added.
+--// Namecall hook  [v20] Raycast branch re-added + re-entry guard.
 --// ---------------------------------------------------------------------------
 local FS_Active = false
 local FS_Original = nil
@@ -2085,30 +2089,53 @@ local function NamecallImpl(self, ...)
     end
 
     --// [v20 RAYCAST] ====================== Raycast (Averiias port) ======================
-    --// Arguments layout for workspace:Raycast(origin, direction, params):
-    --//   args[1] = origin    (Vector3)
-    --//   args[2] = direction (Vector3)  <-- we redirect this
-    --//   args[3] = params    (RaycastParams)
+    --// Guard against re-entry: our own visibility / wall checks call
+    --// workspace:Raycast internally, which would loop back into this handler
+    --// and cause a stack overflow. The flag below is raised while we're
+    --// inside the redirect path or while our own checks are running.
     if method == "Raycast"
        and not H.ShuttingDown
+       and not Aimbot.Internal.RaycastRedirectActive
        and typeof(self) == "Instance"
        and self == workspace
        and IsModeHooked("Raycast")
        and not (EXEC.checkcaller and EXEC.checkcaller())
        and ShouldRedirect("Raycast") then
+
         local target = Aimbot.LockPartInstance
         if target and IsAlive(target) then
             local args = table.pack(...)
             local origin = args[1]
+
             if typeof(origin) == "Vector3" then
-                local aimPos = GetMouseSpoof() or PredictPartPosition(target)
+                -- Raise re-entry guard BEFORE anything that might raycast.
+                Aimbot.Internal.RaycastRedirectActive = true
+
+                -- PredictPartPosition is raycast-free; GetMouseSpoof() is NOT
+                -- (it calls GetVisiblePointOnPart -> workspace:Raycast), so we
+                -- deliberately avoid it here.
+                local aimPos = PredictPartPosition(target)
+
+                Aimbot.Internal.RaycastRedirectActive = false
+
                 local dir = aimPos - origin
                 local dm = dir.Magnitude
                 if dm > 0.001 then
-                    -- Averiias uses (Position - Origin).Unit * 1000; we keep the
-                    -- same behaviour but extend if the target is farther away.
-                    args[2] = dir.Unit * math.max(1000, dm + 50)
-                    DebugHookPrint("Raycast redirected to target")
+                    local origDir = args[2]
+                    local origMag = (typeof(origDir) == "Vector3") and origDir.Magnitude or 0
+                    local range = math.max(1000, dm + 50)
+                    if origMag > 100 then range = origMag end
+                    args[2] = dir.Unit * range
+
+                    -- Throttle debug print: max once per 0.5s to avoid spam.
+                    if Aimbot.Settings.Debug then
+                        local now = tick()
+                        if now - (Aimbot.Internal._lastRayPrint or 0) > 0.5 then
+                            Aimbot.Internal._lastRayPrint = now
+                            DebugHookPrint("Raycast redirected to target")
+                        end
+                    end
+
                     return FS_Original(self, table.unpack(args, 1, args.n))
                 end
             end
