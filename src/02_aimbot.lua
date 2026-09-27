@@ -110,10 +110,10 @@ H.Aimbot = {
         LockedGhost  = nil,
         WatchdogAccum = 0,
         ModeCache    = {},
-        --// [v20 RAYCAST] Re-entry guard + throttled debug timestamp.
+        --// [v20 RAYCAST] Re-entry guard + shot window + throttled debug.
         RaycastRedirectActive = false,
-        _lastRayPrint = 0,
         ShotPendingUntil      = 0,
+        _lastRayPrint         = 0,
         HookHandlers = {
             RayNew      = nil, RayNewOrig  = nil,
             V3New       = nil, V3NewOrig   = nil,
@@ -1150,6 +1150,11 @@ local function TeleportToTarget(targetPart)
 end
 
 local function FireClick(btn)
+    --// [v20 RAYCAST FIX] Open a short window during which Raycast redirect
+    --// is allowed. This prevents hijacking the game's Projectile module
+    --// Raycasts (which would throw "argument #1 expects a string").
+    Aimbot.Internal.ShotPendingUntil = tick() + 0.15
+
     local mousePos = UserInputService:GetMouseLocation()
     VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
     task.wait(0.001)
@@ -2052,12 +2057,18 @@ local function RemoveMouseHook()
 end
 
 --// ---------------------------------------------------------------------------
---// Namecall hook  [v20] Raycast branch re-added + re-entry guard.
+--// Namecall hook  [v20] Raycast branch + shot-window guard.
 --// ---------------------------------------------------------------------------
 local FS_Active = false
 local FS_Original = nil
 
 local function NamecallImpl(self, ...)
+    --// Absolute top-level re-entry guard: if we're already inside a redirect
+    --// (our own visibility checks call workspace:Raycast), bail immediately.
+    if Aimbot.Internal.RaycastRedirectActive then
+        return FS_Original(self, ...)
+    end
+
     local method = EXEC.getnamecallmethod and EXEC.getnamecallmethod()
     if type(method) ~= "string" then
         return FS_Original(self, ...)
@@ -2088,14 +2099,14 @@ local function NamecallImpl(self, ...)
         end
     end
 
-    --// [v20 RAYCAST] ====================== Raycast (Averiias port) ======================
-    --// Guard against re-entry: our own visibility / wall checks call
-    --// workspace:Raycast internally, which would loop back into this handler
-    --// and cause a stack overflow. The flag below is raised while we're
-    --// inside the redirect path or while our own checks are running.
+    --// ====================== Raycast (Averiias port) ======================
+    --// CRITICAL: only redirect Raycast DURING OUR SHOT WINDOW.
+    --// Otherwise the game's Projectile module Raycasts get hijacked, which
+    --// corrupts its internal state and throws "argument #1 expects a string".
     if method == "Raycast"
        and not H.ShuttingDown
-       and not Aimbot.Internal.RaycastRedirectActive
+       and Aimbot.Internal.ShotPendingUntil
+       and tick() < Aimbot.Internal.ShotPendingUntil
        and typeof(self) == "Instance"
        and self == workspace
        and IsModeHooked("Raycast")
@@ -2105,29 +2116,23 @@ local function NamecallImpl(self, ...)
         local target = Aimbot.LockPartInstance
         if target and IsAlive(target) then
             local args = table.pack(...)
-            local origin = args[1]
+            if args.n >= 2
+               and typeof(args[1]) == "Vector3"
+               and typeof(args[2]) == "Vector3" then
 
-            if typeof(origin) == "Vector3" then
-                -- Raise re-entry guard BEFORE anything that might raycast.
                 Aimbot.Internal.RaycastRedirectActive = true
-
-                -- PredictPartPosition is raycast-free; GetMouseSpoof() is NOT
-                -- (it calls GetVisiblePointOnPart -> workspace:Raycast), so we
-                -- deliberately avoid it here.
                 local aimPos = PredictPartPosition(target)
-
                 Aimbot.Internal.RaycastRedirectActive = false
 
+                local origin = args[1]
                 local dir = aimPos - origin
                 local dm = dir.Magnitude
                 if dm > 0.001 then
-                    local origDir = args[2]
-                    local origMag = (typeof(origDir) == "Vector3") and origDir.Magnitude or 0
+                    local origMag = args[2].Magnitude
                     local range = math.max(1000, dm + 50)
                     if origMag > 100 then range = origMag end
                     args[2] = dir.Unit * range
 
-                    -- Throttle debug print: max once per 0.5s to avoid spam.
                     if Aimbot.Settings.Debug then
                         local now = tick()
                         if now - (Aimbot.Internal._lastRayPrint or 0) > 0.5 then
@@ -2141,10 +2146,11 @@ local function NamecallImpl(self, ...)
             end
         end
     end
-    --// [/v20 RAYCAST]
 
     return FS_Original(self, ...)
 end
+
+local _lastNamecallErrPrint = 0
 
 local function SetupFireServerHook()
     if FS_Active then return end
@@ -2154,7 +2160,11 @@ local function SetupFireServerHook()
     local function safeHandler(self, ...)
         local r = table.pack(pcall(NamecallImpl, self, ...))
         if not r[1] then
-            DebugHookPrint("namecall error: " .. tostring(r[2]))
+            local now = tick()
+            if now - _lastNamecallErrPrint > 1.0 then
+                _lastNamecallErrPrint = now
+                DebugHookPrint("namecall error: " .. tostring(r[2]))
+            end
             if FS_Original then
                 return FS_Original(self, ...)
             end
