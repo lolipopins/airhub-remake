@@ -1,15 +1,4 @@
 --// AirHub - 02_aimbot.lua
---// v19 (2026-09-26):
---//   * Removed "Raycast" SilentAim method entirely (per user request).
---//     Local workspace:Raycast hooks were unreliable — many games route
---//     shots through FireServer / Ray.new / ScreenPointToRay, not through
---//     workspace:Raycast. Default mode is now "FireServer".
---//   * FireServer arg patching no longer coupled to Raycast mode.
---//   * Shot window concept removed from namecall (no more Raycast branch).
---//   * All other hooks (RayNew, RayHook, ScreenPointToRay, Vector3Unit,
---//     MouseHit/MouseFull, FireServer, CFrameHook, Vector3New, GunHandler)
---//     remain intact.
-
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
     warn("[AirHub] 02_aimbot: core not loaded")
