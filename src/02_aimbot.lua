@@ -112,6 +112,8 @@ H.Aimbot = {
             RayHook     = nil, RayHookOrig = nil,
             V3Unit      = nil, V3UnitOrig  = nil,
             SPR         = nil, SPR_Orig    = nil,
+            Raycast     = nil, RaycastOrig = nil,
+            RaycastWS   = nil, RaycastWSOrig = nil,
         },
     },
 
@@ -949,6 +951,11 @@ local function ComputeModeAvailability(mode)
             return false, "Ray.new unavailable"
         end
         return true
+    elseif mode == "Raycast" then
+        if type(workspace.Raycast) ~= "function" then
+            return false, "workspace.Raycast missing"
+        end
+        return true
     elseif mode == "ScreenPointToRay" then
         local cam = workspace.CurrentCamera
         if not cam then return false, "no camera" end
@@ -1033,7 +1040,7 @@ end
 --// ---------------------------------------------------------------------------
 local ALL_METHODS = {
     "FireServer",
-    "RayNew", "RayHook", "ScreenPointToRay", "Vector3Unit",
+    "RayNew", "RayHook", "Raycast", "ScreenPointToRay", "Vector3Unit",
     "MouseFull", "MouseHit", "GunHandler",
     "MouseLock", "Mouse", "CFrameHook", "Vector3New",
 }
@@ -1707,6 +1714,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     end
 
     if mode == "GunHandler" or mode == "RayHook" or mode == "RayNew"
+       or mode == "Raycast"
        or mode == "MouseHit" or mode == "MouseFull"
        or mode == "Vector3Unit" or mode == "ScreenPointToRay"
        or mode == "FireServer"
@@ -1851,6 +1859,112 @@ local function RemoveRayNewHook()
     RayNewActive = false
     RayNewOriginal = nil
     Aimbot.Internal.HookHandlers.RayNew = nil
+end
+
+--// ---------------------------------------------------------------------------
+--// Raycast hook — works on workspace:Raycast() / workspace:RaycastWorkspace()
+--// (the engine-level hit detection many games rely on)
+--// ---------------------------------------------------------------------------
+local RaycastHookActive  = false
+local RaycastOriginal    = nil
+local RaycastWSActive    = false
+local RaycastWSOriginal  = nil
+
+local function PatchRaycastDir(origin, direction, aimPos)
+    if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3" then
+        return direction
+    end
+    local dir = aimPos - origin
+    local dm  = dir.Magnitude
+    if dm < 0.0001 then return direction end
+
+    local dirUnit = dir / dm
+    local origMag = direction.Magnitude
+
+    -- Keep short rays short but aim them; extend truncated rays so they still reach.
+    if origMag < 0.0001 then
+        return dirUnit
+    elseif origMag < dm then
+        return dirUnit * (dm + 5)
+    else
+        return dirUnit * origMag
+    end
+end
+
+local function SetupRaycastHook()
+    if RaycastHookActive then return end
+    if type(workspace.Raycast) ~= "function" then return end
+
+    local newc   = EXEC.newcclosure
+    local checkC = EXEC.checkcaller
+
+    local oldRaycast = workspace.Raycast
+    RaycastOriginal = oldRaycast
+
+    local function handler(self, origin, direction, params)
+        if not H.ShuttingDown and IsModeHooked("Raycast") then
+            if not (checkC and checkC()) then
+                if ShouldRedirect("Raycast") then
+                    local target = Aimbot.LockPartInstance
+                    if target and IsAlive(target) then
+                        local aimPos = PredictPartPosition(target)
+                        direction = PatchRaycastDir(origin, direction, aimPos)
+                    end
+                end
+            end
+        end
+        return RaycastOriginal(self, origin, direction, params)
+    end
+    if newc then pcall(function() handler = newc(handler) end) end
+
+    local ok = pcall(function() workspace.Raycast = handler end)
+    if not ok then return end
+
+    RaycastHookActive = true
+    Aimbot.Internal.HookHandlers.Raycast     = handler
+    Aimbot.Internal.HookHandlers.RaycastOrig = oldRaycast
+
+    -- Optionally hook the deprecated RaycastWorkspace for legacy games
+    if type(workspace.RaycastWorkspace) == "function" then
+        local oldRW = workspace.RaycastWorkspace
+        RaycastWSOriginal = oldRW
+        local function rwHandler(self, origin, direction, params)
+            if not H.ShuttingDown and IsModeHooked("Raycast") then
+                if not (checkC and checkC()) then
+                    if ShouldRedirect("Raycast") then
+                        local target = Aimbot.LockPartInstance
+                        if target and IsAlive(target) then
+                            local aimPos = PredictPartPosition(target)
+                            direction = PatchRaycastDir(origin, direction, aimPos)
+                        end
+                    end
+                end
+            end
+            return RaycastWSOriginal(self, origin, direction, params)
+        end
+        if newc then pcall(function() rwHandler = newc(rwHandler) end) end
+        local ok2 = pcall(function() workspace.RaycastWorkspace = rwHandler end)
+        if ok2 then
+            RaycastWSActive = true
+            Aimbot.Internal.HookHandlers.RaycastWS     = rwHandler
+            Aimbot.Internal.HookHandlers.RaycastWSOrig = oldRW
+        end
+    end
+end
+
+local function RemoveRaycastHook()
+    if RaycastHookActive and RaycastOriginal then
+        pcall(function() workspace.Raycast = RaycastOriginal end)
+    end
+    if RaycastWSActive and RaycastWSOriginal then
+        pcall(function() workspace.RaycastWorkspace = RaycastWSOriginal end)
+    end
+    RaycastHookActive = false
+    RaycastWSActive   = false
+    RaycastOriginal   = nil
+    RaycastWSOriginal = nil
+    Aimbot.Internal.HookHandlers.Raycast   = nil
+    Aimbot.Internal.HookHandlers.RaycastWS = nil
 end
 
 local V3UnitActive = false
@@ -2283,6 +2397,24 @@ local function VerifyAndFixHooks()
         end
     end
 
+    if RaycastHookActive and Hh.Raycast then
+        local ok, cur = pcall(function() return workspace.Raycast end)
+        if ok and cur ~= Hh.Raycast then
+            warn("[AirHub] Hook watchdog: Raycast was overwritten — reinstalling")
+            RaycastHookActive = false
+            if IsModeHooked("Raycast") then SetupRaycastHook() end
+        end
+    end
+
+    if RaycastWSActive and Hh.RaycastWS then
+        local ok, cur = pcall(function() return workspace.RaycastWorkspace end)
+        if ok and cur ~= Hh.RaycastWS then
+            warn("[AirHub] Hook watchdog: RaycastWorkspace was overwritten — reinstalling")
+            RaycastWSActive = false
+            if IsModeHooked("Raycast") then SetupRaycastHook() end
+        end
+    end
+
     if Vector3NewActive and Hh.V3New then
         local ok, cur = pcall(function() return Vector3.new end)
         if ok and cur ~= Hh.V3New then
@@ -2332,6 +2464,7 @@ local function ManageHooks()
 
     desired.RayHook          = want("RayHook")
     desired.RayNew           = want("RayNew")
+    desired.Raycast          = want("Raycast")
     desired.Vector3Unit      = want("Vector3Unit")
     desired.ScreenPointToRay = want("ScreenPointToRay")
     desired.Mouse            = want("MouseHit") or want("MouseFull")
@@ -2342,6 +2475,7 @@ local function ManageHooks()
     local key = table.concat({
         tostring(desired.RayHook),
         tostring(desired.RayNew),
+        tostring(desired.Raycast),
         tostring(desired.Vector3Unit),
         tostring(desired.ScreenPointToRay),
         tostring(desired.Mouse),
@@ -2355,6 +2489,7 @@ local function ManageHooks()
 
     if desired.RayHook          then SetupRayHook()            else RemoveRayHook()            end
     if desired.RayNew           then SetupRayNewHook()         else RemoveRayNewHook()         end
+    if desired.Raycast          then SetupRaycastHook()        else RemoveRaycastHook()        end
     if desired.Vector3Unit      then SetupVector3UnitHook()    else RemoveVector3UnitHook()    end
     if desired.ScreenPointToRay then SetupScreenPointToRayHook() else RemoveScreenPointToRayHook() end
     if desired.Mouse            then SetupMouseHook()          else RemoveMouseHook()          end
@@ -2584,6 +2719,7 @@ LoadAimbot()
 Aimbot.CancelLock            = CancelLock
 Aimbot.RemoveRayHook         = RemoveRayHook
 Aimbot.RemoveRayNewHook      = RemoveRayNewHook
+Aimbot.RemoveRaycastHook     = RemoveRaycastHook
 Aimbot.RemoveVector3UnitHook = RemoveVector3UnitHook
 Aimbot.RemoveSPRHook         = RemoveScreenPointToRayHook
 Aimbot.RemoveMouseHook       = RemoveMouseHook
@@ -2667,7 +2803,7 @@ local function Diagnose()
 
     InvalidateModeCache()
     if Aimbot.IsModeAvailable then
-        local modes = { "RayHook", "RayNew", "Vector3Unit", "ScreenPointToRay",
+        local modes = { "RayHook", "RayNew", "Raycast", "Vector3Unit", "ScreenPointToRay",
                         "MouseHit", "MouseFull", "GunHandler", "FireServer",
                         "MouseLock", "Mouse", "Camera", "CFrameHook", "Vector3New" }
         for _, m in ipairs(modes) do
@@ -2684,7 +2820,8 @@ local function Diagnose()
                       "DisableDesyncDuringShot", "FireClickNoDesync",
                       "PatchShotArgs", "PatchValueRecursive",
                       "VerifyAndFixHooks", "InvalidateModeCache",
-                      "GetWorkingMethods", "CycleAutowork", "DebugPrint" }
+                      "GetWorkingMethods", "CycleAutowork", "DebugPrint",
+                      "RemoveRaycastHook" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
     end
