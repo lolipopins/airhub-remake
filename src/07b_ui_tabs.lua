@@ -65,12 +65,9 @@ task.spawn(function()
     WallHack.Visuals.SelfESP       = WallHack.Visuals.SelfESP       or { Enabled = false, Chams = { Enabled = false, Mode = "Both", FillColor = Color3.fromRGB(90,140,255), FillTransparency = 0.4, OutlineColor = Color3.fromRGB(255,255,255), OutlineTransparency = 0, AlwaysOnTop = true }, ChinaHat = { Enabled = false, Color = Color3.fromRGB(255,60,60), Material = "Neon", Size = 4, OffsetY = 1.8, Transparency = 0, Rotation = 0 } }
     WallHack.Functions       = WallHack.Functions       or {}
     AntiAim.Settings         = AntiAim.Settings         or { Enabled = false, Mode = "Static", Method = "CFrame", Body = { Reference = "Camera", Yaw = 0, Amount = 15, Speed = 5, IgnoreMoving = false, MoveSpeedThreshold = 0.5 } }
-    AntiAim.Desync           = AntiAim.Desync           or { Settings = { Enabled = false, Mode = "Default", Method = "CFrame", X = 5, Y = 5, Z = 5, Random = false, UpdateInterval = 0.05, OldPosDelayEnabled = true, OldPosDelay = 0.5, VoidDepth = -1000, InPlayerOffset = 2, RefreshOnShot = false, RandomRotate = false, MoverP = 1250, MoverResponsiveness = 50, MoverMaxForce = 1e6 }, Internal = {} }
-    AntiAim.Desync.Settings  = AntiAim.Desync.Settings  or { Enabled = false }
-    AntiAim.Desync.Settings.Method             = AntiAim.Desync.Settings.Method             or "CFrame"
-    AntiAim.Desync.Settings.MoverP             = AntiAim.Desync.Settings.MoverP             or 1250
-    AntiAim.Desync.Settings.MoverResponsiveness = AntiAim.Desync.Settings.MoverResponsiveness or 50
-    AntiAim.Desync.Settings.MoverMaxForce      = AntiAim.Desync.Settings.MoverMaxForce      or 1e6
+    AntiAim.Desync           = AntiAim.Desync           or { Settings = { Enabled = false, Mode = "Default", Method = "CFrame", X = 5, Y = 5, Z = 5, Random = false, UpdateInterval = 0.05, OldPosDelayEnabled = true, OldPosDelay = 0.5, VoidDepth = -1000, InPlayerOffset = 2, RefreshOnShot = false, RandomRotate = false }, Internal = {} }
+    AntiAim.Desync.Settings  = AntiAim.Desync.Settings  or { Enabled = false, Method = "CFrame" }
+    AntiAim.Desync.Settings.Method = AntiAim.Desync.Settings.Method or "CFrame"
     AntiAim.Functions        = AntiAim.Functions        or {}
     ServerPosition.Settings  = ServerPosition.Settings  or { Enabled = false, RGB = true, Strength = 1, MaxLimb = 6 }
     Fly.Settings             = Fly.Settings             or { Enabled = false, ToggleKey = "F", Toggle = false, Method = "BodyVelocity", Speed = 30, UpSpeed = 20, Smoothness = 0.5, UseKeys = true }
@@ -243,7 +240,7 @@ task.spawn(function()
     local refModes    = { "Camera", "Movement", "Player" }
     local aaMethods   = { "CFrame", "BodyGyro", "Motor6D", "AlignOrientation", "AngularVelocity" }
     local desyncModes = { "Default", "OldPosition", "Void", "InPlayer" }
-    local desyncMethods = { "CFrame", "Velocity", "AssemblyLinearVelocity", "BodyVelocity", "LinearVelocity", "AlignPosition" }
+    local desyncMethods = { "CFrame", "Position", "Velocity", "Motor6D", "HipHeight", "Network" }
 
     local aaMain = AntiTab:CreateSection({ Name = "Body (Server)" })
     aaMain:AddToggle({ Name = "Enabled", Value = AntiAim.Settings.Enabled,
@@ -283,27 +280,11 @@ task.spawn(function()
             AntiAim.Desync.Settings.Mode = v
             if AntiAim.Desync.Settings.Enabled then StopDesync(); task.wait(0.05); StartDesync() end
         end })
-
-    desyncSec:AddDropdown({ Name = "Method (physics)",
-        Value = AntiAim.Desync.Settings.Method or "CFrame", List = desyncMethods,
+    desyncSec:AddDropdown({ Name = "Method", Value = AntiAim.Desync.Settings.Method or "CFrame", List = desyncMethods,
         Callback = function(v)
             AntiAim.Desync.Settings.Method = v
             if AntiAim.Desync.Settings.Enabled then StopDesync(); task.wait(0.05); StartDesync() end
         end })
-
-    desyncSec:AddSlider({ Name = "Mover Max Force",
-        Value = AntiAim.Desync.Settings.MoverMaxForce or 1e6,
-        Min = 1000, Max = 1e8, Decimals = 0,
-        Callback = function(v) AntiAim.Desync.Settings.MoverMaxForce = v end })
-    desyncSec:AddSlider({ Name = "Mover P (BodyVelocity)",
-        Value = AntiAim.Desync.Settings.MoverP or 1250,
-        Min = 100, Max = 50000, Decimals = 0,
-        Callback = function(v) AntiAim.Desync.Settings.MoverP = v end })
-    desyncSec:AddSlider({ Name = "Mover Responsiveness (Align)",
-        Value = AntiAim.Desync.Settings.MoverResponsiveness or 50,
-        Min = 5, Max = 200,
-        Callback = function(v) AntiAim.Desync.Settings.MoverResponsiveness = v end })
-
     desyncSec:AddToggle({ Name = "Random Rotate (pitch/yaw/roll)", Value = AntiAim.Desync.Settings.RandomRotate or false,
         Callback = function(v) AntiAim.Desync.Settings.RandomRotate = v end })
     desyncSec:AddTextbox({ Name = "X", Value = tostring(AntiAim.Desync.Settings.X or 5),
