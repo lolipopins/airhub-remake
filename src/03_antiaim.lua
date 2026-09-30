@@ -2,6 +2,8 @@
 --// AirHub — 03_antiaim.lua
 --// Anti-Aim (body) + Desync (client-side).
 --// Desync modes: Default / OldPosition / Void / InPlayer
+--// Desync methods: CFrame / Velocity / AssemblyLinearVelocity / BodyVelocity
+--//                 / LinearVelocity / AlignPosition
 --// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 03_antiaim: core not loaded") return end
@@ -32,6 +34,7 @@ H.AntiAim = {
         Settings = {
             Enabled            = false,
             Mode               = "Default",
+            Method             = "CFrame",     -- <<< НОВОЕ
             X                  = 5,
             Y                  = 5,
             Z                  = 5,
@@ -43,6 +46,9 @@ H.AntiAim = {
             InPlayerOffset     = 2,
             RefreshOnShot      = false,
             RandomRotate       = false,
+            MoverP              = 1250,        -- P для BodyVelocity
+            MoverResponsiveness = 50,          -- для AlignPosition
+            MoverMaxForce       = 1e6,         -- универсальный максимум силы
         },
         Internal = {
             Connection       = nil,
@@ -60,6 +66,10 @@ H.AntiAim = {
             RotPitch         = 0,
             RotYaw           = 0,
             RotRoll          = 0,
+            -- НОВОЕ: держатели физических муверов
+            Mover            = nil,   -- BodyVelocity / LinearVelocity / AlignPosition
+            MoverAttachment  = nil,   -- Attachment для AlignPosition
+            ActiveMethod     = nil,   -- чтобы знать, что именно чистить
         },
     },
     Internal = {
@@ -144,6 +154,142 @@ local function GetNearestPlayerHRP(myPos)
 end
 
 --// ---------------------------------------------------------------------------
+--// Desync — физические муверы
+--// ---------------------------------------------------------------------------
+local DesyncInternal = AntiAim.Desync.Internal
+
+local function CleanupMover()
+    if DesyncInternal.Mover then
+        pcall(function() DesyncInternal.Mover:Destroy() end)
+        DesyncInternal.Mover = nil
+    end
+    if DesyncInternal.MoverAttachment then
+        pcall(function() DesyncInternal.MoverAttachment:Destroy() end)
+        DesyncInternal.MoverAttachment = nil
+    end
+    DesyncInternal.ActiveMethod = nil
+end
+
+-- Создаёт (при необходимости) мувер для физических методов.
+-- Возвращает instance или nil.
+local function EnsureMover(hrp, method, settings)
+    if not hrp then return nil end
+    if DesyncInternal.ActiveMethod == method and DesyncInternal.Mover
+       and DesyncInternal.Mover.Parent then
+        return DesyncInternal.Mover
+    end
+    CleanupMover()
+    DesyncInternal.ActiveMethod = method
+
+    if method == "BodyVelocity" then
+        local bv = Instance.new("BodyVelocity")
+        bv.Name        = "AirHubDesyncMover"
+        bv.MaxForce    = Vector3.new(settings.MoverMaxForce,
+                                     settings.MoverMaxForce,
+                                     settings.MoverMaxForce)
+        bv.P           = settings.MoverP
+        bv.Velocity    = Vector3.new(0, 0, 0)
+        bv.Parent      = hrp
+        DesyncInternal.Mover = bv
+        return bv
+    end
+
+    if method == "LinearVelocity" then
+        local lv = Instance.new("LinearVelocity")
+        lv.Name           = "AirHubDesyncMover"
+        lv.MaxForce       = settings.MoverMaxForce
+        lv.RelativeTo     = Enum.ActuatorRelativeTo.World
+        lv.VectorVelocity = Vector3.new(0, 0, 0)
+        lv.Parent         = hrp
+        DesyncInternal.Mover = lv
+        return lv
+    end
+
+    if method == "AlignPosition" then
+        local att = Instance.new("Attachment")
+        att.Name    = "AirHubDesyncAtt"
+        att.Parent  = hrp
+        DesyncInternal.MoverAttachment = att
+
+        local ap = Instance.new("AlignPosition")
+        ap.Name             = "AirHubDesyncMover"
+        ap.Mode             = Enum.PositionAlignmentMode.OneAttachment
+        ap.Attachment0      = att
+        ap.MaxForce         = settings.MoverMaxForce
+        ap.Responsiveness   = settings.MoverResponsiveness
+        ap.ApplyAtCenterOfMass = true
+        ap.Position         = hrp.Position
+        ap.Parent           = hrp
+        DesyncInternal.Mover = ap
+        return ap
+    end
+
+    return nil
+end
+
+-- Применяет целевую позицию выбранным методом.
+local function ApplyDesyncPosition(hrp, targetCF, dt, method, settings)
+    if method == "CFrame" then
+        hrp.CFrame = targetCF
+        return
+    end
+
+    local delta = targetCF.Position - hrp.Position
+
+    if method == "Velocity" then
+        if dt > 0 and delta.Magnitude > 0.001 then
+            hrp.Velocity = delta / dt
+        end
+        return
+    end
+
+    if method == "AssemblyLinearVelocity" then
+        if dt > 0 and delta.Magnitude > 0.001 then
+            hrp.AssemblyLinearVelocity = delta / dt
+        end
+        return
+    end
+
+    if method == "BodyVelocity" then
+        local bv = EnsureMover(hrp, method, settings)
+        if bv and dt > 0 then
+            bv.Velocity = delta / dt
+        end
+        return
+    end
+
+    if method == "LinearVelocity" then
+        local lv = EnsureMover(hrp, method, settings)
+        if lv and dt > 0 then
+            lv.VectorVelocity = delta / dt
+        end
+        return
+    end
+
+    if method == "AlignPosition" then
+        local ap = EnsureMover(hrp, method, settings)
+        if ap then
+            ap.Position = targetCF.Position
+        end
+        return
+    end
+end
+
+-- Возвращает физического мувера в нулевое состояние после рендера,
+-- чтобы следующий Heartbeat смог снова задать новое смещение.
+local function NeutralizeMover()
+    local mover = DesyncInternal.Mover
+    if not mover then return end
+    if mover:IsA("BodyVelocity") then
+        mover.Velocity = Vector3.new(0, 0, 0)
+    elseif mover:IsA("LinearVelocity") then
+        mover.VectorVelocity = Vector3.new(0, 0, 0)
+    elseif mover:IsA("AlignPosition") then
+        -- Позицию трогать не надо: на следующем heartbeat она обновится.
+    end
+end
+
+--// ---------------------------------------------------------------------------
 --// Desync
 --// ---------------------------------------------------------------------------
 local function StartDesync()
@@ -183,11 +329,13 @@ local function StartDesync()
         desync.Internal.RealVelocity    = oldvel
         desync.Internal.RealRotVelocity = oldrotvel
 
-        local S = desync.Settings
-        local mode = S.Mode
+        local S        = desync.Settings
+        local mode     = S.Mode
+        local method   = S.Method or "CFrame"
         local interval = tonumber(S.UpdateInterval) or 0.05
         if interval < 0.01 then interval = 0.01 end
 
+        -- какой мировой CFrame использовать как «фейковую» позицию
         local targetCF
 
         if mode == "OldPosition" then
@@ -217,9 +365,9 @@ local function StartDesync()
         elseif mode == "InPlayer" then
             local targetHrp = GetNearestPlayerHRP(oldcf.Position)
             if targetHrp then
-                local offset = tonumber(S.InPlayerOffset) or 0
-                local look = targetHrp.CFrame.LookVector
-                local flatLook = Vector3.new(look.X, 0, look.Z)
+                local offset    = tonumber(S.InPlayerOffset) or 0
+                local look      = targetHrp.CFrame.LookVector
+                local flatLook  = Vector3.new(look.X, 0, look.Z)
                 if flatLook.Magnitude < 0.001 then
                     targetCF = targetHrp.CFrame
                 else
@@ -241,7 +389,7 @@ local function StartDesync()
         if S.RandomRotate then
             desync.Internal.RotAcc = desync.Internal.RotAcc + dt
             if desync.Internal.RotAcc >= interval then
-                desync.Internal.RotAcc = 0
+                desync.Internal.RotAcc  = 0
                 desync.Internal.RotPitch = (math.random() * 2 - 1) * math.pi
                 desync.Internal.RotYaw   = (math.random() * 2 - 1) * math.pi
                 desync.Internal.RotRoll  = (math.random() * 2 - 1) * math.pi
@@ -253,11 +401,15 @@ local function StartDesync()
             )
         end
 
-        hrp.CFrame = targetCF
+        -- применить выбранным методом
+        ApplyDesyncPosition(hrp, targetCF, dt, method, S)
+
+        -- на рендере откатить всё назад, чтобы клиент видел свою настоящую позицию
         RunService:BindToRenderStep(desync.Internal.RenderBindName, 101, function()
             hrp.CFrame      = oldcf
             hrp.Velocity    = oldvel
             hrp.RotVelocity = oldrotvel
+            NeutralizeMover()
             RunService:UnbindFromRenderStep(desync.Internal.RenderBindName)
         end)
     end)
@@ -284,6 +436,8 @@ local function StopDesync()
     end
 
     pcall(function() RunService:UnbindFromRenderStep(desync.Internal.RenderBindName) end)
+
+    CleanupMover()
 
     desync.Internal.SavedCFrame      = nil
     desync.Internal.RealCFrame       = nil
@@ -495,6 +649,7 @@ AntiAim.Functions = {
         AntiAim.Desync.Settings = {
             Enabled = false,
             Mode = "Default",
+            Method = "CFrame",
             X = 5, Y = 5, Z = 5,
             Random = false,
             UpdateInterval = 0.05,
@@ -504,6 +659,9 @@ AntiAim.Functions = {
             InPlayerOffset = 2,
             RefreshOnShot = false,
             RandomRotate = false,
+            MoverP = 1250,
+            MoverResponsiveness = 50,
+            MoverMaxForce = 1e6,
         }
         AntiAim.Internal = {
             BodyLastUpdate = 0, BodyJitterTime = 0, BodyJitterOffset = 0,
@@ -540,6 +698,8 @@ AntiAim.Functions = {
             pcall(function() hrp.CFrame = realCF end)
         end
     end,
+
+    CleanupMover = CleanupMover,
 }
 
 AntiAim.StartDesync    = StartDesync
