@@ -1,5 +1,7 @@
 --// AirHub - 07b_ui_tabs.lua
 --// Visuals, Anti-Aim (Body + Desync), Movement, Settings tabs.
+--// v25: Logging/Sounds are pre-initialized in 02_aimbot; UI just ensures
+--// they exist and aliases H.Sound -> H.Sounds.
 
 local H = getgenv().AirHub
 if not H or not H._UI then warn("[AirHub] 07b: 07a not loaded"); return end
@@ -439,8 +441,12 @@ task.spawn(function()
         Callback = function(v) Noclip.Settings.Enabled = v end })
 
     --// SETTINGS
+    --// v25: Logging/Sounds are pre-initialized in 02_aimbot. We just
+    --// ensure they exist and alias H.Sound -> H.Sounds so toggles below
+    --// write into the same table Util reads from.
     H.Logging = H.Logging or { Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18 }
-    H.Sound = H.Sound or { HitsoundEnabled = false, HitsoundID = 83717596220569, HitsoundVolume = 1, KillsoundEnabled = false, KillsoundID = 83717596220569, KillsoundVolume = 1 }
+    H.Sounds  = H.Sounds  or { HitsoundEnabled = false, HitsoundID = 83717596220569, HitsoundVolume = 1, KillsoundEnabled = false, KillsoundID = 83717596220569, KillsoundVolume = 1 }
+    H.Sound   = H.Sounds
 
     local soundIDs = {
         gamesense  = 83717596220569,
@@ -462,22 +468,22 @@ task.spawn(function()
     logSec:AddSlider({ Name = "Font Size", Value = H.Logging.FontSize,
         Min = 12, Max = 30,
         Callback = function(v) H.Logging.FontSize = v end })
-    logSec:AddToggle({ Name = "Hitsound Enabled", Value = H.Sound.HitsoundEnabled,
-        Callback = function(v) H.Sound.HitsoundEnabled = v end })
+    logSec:AddToggle({ Name = "Hitsound Enabled", Value = H.Sounds.HitsoundEnabled,
+        Callback = function(v) H.Sounds.HitsoundEnabled = v end })
     logSec:AddDropdown({ Name = "Hitsound", Value = "gamesense",
         List = { "gamesense", "neverlose", "crit", "primordial" },
-        Callback = function(v) H.Sound.HitsoundID = soundIDs[v] end })
-    logSec:AddSlider({ Name = "Hitsound Volume", Value = H.Sound.HitsoundVolume,
+        Callback = function(v) H.Sounds.HitsoundID = soundIDs[v] end })
+    logSec:AddSlider({ Name = "Hitsound Volume", Value = H.Sounds.HitsoundVolume,
         Min = 0, Max = 10, Decimals = 1,
-        Callback = function(v) H.Sound.HitsoundVolume = v end })
-    logSec:AddToggle({ Name = "Killsound Enabled", Value = H.Sound.KillsoundEnabled,
-        Callback = function(v) H.Sound.KillsoundEnabled = v end })
+        Callback = function(v) H.Sounds.HitsoundVolume = v end })
+    logSec:AddToggle({ Name = "Killsound Enabled", Value = H.Sounds.KillsoundEnabled,
+        Callback = function(v) H.Sounds.KillsoundEnabled = v end })
     logSec:AddDropdown({ Name = "Killsound", Value = "gamesense",
         List = { "gamesense", "neverlose", "crit", "primordial" },
-        Callback = function(v) H.Sound.KillsoundID = soundIDs[v] end })
-    logSec:AddSlider({ Name = "Killsound Volume", Value = H.Sound.KillsoundVolume,
+        Callback = function(v) H.Sounds.KillsoundID = soundIDs[v] end })
+    logSec:AddSlider({ Name = "Killsound Volume", Value = H.Sounds.KillsoundVolume,
         Min = 0, Max = 10, Decimals = 1,
-        Callback = function(v) H.Sound.KillsoundVolume = v end })
+        Callback = function(v) H.Sounds.KillsoundVolume = v end })
 
     local cfgSec = SettingsTab:CreateSection({ Name = "Configs", Side = "Right" })
     local currentConfigName = "default"
