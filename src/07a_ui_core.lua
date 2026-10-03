@@ -1,6 +1,6 @@
 --// AirHub - 07a_ui_core.lua
---// UI library load, window, tabs, Aimbot tab + Wallbang + TP Aim sections.
---// v20: Re-added "Raycast" silent aim mode (Averiias port).
+--// v21: Silent Aim modes = Camera / Mouse / Raycast / FindPartOnRay*
+--//      / Mouse.Hit/Target (Averiias methods ported).
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
@@ -54,11 +54,8 @@ AutoStrafer    = orTable(AutoStrafer,    "AutoStrafer")
 Noclip         = orTable(Noclip,         "Noclip")
 
 local CancelLock           = orNoop(Aimbot.CancelLock,                "Aimbot.CancelLock")
-local RemoveRayHook        = orNoop(Aimbot.RemoveRayHook,             "Aimbot.RemoveRayHook")
-local RemoveMouseHitHook   = orNoop(Aimbot.RemoveMouseHitHook,        "Aimbot.RemoveMouseHitHook")
-local RemoveGunHandlerHook = orNoop(Aimbot.RemoveGunHandlerHook,      "Aimbot.RemoveGunHandlerHook")
-local RemoveCFrameHook     = orNoop(Aimbot.RemoveCFrameHook,          "Aimbot.RemoveCFrameHook")
-local RemoveVector3NewHook = orNoop(Aimbot.RemoveVector3NewHook,      "Aimbot.RemoveVector3NewHook")
+local RemoveAVHook         = orNoop(Aimbot.RemoveAVHook,              "Aimbot.RemoveAVHook")
+local RemoveMHTProxy       = orNoop(Aimbot.RemoveMHTProxy,            "Aimbot.RemoveMHTProxy")
 local ApplyGlowToAll       = orNoop(WallHack.ApplyGlowToAll,          "WallHack.ApplyGlowToAll")
 local StartServerPosition  = orNoop(ServerPosition.Start,             "ServerPosition.Start")
 local StopServerPosition   = orNoop(ServerPosition.Stop,              "ServerPosition.Stop")
@@ -249,16 +246,8 @@ task.delay(math.random(1, 3), function()
         end)
 
         pcall(function() AS_ReleaseAll() end)
-        pcall(function() RemoveRayHook() end)
-        pcall(function() RemoveMouseHitHook() end)
-        pcall(function() RemoveGunHandlerHook() end)
-        pcall(function() RemoveCFrameHook() end)
-        pcall(function() RemoveVector3NewHook() end)
-        if Aimbot.RemoveRayNewHook      then pcall(Aimbot.RemoveRayNewHook)      end
-        if Aimbot.RemoveVector3UnitHook then pcall(Aimbot.RemoveVector3UnitHook) end
-        if Aimbot.RemoveSPRHook         then pcall(Aimbot.RemoveSPRHook)         end
-        if Aimbot.RemoveFireServerHook  then pcall(Aimbot.RemoveFireServerHook)  end
-        if Aimbot.RemoveMouseHook       then pcall(Aimbot.RemoveMouseHook)       end
+        pcall(function() RemoveAVHook() end)
+        pcall(function() RemoveMHTProxy() end)
         pcall(function() CleanupAntiAim() end)
         pcall(function() game:GetService("RunService"):UnbindFromRenderStep(AA_BIND_NAME) end)
 
@@ -317,18 +306,15 @@ task.delay(math.random(1, 3), function()
     local teamModes      = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
     local wallCheckModes = { "Fast", "Perfect" }
 
-    -- [v20 RAYCAST] "Raycast" re-added (Averiias port).
+    -- v21: only Camera / Mouse from AirHub + Averiias methods.
     local silentAimModes = {
-        "Auto",
         "Camera",
-        "Mouse", "MouseLock",
-        "MouseHit", "MouseFull",
-        "RayHook", "RayNew",
+        "Mouse",
         "Raycast",
-        "ScreenPointToRay",
-        "Vector3Unit", "Vector3New",
-        "FireServer", "GunHandler",
-        "CFrameHook",
+        "FindPartOnRay",
+        "FindPartOnRayWithWhitelist",
+        "FindPartOnRayWithIgnoreList",
+        "Mouse.Hit/Target",
     }
 
     local wallbangModes = {
@@ -433,41 +419,31 @@ task.delay(math.random(1, 3), function()
     local modeStatusLabel = nil
     local function refreshModeLabel()
         if not modeStatusLabel then return end
-        local A = Aimbot.AutoDetect
-        local txt
-        if A and A.Active then
-            txt = "Scanning: " .. tostring(A.TestMode) .. " (" .. tostring(A.HookCallCount) .. ")"
-        elseif A and A.SelectedMethod then
-            txt = "Auto -> " .. tostring(A.SelectedMethod)
-        else
-            txt = "Mode: " .. tostring(AS.SilentAimMode or "Auto")
-        end
+        local txt = "Mode: " .. tostring(AS.SilentAimMode or "Camera")
         pcall(function() modeStatusLabel:SetLabel(txt) end)
     end
 
-    secD:AddDropdown({ Name = "Mode", Value = AS.SilentAimMode or "Auto",
+    secD:AddDropdown({ Name = "Mode", Value = AS.SilentAimMode or "Camera",
         List = silentAimModes,
         Callback = function(v)
             aSet("SilentAimMode", v)
             if Aimbot.Internal then Aimbot.Internal.LastManageKey = nil end
 
-            if v ~= "RayHook"          and Aimbot.RemoveRayHook         then pcall(Aimbot.RemoveRayHook)         end
-            if v ~= "RayNew"           and Aimbot.RemoveRayNewHook      then pcall(Aimbot.RemoveRayNewHook)      end
-            if v ~= "Vector3Unit"      and Aimbot.RemoveVector3UnitHook then pcall(Aimbot.RemoveVector3UnitHook) end
-            if v ~= "ScreenPointToRay" and Aimbot.RemoveSPRHook         then pcall(Aimbot.RemoveSPRHook)         end
-            if v ~= "MouseHit" and v ~= "MouseFull" and Aimbot.RemoveMouseHook then pcall(Aimbot.RemoveMouseHook)   end
-            -- [v20 RAYCAST] FireServer hook is kept for both FireServer and Raycast modes.
-            if v ~= "FireServer" and v ~= "Raycast" and Aimbot.RemoveFireServerHook then
-                pcall(Aimbot.RemoveFireServerHook)
+            -- Turn off hooks that don't belong to the selected mode.
+            local isAVMode = (v == "Raycast"
+                              or v == "FindPartOnRay"
+                              or v == "FindPartOnRayWithWhitelist"
+                              or v == "FindPartOnRayWithIgnoreList")
+            if not isAVMode and Aimbot.RemoveAVHook then
+                pcall(Aimbot.RemoveAVHook)
             end
-            if v ~= "CFrameHook"       and Aimbot.RemoveCFrameHook      then pcall(Aimbot.RemoveCFrameHook)      end
-            if v ~= "Vector3New"       and Aimbot.RemoveVector3NewHook  then pcall(Aimbot.RemoveVector3NewHook)  end
+            if v ~= "Mouse.Hit/Target" and Aimbot.RemoveMHTProxy then
+                pcall(Aimbot.RemoveMHTProxy)
+            end
 
-            if v ~= "Auto" and Aimbot.CancelAutoScan then pcall(Aimbot.CancelAutoScan) end
             refreshModeLabel()
         end })
 
-    --// Use Backtrack — стрельба в ghost-позицию (экспериментально)
     secD:AddToggle({ Name = "Use Backtrack", Value = AS.UseBacktrack or false,
         Callback = function(v)
             aSet("UseBacktrack", v)
@@ -481,23 +457,15 @@ task.delay(math.random(1, 3), function()
             end
         end })
 
-    --// Aim at ghost — если выключено, стреляем в реального игрока (kills работают)
     secD:AddToggle({ Name = "Aim At Ghost (experimental)", Value = AS.BacktrackAimAtGhost or false,
         Callback = function(v) aSet("BacktrackAimAtGhost", v) end })
 
     do
         local okLabel = pcall(function()
-            modeStatusLabel = secD:AddLabel({ Name = "Mode Status", Text = "Mode: " .. tostring(AS.SilentAimMode or "Auto") })
+            modeStatusLabel = secD:AddLabel({ Name = "Mode Status", Text = "Mode: " .. tostring(AS.SilentAimMode or "Camera") })
         end)
         if not okLabel then modeStatusLabel = nil end
     end
-
-    secD:AddButton({ Name = "Run Auto-Scan", Callback = function()
-        if Aimbot.RunAutoScan then
-            Aimbot.RunAutoScan()
-            refreshModeLabel()
-        end
-    end })
 
     task.spawn(function()
         while not H.ShuttingDown do
