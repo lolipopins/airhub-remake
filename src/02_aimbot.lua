@@ -1,7 +1,6 @@
 --// AirHub - 02_aimbot.lua
---// v22: Added "Raycast v2" — highly defensive namecall handler that
---// fixes "argument #1 expects a string, but Vector3 was passed" errors
---// by validating every argument before any patching.
+--// v23: Fixed Luau compile issue (nested `...`), cleaned up AV handler.
+--// Modes: Camera / Mouse / Raycast / Raycast v2 / FindPartOnRay* / Mouse.Hit/Target
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
     warn("[AirHub] 02_aimbot: core not loaded")
@@ -1085,7 +1084,7 @@ local function ScheduleHookRemoval(restoreFn, holdTime)
     end)
 end
 
---// ==== WALLBANG (unchanged) ====
+--// ==== WALLBANG ====
 local function PerformWallbang_RemotePatch(targetPart, btn)
     local hookf, getMethod, newc, checkC =
         EXEC.hookmetamethod, EXEC.getnamecallmethod, EXEC.newcclosure, EXEC.checkcaller
@@ -1634,181 +1633,48 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 end
 
 --// ---------------------------------------------------------------------------
---// AV namecall hook
+--// AV namecall hook (v23 - clean implementation)
 --// ---------------------------------------------------------------------------
 local AV_Active   = false
 local AV_Original = nil
 
---// Safe getter for namecall method (wrapped in pcall because some executors
---// can throw from getnamecallmethod in edge-cases).
-local function SafeGetNamecallMethod()
-    if not EXEC.getnamecallmethod then return nil end
-    local ok, m = pcall(EXEC.getnamecallmethod)
-    if not ok then return nil end
-    if type(m) ~= "string" then return nil end
-    return m
-end
-
---// Safe getter for caller check.
-local function SafeCheckCaller()
-    if not EXEC.checkcaller then return false end
-    local ok, isCaller = pcall(EXEC.checkcaller)
-    if not ok then return false end
-    return isCaller and true or false
-end
-
---// Safely fetch target aim position, with full validation.
-local function SafeGetAimPos()
-    local target = Aimbot.LockPartInstance
-    if not target then return nil end
-    local ok, alive = pcall(IsAlive, target)
-    if not ok or not alive then return nil end
-    local ok2, pos = pcall(PredictPartPosition, target)
-    if not ok2 then return nil end
-    if typeof(pos) ~= "Vector3" then return nil end
-    return pos
-end
-
---// ---- Raycast v1 (existing) ----
---// Pattern: workspace:Raycast(origin:Vector3, direction:Vector3, params?)
---// Only patches arg #2 (direction).
-local function AV_TryPatchRaycast_V1(self, ...)
-    local n = select('#', ...)
-    if n < 2 then return nil end
-
-    local origin    = (select(1, ...))
-    local direction = (select(2, ...))
-
-    if typeof(origin)    ~= "Vector3" then return nil end
-    if typeof(direction) ~= "Vector3" then return nil end
-
-    local aimPos = SafeGetAimPos()
-    if not aimPos then return nil end
-
-    local toTarget = aimPos - origin
-    if toTarget.Magnitude < 0.0001 then return nil end
-    local newDir = toTarget.Unit * 1000
-
-    -- If direction is already ~1000 magnitude, just replace it (avoids edge case).
-    local args = { origin, newDir }
-    for i = 3, n do
-        args[i] = (select(i, ...))
-    end
-    return args, n
-end
-
---// ---- Raycast v2 (super defensive) ----
---// Same pattern as v1, but:
---//   * validates every extracted argument with typeof before touching it
---//   * never mixes `...` with `select` in a way that could propagate bad types
---//   * explicitly rebuilds a fresh arg table of the SAME length
---//   * bails out (returns nil) if anything at all looks off
-local function AV_TryPatchRaycast_V2(self, ...)
-    local n = select('#', ...)
-    -- Raycast requires at least (origin, direction); we refuse to touch 0/1-arg calls.
-    if n < 2 then return nil end
-
-    -- Extract with explicit type checks (typeof can throw on weird userdata in
-    -- some executors, so wrap each extraction in pcall as a last resort).
-    local okA, a1 = pcall(function() return (select(1, ...)) end)
-    if not okA then return nil end
-    if typeof(a1) ~= "Vector3" then return nil end
-
-    local okB, a2 = pcall(function() return (select(2, ...)) end)
-    if not okB then return nil end
-    if typeof(a2) ~= "Vector3" then return nil end
-
-    -- Get aim position safely (this itself can call namecall internally, which
-    -- is fine because self will then be Players, not workspace).
-    local aimPos = SafeGetAimPos()
-    if not aimPos then return nil end
-
-    local toTarget = aimPos - a1
-    local mag = toTarget.Magnitude
-    -- Reject zero / NaN / infinite direction.
-    if not mag or mag ~= mag or mag < 0.0001 or mag == math.huge then
-        return nil
-    end
-
-    local newDir = toTarget.Unit * 1000
-    if typeof(newDir) ~= "Vector3" then return nil end
-
-    -- Rebuild args of exactly the same length; only replace index 2.
-    local args = { a1, newDir }
-    for i = 3, n do
-        local okI, ai = pcall(function() return (select(i, ...)) end)
-        if not okI then return nil end
-        args[i] = ai
-    end
-
-    -- Final sanity: the reconstructed table has the expected length.
-    if #args ~= n then return nil end
-    return args, n
-end
-
---// ---- FindPartOnRay family ----
---// Pattern: workspace:FindPartOnRay*(ray:Ray, ignoreOrWhitelist?, ...)
---// We replace arg #1 with a fresh Ray pointing at the target.
-local function AV_TryPatchFindPartOnRay(self, ...)
-    local n = select('#', ...)
-    if n < 1 then return nil end
-
-    local okR, ray = pcall(function() return (select(1, ...)) end)
-    if not okR then return nil end
-    if typeof(ray) ~= "Ray" then return nil end
-
-    local origin = ray.Origin
-    local direction = ray.Direction
-    if typeof(origin) ~= "Vector3" then return nil end
-    if typeof(direction) ~= "Vector3" then return nil end
-
-    local aimPos = SafeGetAimPos()
-    if not aimPos then return nil end
-
-    local toTarget = aimPos - origin
-    if toTarget.Magnitude < 0.0001 then return nil end
-
-    local newRay
-    do
-        local okNew, r = pcall(Ray.new, origin, toTarget.Unit * 1000)
-        if not okNew or typeof(r) ~= "Ray" then return nil end
-        newRay = r
-    end
-
-    local args = { newRay }
-    for i = 2, n do
-        local okI, ai = pcall(function() return (select(i, ...)) end)
-        if not okI then return nil end
-        args[i] = ai
-    end
-    if #args ~= n then return nil end
-    return args, n
-end
-
---// Dispatcher
+--// Main handler. Everything here MUST be safe — no uncaught errors.
 local function AV_HandleNamecall(self, ...)
-    -- Bail fast if shutting down.
     if H.ShuttingDown then
         return AV_Original(self, ...)
     end
 
-    -- Get method name; bail if unavailable / not a string.
-    local method = SafeGetNamecallMethod()
+    --// 1) Get method name safely.
+    local method
+    if EXEC.getnamecallmethod then
+        local ok, m = pcall(EXEC.getnamecallmethod)
+        if ok and type(m) == "string" then
+            method = m
+        end
+    end
     if not method then
         return AV_Original(self, ...)
     end
 
-    -- Only work on our known methods.
+    --// 2) Only our known methods.
     if not AV_MODE_SET[method] then
         return AV_Original(self, ...)
     end
 
-    -- Caller check first (cheap) — skip our own re-entry.
-    if SafeCheckCaller() then
+    --// 3) Only calls on workspace.
+    if self ~= workspace then
         return AV_Original(self, ...)
     end
 
-    -- Mode must match (Raycast v2 aliases to "Raycast v2", so check both).
+    --// 4) Skip our own calls (checkcaller true).
+    if EXEC.checkcaller then
+        local ok, isCaller = pcall(EXEC.checkcaller)
+        if ok and isCaller then
+            return AV_Original(self, ...)
+        end
+    end
+
+    --// 5) Mode check.
     local mode = Aimbot.Settings.SilentAimMode
     local modeMatches = (mode == method)
         or (method == "Raycast" and mode == "Raycast v2")
@@ -1816,36 +1682,87 @@ local function AV_HandleNamecall(self, ...)
         return AV_Original(self, ...)
     end
 
-    -- Enabled + Redirect check.
-    if not Aimbot.Settings.Enabled or not Aimbot.Settings.SilentAim then
-        return AV_Original(self, ...)
-    end
-    if not Running then
-        return AV_Original(self, ...)
-    end
-
-    -- Only intercept calls on the workspace service.
-    if self ~= workspace then
+    --// 6) Enabled + running.
+    if not Aimbot.Settings.Enabled
+       or not Aimbot.Settings.SilentAim
+       or not Running then
         return AV_Original(self, ...)
     end
 
-    -- Dispatch to correct patcher.
-    local args, n
-    if method == "Raycast" and mode == "Raycast v2" then
-        args, n = AV_TryPatchRaycast_V2(self, ...)
-    elseif method == "Raycast" then
-        args, n = AV_TryPatchRaycast_V1(self, ...)
+    --// 7) Get aim target position safely.
+    local target = Aimbot.LockPartInstance
+    if not target then
+        return AV_Original(self, ...)
+    end
+    local aimPos
+    do
+        local okA, alive = pcall(IsAlive, target)
+        if not okA or not alive then
+            return AV_Original(self, ...)
+        end
+        local okP, pos = pcall(PredictPartPosition, target)
+        if not okP or typeof(pos) ~= "Vector3" then
+            return AV_Original(self, ...)
+        end
+        aimPos = pos
+    end
+
+    local n = select('#', ...)
+    if n < 1 then
+        return AV_Original(self, ...)
+    end
+
+    if method == "Raycast" then
+        --// workspace:Raycast(origin: Vector3, direction: Vector3, params?: RaycastParams)
+        if n < 2 then
+            return AV_Original(self, ...)
+        end
+        local origin    = select(1, ...)
+        local direction = select(2, ...)
+        if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3" then
+            return AV_Original(self, ...)
+        end
+
+        local toTarget = aimPos - origin
+        local mag = toTarget.Magnitude
+        if mag ~= mag or mag < 0.0001 or mag == math.huge then
+            return AV_Original(self, ...)
+        end
+
+        local newDir = toTarget.Unit * 1000
+        local args = { origin, newDir }
+        for i = 3, n do
+            args[i] = select(i, ...)
+        end
+        return AV_Original(self, table.unpack(args, 1, n))
     else
-        args, n = AV_TryPatchFindPartOnRay(self, ...)
-    end
+        --// workspace:FindPartOnRay*(ray: Ray, ...)
+        local ray = select(1, ...)
+        if typeof(ray) ~= "Ray" then
+            return AV_Original(self, ...)
+        end
 
-    -- If patcher rejected (returned nil) we pass args through unchanged.
-    if not args or not n then
-        return AV_Original(self, ...)
-    end
+        local origin = ray.Origin
+        if typeof(origin) ~= "Vector3" then
+            return AV_Original(self, ...)
+        end
+        local toTarget = aimPos - origin
+        local mag = toTarget.Magnitude
+        if mag ~= mag or mag < 0.0001 or mag == math.huge then
+            return AV_Original(self, ...)
+        end
 
-    -- Final safety: unwrap with explicit table.unpack and matching count.
-    return AV_Original(self, table.unpack(args, 1, n))
+        local okNew, newRay = pcall(Ray.new, origin, toTarget.Unit * 1000)
+        if not okNew or typeof(newRay) ~= "Ray" then
+            return AV_Original(self, ...)
+        end
+
+        local args = { newRay }
+        for i = 2, n do
+            args[i] = select(i, ...)
+        end
+        return AV_Original(self, table.unpack(args, 1, n))
+    end
 end
 
 local function SetupAVHook()
@@ -1853,7 +1770,17 @@ local function SetupAVHook()
     local hookf, newc = EXEC.hookmetamethod, EXEC.newcclosure
     if not hookf then return end
 
-    -- Wrap the handler in newcclosure (if available) to hide from C-side checks.
+    --// Grab the current __namecall from the raw metatable FIRST, so we have
+    --// a valid fallback even if hookmetamethod fails to return the original.
+    local currentNamecall = nil
+    if EXEC.getrawmetatable then
+        local okMT, mt = pcall(EXEC.getrawmetatable, game)
+        if okMT and type(mt) == "table" then
+            currentNamecall = mt.__namecall
+        end
+    end
+
+    --// Wrap handler in newcclosure if available (hides from checkcaller).
     local handler = AV_HandleNamecall
     if newc then
         local ok, wrapped = pcall(newc, handler)
@@ -1862,14 +1789,24 @@ local function SetupAVHook()
         end
     end
 
+    --// Install hook.
     local ok, orig = pcall(hookf, game, "__namecall", handler)
-    if ok and orig then
-        AV_Original = orig
-        AV_Active = true
-        Aimbot.Internal.HookHandlers.AVNamecall     = handler
-        Aimbot.Internal.HookHandlers.AVNamecallOrig = orig
-        DebugHookPrint("AV namecall hook installed (v22 defensive)")
+    if not ok then
+        DebugHookPrint("hookmetamethod failed: " .. tostring(orig))
+        return
     end
+
+    --// Determine the original namecall (prefer hookmetamethod's return).
+    AV_Original = orig or currentNamecall
+    if not AV_Original then
+        DebugHookPrint("could not resolve original __namecall")
+        return
+    end
+
+    AV_Active = true
+    Aimbot.Internal.HookHandlers.AVNamecall     = handler
+    Aimbot.Internal.HookHandlers.AVNamecallOrig = AV_Original
+    DebugHookPrint("AV namecall hook installed (v23)")
 end
 
 local function RemoveAVHook()
@@ -2284,7 +2221,7 @@ local function Diagnose()
     end
 
     warn("==========================================================")
-    warn("          AirHub Aimbot - DIAGNOSTICS (v22)")
+    warn("          AirHub Aimbot - DIAGNOSTICS (v23)")
     warn("==========================================================")
 
     T(H ~= nil, "H (AirHub) exists")
