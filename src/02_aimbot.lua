@@ -1,6 +1,6 @@
 --// AirHub - 02_aimbot.lua
---// v24: Bulletproof __namecall hook. Aim position is cached outside the
---// hook so no Instance method is ever called from inside namecall.
+--// v25: Logging/Sounds init moved to top so shots log before 07b loads.
+--// H.Sound aliased to H.Sounds. Fallback Util.AddLog if missing.
 --// Modes: Camera / Mouse / Raycast / FindPartOnRay* / Mouse.Hit/Target
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -11,6 +11,30 @@ if H.Aimbot then
     warn("[AirHub] Aimbot already loaded")
     return
 end
+
+--// v25: early init of Logging/Sounds so shots before 07b still log.
+if not H.Logging then
+    H.Logging = {
+        Enabled  = true,
+        ShowHit  = true,
+        ShowMiss = true,
+        Duration = 1,
+        FontSize = 18,
+    }
+end
+
+if not H.Sounds then
+    H.Sounds = {
+        HitsoundEnabled  = false,
+        HitsoundID       = 83717596220569,
+        HitsoundVolume   = 1,
+        KillsoundEnabled = false,
+        KillsoundID      = 83717596220569,
+        KillsoundVolume  = 1,
+    }
+end
+--// 07b UI writes to H.Sound, Util reads from H.Sounds — unify.
+H.Sound = H.Sounds
 
 local Util                = H.Util
 local Players             = Util.Players
@@ -23,6 +47,35 @@ local Track               = Util.Track
 local HandleError         = Util.HandleError
 local AddLog              = Util.AddLog
 local RAY_FILTER          = Util.RAY_FILTER
+
+--// v25: safety nets for Util helpers.
+if type(AddLog) ~= "function" then
+    H.ActiveLogs = H.ActiveLogs or {}
+    AddLog = function(text, color)
+        pcall(function()
+            local t = Drawing.new("Text")
+            t.Text    = tostring(text)
+            t.Size    = H.Logging.FontSize or 18
+            t.Color   = color or Color3.fromRGB(255, 255, 255)
+            t.Outline = true
+            t.Center  = false
+            t.Position= Vector2.new(20, 20 + #H.ActiveLogs * 22)
+            t.Visible = true
+            table.insert(H.ActiveLogs, { text = t, born = tick(),
+                duration = H.Logging.Duration or 1 })
+            task.spawn(function()
+                task.wait(H.Logging.Duration or 1)
+                pcall(function() t:Remove() end)
+                for i, log in ipairs(H.ActiveLogs) do
+                    if log.text == t then table.remove(H.ActiveLogs, i); break end
+                end
+            end)
+        end)
+    end
+    Util.AddLog = AddLog
+end
+if type(Util.PlayHitsound) ~= "function" then Util.PlayHitsound = function() end end
+if type(Util.PlayKillsound) ~= "function" then Util.PlayKillsound = function() end end
 
 local function getExec(name)
     local f = rawget(_G, name)
@@ -109,7 +162,7 @@ H.Aimbot = {
         LockedGhost  = nil,
         WatchdogAccum = 0,
         ModeCache    = {},
-        CachedAimPos = nil,  -- v24: aim Vector3 cached from RenderStepped
+        CachedAimPos = nil,
         HookHandlers = {
             AVNamecall    = nil, AVNamecallOrig = nil,
             MHT_Proxy     = nil, MHT_Original   = nil,
@@ -646,8 +699,14 @@ local function LogShot(targetChar, targetName, startHealth, hitPartName, wasVisi
     local endHealth = hum.Health
     local hit = endHealth < startHealth
 
+    --// v25: sounds only when explicitly enabled.
+    local S = H.Sounds or H.Sound or {}
     if hit then
-        if hum.Health <= 0 then Util.PlayKillsound() else Util.PlayHitsound() end
+        if hum.Health <= 0 then
+            if S.KillsoundEnabled then pcall(Util.PlayKillsound) end
+        else
+            if S.HitsoundEnabled then pcall(Util.PlayHitsound) end
+        end
     end
     if not H.Logging or not H.Logging.Enabled then return end
     if hit and not H.Logging.ShowHit then return end
@@ -1073,7 +1132,7 @@ local function ScheduleHookRemoval(restoreFn, holdTime)
     end)
 end
 
---// ==== WALLBANG (shortened, same as before) ====
+--// ==== WALLBANG ====
 local function PerformWallbang_RemotePatch(targetPart, btn)
     local hookf, getMethod, newc, checkC =
         EXEC.hookmetamethod, EXEC.getnamecallmethod, EXEC.newcclosure, EXEC.checkcaller
@@ -1390,26 +1449,16 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 end
 
 --// ---------------------------------------------------------------------------
---// AV namecall hook — v24 bulletproof
---//
---// CRITICAL RULES:
---//   1. NEVER call any Instance method (FindFirstChild, GetAttribute, IsA,
---//      Parent, etc.) from inside this function. They are namecall internally
---//      and cause recursion → arg shift → "argument #1 expects a string".
---//   2. Use ONLY the cached aim position (Aimbot.Internal.CachedAimPos).
---//   3. Bail out for anything that isn't exactly the pattern we expect.
---//   4. Never build args tables unless we're 100% sure we need to patch.
+--// AV namecall hook — v25 bulletproof
 --// ---------------------------------------------------------------------------
 local AV_Active   = false
 local AV_Original = nil
 
 local function AV_HandleNamecall(self, ...)
-    --// 1) Fastest possible exit.
     if H.ShuttingDown then
         return AV_Original(self, ...)
     end
 
-    --// 2) Method name.
     local method
     if EXEC.getnamecallmethod then
         local ok, m = pcall(EXEC.getnamecallmethod)
@@ -1422,12 +1471,10 @@ local function AV_HandleNamecall(self, ...)
         return AV_Original(self, ...)
     end
 
-    --// 3) Must be workspace.
     if self ~= workspace then
         return AV_Original(self, ...)
     end
 
-    --// 4) Skip our own re-entrant calls.
     if EXEC.checkcaller then
         local ok, isC = pcall(EXEC.checkcaller)
         if ok and isC then
@@ -1435,7 +1482,6 @@ local function AV_HandleNamecall(self, ...)
         end
     end
 
-    --// 5) Mode + enabled + running.
     local wanted = Aimbot.Settings.SilentAimMode
     local match = (wanted == method)
     if not match then
@@ -1445,17 +1491,14 @@ local function AV_HandleNamecall(self, ...)
         return AV_Original(self, ...)
     end
 
-    --// 6) Cached aim position — NEVER compute it here.
     local aimPos = Aimbot.Internal.CachedAimPos
     if typeof(aimPos) ~= "Vector3" then
         return AV_Original(self, ...)
     end
 
-    --// 7) Argument count.
     local n = select('#', ...)
 
     if method == "Raycast" then
-        --// workspace:Raycast(origin, direction[, params])
         if n < 2 then
             return AV_Original(self, ...)
         end
@@ -1470,7 +1513,6 @@ local function AV_HandleNamecall(self, ...)
             return AV_Original(self, ...)
         end
 
-        --// Preserve original magnitude (some guns use range, not 1000).
         local origMag = direction.Magnitude
         if origMag ~= origMag or origMag < 0.001 or origMag == math.huge then
             origMag = 1000
@@ -1487,7 +1529,6 @@ local function AV_HandleNamecall(self, ...)
             return AV_Original(self, table.unpack(args, 1, n))
         end
     else
-        --// workspace:FindPartOnRay*(ray[, ignoreOrWhitelist, ...])
         if n < 1 then
             return AV_Original(self, ...)
         end
@@ -1553,7 +1594,7 @@ local function SetupAVHook()
     AV_Active = true
     Aimbot.Internal.HookHandlers.AVNamecall     = handler
     Aimbot.Internal.HookHandlers.AVNamecallOrig = orig
-    DebugHookPrint("AV namecall hook installed (v24)")
+    DebugHookPrint("AV namecall hook installed (v25)")
 end
 
 local function RemoveAVHook()
@@ -1737,7 +1778,6 @@ local function LoadAimbot()
                     local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
                     if visiblePoint then
                         Aimbot.FOVCircle.Color = Color3.fromRGB(255, 200, 70)
-                        --// v24: cache aim position for the namecall hook.
                         Aimbot.Internal.CachedAimPos = visiblePoint
                         if not Aimbot.Settings.SilentAim then
                             local targetPos = visiblePoint
@@ -1750,7 +1790,6 @@ local function LoadAimbot()
                             end
                         end
                     else
-                        --// v24: keep last cached pos if still valid, else update to raw.
                         local raw = PredictPartPosition(targetPart)
                         if typeof(raw) == "Vector3" then
                             Aimbot.Internal.CachedAimPos = raw
@@ -1972,7 +2011,7 @@ local function Diagnose()
     end
 
     warn("==========================================================")
-    warn("          AirHub Aimbot - DIAGNOSTICS (v24)")
+    warn("          AirHub Aimbot - DIAGNOSTICS (v25)")
     warn("==========================================================")
 
     T(H ~= nil, "H (AirHub) exists")
