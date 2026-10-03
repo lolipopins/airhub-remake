@@ -1,4 +1,8 @@
 --// AirHub - 02_aimbot.lua
+--// v21: Removed all silent aim modes except Camera and Mouse.
+--// Ported Averiias Universal Silent Aim methods:
+--//   Raycast, FindPartOnRay, FindPartOnRayWithWhitelist,
+--//   FindPartOnRayWithIgnoreList, Mouse.Hit/Target
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
     warn("[AirHub] 02_aimbot: core not loaded")
@@ -57,7 +61,8 @@ H.Aimbot = {
         LockPart = "Head",
         AimMethod = "Smooth",
         SilentAim = true,
-        SilentAimMode = "FireServer",
+        -- v21: only Camera + Mouse from AirHub, plus Averiias methods.
+        SilentAimMode = "Camera",
         IgnoreFOV = false,
         CheckFromPlayerOnTP = true,
         PredictionEnabled = false,
@@ -107,13 +112,8 @@ H.Aimbot = {
         WatchdogAccum = 0,
         ModeCache    = {},
         HookHandlers = {
-            RayNew      = nil, RayNewOrig  = nil,
-            V3New       = nil, V3NewOrig   = nil,
-            RayHook     = nil, RayHookOrig = nil,
-            V3Unit      = nil, V3UnitOrig  = nil,
-            SPR         = nil, SPR_Orig    = nil,
-            Raycast     = nil, RaycastOrig = nil,
-            RaycastWS   = nil, RaycastWSOrig = nil,
+            AVNamecall    = nil, AVNamecallOrig = nil,
+            MHT_Proxy     = nil, MHT_Original   = nil,
         },
     },
 
@@ -360,35 +360,9 @@ local function GetLockedCharacter()
     return nil
 end
 
-local function GetMultipoints(part)
-    local pts = {}
-    local cf = part.CFrame
-    local size = part.Size
-    local hx, hy, hz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
-    table.insert(pts, cf.Position)
-    table.insert(pts, (cf * CFrame.new( hx,  hy,  hz)).Position)
-    table.insert(pts, (cf * CFrame.new(-hx,  hy,  hz)).Position)
-    table.insert(pts, (cf * CFrame.new( hx, -hy,  hz)).Position)
-    table.insert(pts, (cf * CFrame.new(-hx, -hy,  hz)).Position)
-    table.insert(pts, (cf * CFrame.new( hx,  hy, -hz)).Position)
-    table.insert(pts, (cf * CFrame.new(-hx,  hy, -hz)).Position)
-    table.insert(pts, (cf * CFrame.new( hx, -hy, -hz)).Position)
-    table.insert(pts, (cf * CFrame.new(-hx, -hy, -hz)).Position)
-    return pts
-end
-
 local function IsPointVisible(origin, pt, params)
     if (pt - origin).Magnitude < 0.001 then return true end
     return workspace:Raycast(origin, pt - origin, params) == nil
-end
-
-local function GetVisiblePoint_Fast(origin, part)
-    if not IsAlive(part) then return nil end
-    local params = BuildRayParams(part.Parent)
-    local predicted = PredictPartPosition(part)
-    if IsPointVisible(origin, predicted, params) then return predicted end
-    if IsPointVisible(origin, part.Position, params) then return part.Position end
-    return nil
 end
 
 local function GetVisiblePointOnPart(origin, part)
@@ -820,7 +794,7 @@ local function MoveMouseAbs(x, y)
 end
 
 --// ---------------------------------------------------------------------------
---// PatchShotArgs
+--// PatchShotArgs (used by wallbang)
 --// ---------------------------------------------------------------------------
 local function PatchValueRecursive(v, camPos, aimPos, dirUnit, correctCF, depth)
     if depth > 4 then return v, 0 end
@@ -923,6 +897,7 @@ end
 
 --// ---------------------------------------------------------------------------
 --// Mode availability cache
+--// v21: only Camera / Mouse / Raycast / FindPartOnRay* / Mouse.Hit/Target
 --// ---------------------------------------------------------------------------
 local function CacheGet(key)
     local c = Aimbot.Internal.ModeCache[key]
@@ -943,66 +918,22 @@ local function CacheSet(key, available, reason)
 end
 
 local function ComputeModeAvailability(mode)
-    if mode == "RayHook" then
-        local ok, mt = pcall(getrawmetatable, Ray.new(Vector3.zero, Vector3.zero))
-        return (ok and mt ~= nil), "no Ray metatable"
-    elseif mode == "RayNew" then
-        if type(Ray) ~= "table" or type(Ray.new) ~= "function" then
-            return false, "Ray.new unavailable"
-        end
+    if mode == "Camera" then
         return true
-    elseif mode == "Raycast" then
-        if type(workspace.Raycast) ~= "function" then
-            return false, "workspace.Raycast missing"
-        end
+    elseif mode == "Mouse" then
+        if not VirtualInputManager then return false, "no VIM" end
         return true
-    elseif mode == "ScreenPointToRay" then
-        local cam = workspace.CurrentCamera
-        if not cam then return false, "no camera" end
-        if type(cam.ScreenPointToRay) ~= "function" then
-            return false, "ScreenPointToRay missing"
-        end
-        return true
-    elseif mode == "Vector3Unit" then
-        local ok, mt = pcall(getrawmetatable, Vector3.new(1, 0, 0))
-        return (ok and mt ~= nil), "no Vector3 metatable"
-    elseif mode == "MouseHit" or mode == "MouseFull" then
-        if type(LocalPlayer.GetMouse) ~= "function" then
-            return false, "GetMouse missing"
-        end
-        return true
-    elseif mode == "GunHandler" then
-        local mod = ReplicatedStorage:FindFirstChild("Modules")
-        if not mod then return false, "no Modules" end
-        local guns = mod:FindFirstChild("Guns")
-        if not guns then return false, "no Guns folder" end
-        local gh = guns:FindFirstChild("GunHandler")
-        if not gh then return false, "no GunHandler module" end
-        local ok, res = pcall(require, gh)
-        if not ok or type(res) ~= "table" or type(res.Shoot) ~= "function" then
-            return false, "GunHandler.Shoot missing"
-        end
-        return true
-    elseif mode == "FireServer" then
+    elseif mode == "Raycast"
+        or mode == "FindPartOnRay"
+        or mode == "FindPartOnRayWithWhitelist"
+        or mode == "FindPartOnRayWithIgnoreList" then
         if not EXEC.hookmetamethod or not EXEC.getnamecallmethod then
             return false, "no hookmetamethod"
         end
         return true
-    elseif mode == "MouseLock" or mode == "Mouse" then
-        if not VirtualInputManager then return false, "no VIM" end
-        return true
-    elseif mode == "Camera" then
-        return true
-    elseif mode == "CFrameHook" then
-        if type(CFrame) ~= "table" then return false, "CFrame not table" end
-        if type(CFrame.lookAt) ~= "function" then
-            return false, "CFrame.lookAt missing"
-        end
-        return true
-    elseif mode == "Vector3New" then
-        if type(Vector3) ~= "table" then return false, "Vector3 not table" end
-        if type(Vector3.new) ~= "function" then
-            return false, "Vector3.new missing"
+    elseif mode == "Mouse.Hit/Target" then
+        if type(LocalPlayer.GetMouse) ~= "function" then
+            return false, "GetMouse missing"
         end
         return true
     end
@@ -1039,10 +970,12 @@ end
 --// Autowork
 --// ---------------------------------------------------------------------------
 local ALL_METHODS = {
-    "FireServer",
-    "RayNew", "RayHook", "Raycast", "ScreenPointToRay", "Vector3Unit",
-    "MouseFull", "MouseHit", "GunHandler",
-    "MouseLock", "Mouse", "CFrameHook", "Vector3New",
+    "Camera", "Mouse",
+    "Raycast",
+    "FindPartOnRay",
+    "FindPartOnRayWithWhitelist",
+    "FindPartOnRayWithIgnoreList",
+    "Mouse.Hit/Target",
 }
 
 local function GetWorkingMethods()
@@ -1570,6 +1503,13 @@ end
 --// PerformSilentShot
 --// ---------------------------------------------------------------------------
 
+local AV_MODE_SET = {
+    ["Raycast"]                     = true,
+    ["FindPartOnRay"]               = true,
+    ["FindPartOnRayWithWhitelist"]  = true,
+    ["FindPartOnRayWithIgnoreList"] = true,
+}
+
 local function PerformSilentShot(targetPart, btn, wasVisible)
     if not Aimbot.Settings.SilentAim then return end
     if not targetPart or not IsAlive(targetPart) then return end
@@ -1601,6 +1541,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     DebugPrint(string.format("shot start | mode=%s target=%s part=%s btn=%d",
         tostring(mode), tostring(displayName), tostring(targetPart.Name), btn or -1))
 
+    -- TP Aim / Wallbang take priority
     if Aimbot.Settings.TPAimEnabled then
         if Aimbot.Settings.TPAimMethod == "MagicBullet" then
             PerformMagicBullet(targetPart, btn)
@@ -1629,54 +1570,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     end
     if nowVisible ~= nil then wasVisible = nowVisible end
 
-    if mode == "MouseLock" then
-        local visiblePoint = checkPoint
-        if not visiblePoint then
-            local origin = workspace.CurrentCamera.CFrame.Position
-            visiblePoint = GetVisiblePointOnPart(origin, targetPart)
-        end
-        if not visiblePoint then
-            if restoreDesync then restoreDesync() end
-            return
-        end
-
-        local targetX, targetY = WorldToMouseVIM(visiblePoint)
-        if not targetX then
-            if restoreDesync then restoreDesync() end
-            return
-        end
-
-        local oldBehavior = UserInputService.MouseBehavior
-        local oldIcon     = UserInputService.MouseIconEnabled
-        local curMouse    = UserInputService:GetMouseLocation()
-        local oldX, oldY  = math.floor(curMouse.X), math.floor(curMouse.Y)
-
-        pcall(function()
-            UserInputService.MouseBehavior    = Enum.MouseBehavior.Default
-            UserInputService.MouseIconEnabled = true
-        end)
-
-        local ok = pcall(function()
-            MoveMouseAbs(targetX, targetY)
-            task.wait()
-            VirtualInputManager:SendMouseButtonEvent(targetX, targetY, btn, true,  game, 1)
-            VirtualInputManager:SendMouseButtonEvent(targetX, targetY, btn, false, game, 1)
-            MoveMouseAbs(oldX, oldY)
-        end)
-        if not ok then HandleError("MouseLock silent shot failed") end
-
-        pcall(function()
-            UserInputService.MouseBehavior    = oldBehavior
-            UserInputService.MouseIconEnabled = oldIcon
-        end)
-
-        DebugPrint("shot fired (MouseLock)")
-        task.delay(0.15, function()
-            LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
-        end)
-        return
-    end
-
+    --// ==== MOUSE mode (AirHub) ====
     if mode == "Mouse" then
         local visiblePoint = checkPoint
         if not visiblePoint then
@@ -1713,12 +1607,9 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         return
     end
 
-    if mode == "GunHandler" or mode == "RayHook" or mode == "RayNew"
-       or mode == "Raycast"
-       or mode == "MouseHit" or mode == "MouseFull"
-       or mode == "Vector3Unit" or mode == "ScreenPointToRay"
-       or mode == "FireServer"
-       or mode == "CFrameHook" or mode == "Vector3New" then
+    --// ==== Averiias-style hook modes ====
+    --// Namecall / GetMouse proxy already redirect, we just fire the input.
+    if AV_MODE_SET[mode] or mode == "Mouse.Hit/Target" then
         FireClickNoDesync(btn, 0.25)
         DebugPrint("shot fired (hook mode=" .. tostring(mode) .. ")")
         task.delay(0.15, function()
@@ -1727,6 +1618,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         return
     end
 
+    --// ==== CAMERA mode (fallback) ====
     local origin = workspace.CurrentCamera.CFrame.Position
     local visiblePoint = checkPoint or GetVisiblePointOnPart(origin, targetPart)
     if not visiblePoint then
@@ -1742,461 +1634,94 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     workspace.CurrentCamera.CFrame = oldCF
     if not ok then HandleError("Camera silent shot input failed") end
 
-    DebugPrint("shot fired (Camera fallback)")
+    DebugPrint("shot fired (Camera)")
     task.delay(0.15, function()
         LogShot(targetChar, displayName, startHealth, targetPart.Name, wasVisible)
     end)
 end
 
 --// ---------------------------------------------------------------------------
---// Hooks
+--// Averiias-style namecall hook
+--// Handles workspace:Raycast / workspace:FindPartOnRay* with Argument validation
 --// ---------------------------------------------------------------------------
+local AV_Active   = false
+local AV_Original = nil
 
-local RayHookActive = false
-local oldRayIndex = nil
-
-local function SetupRayHook()
-    if RayHookActive then return end
-    local success, mt = pcall(getrawmetatable, Ray.new(Vector3.zero, Vector3.zero))
-    if not success or not mt then return end
-    local savedOriginal = getgenv().__AirHubRayIndexOriginal
-    if not savedOriginal then
-        savedOriginal = mt.__index
-        getgenv().__AirHubRayIndexOriginal = savedOriginal
-    end
-    oldRayIndex = savedOriginal
-
-    local handler = function(t, k)
-        if k == 'Direction' and not H.ShuttingDown and IsModeHooked("RayHook") then
-            if not ShouldRedirect("RayHook") then
-                return oldRayIndex(t, k)
-            end
-            local target = Aimbot.LockPartInstance
-            if target and IsAlive(target) then
-                local origin = oldRayIndex(t, 'Origin')
-                local vp = GetVisiblePointOnPart(origin, target)
-                if vp then return (vp - origin).Unit
-                elseif not Aimbot.Settings.WallCheck then
-                    return (PredictPartPosition(target) - origin).Unit
-                end
-            end
-        end
-        return oldRayIndex(t, k)
-    end
-
-    mt.__index = handler
-    RayHookActive = true
-
-    Aimbot.Internal.HookHandlers.RayHook     = handler
-    Aimbot.Internal.HookHandlers.RayHookOrig = savedOriginal
-end
-
-local function RemoveRayHook()
-    if not RayHookActive then return end
-    local success, mt = pcall(getrawmetatable, Ray.new(Vector3.zero, Vector3.zero))
-    if success and mt and oldRayIndex then mt.__index = oldRayIndex end
-    RayHookActive = false
-    Aimbot.Internal.HookHandlers.RayHook = nil
-end
-
-local RayNewActive = false
-local RayNewOriginal = nil
-
-local function SetupRayNewHook()
-    if RayNewActive then return end
-    if type(Ray) ~= "table" then return end
-    local old = Ray.new
-    if type(old) ~= "function" then return end
-    RayNewOriginal = old
-
-    local newc   = EXEC.newcclosure
-    local checkC = EXEC.checkcaller
-
-    local function handler(origin, direction)
-        if not H.ShuttingDown and IsModeHooked("RayNew") then
-            if not (checkC and checkC()) then
-                if not ShouldRedirect("RayNew") then
-                    return RayNewOriginal(origin, direction)
-                end
-                local target = Aimbot.LockPartInstance
-                if target and IsAlive(target) then
-                    local aimPos = PredictPartPosition(target)
-                    local dir = aimPos - origin
-                    local dm = dir.Magnitude
-                    if dm > 0.0001 then
-                        local dirUnit = dir / dm
-                        if type(direction) == "Vector3" then
-                            local origMag = direction.Magnitude
-                            if origMag < 0.0001 then
-                                return RayNewOriginal(origin, dirUnit)
-                            elseif origMag > 50 then
-                                return RayNewOriginal(origin, dir)
-                            else
-                                return RayNewOriginal(origin, dirUnit * origMag)
-                            end
-                        else
-                            return RayNewOriginal(origin, dirUnit)
-                        end
-                    end
-                end
-            end
-        end
-        return RayNewOriginal(origin, direction)
-    end
-    if newc then pcall(function() handler = newc(handler) end) end
-
-    local ok = pcall(function() Ray.new = handler end)
-    if ok then
-        RayNewActive = true
-        Aimbot.Internal.HookHandlers.RayNew     = handler
-        Aimbot.Internal.HookHandlers.RayNewOrig = RayNewOriginal
-    end
-end
-
-local function RemoveRayNewHook()
-    if not RayNewActive then return end
-    pcall(function() Ray.new = RayNewOriginal end)
-    RayNewActive = false
-    RayNewOriginal = nil
-    Aimbot.Internal.HookHandlers.RayNew = nil
-end
-
---// ---------------------------------------------------------------------------
---// Raycast hook — works on workspace:Raycast() / workspace:RaycastWorkspace()
---// (the engine-level hit detection many games rely on)
---// ---------------------------------------------------------------------------
-local RaycastHookActive  = false
-local RaycastOriginal    = nil
-local RaycastWSActive    = false
-local RaycastWSOriginal  = nil
-
-local function PatchRaycastDir(origin, direction, aimPos)
-    if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3" then
-        return direction
-    end
-    local dir = aimPos - origin
-    local dm  = dir.Magnitude
-    if dm < 0.0001 then return direction end
-
-    local dirUnit = dir / dm
-    local origMag = direction.Magnitude
-
-    -- Keep short rays short but aim them; extend truncated rays so they still reach.
-    if origMag < 0.0001 then
-        return dirUnit
-    elseif origMag < dm then
-        return dirUnit * (dm + 5)
-    else
-        return dirUnit * origMag
-    end
-end
-
-local function SetupRaycastHook()
-    if RaycastHookActive then return end
-    if type(workspace.Raycast) ~= "function" then return end
-
-    local newc   = EXEC.newcclosure
-    local checkC = EXEC.checkcaller
-
-    local oldRaycast = workspace.Raycast
-    RaycastOriginal = oldRaycast
-
-    local function handler(self, origin, direction, params)
-        if not H.ShuttingDown and IsModeHooked("Raycast") then
-            if not (checkC and checkC()) then
-                if ShouldRedirect("Raycast") then
-                    local target = Aimbot.LockPartInstance
-                    if target and IsAlive(target) then
-                        local aimPos = PredictPartPosition(target)
-                        direction = PatchRaycastDir(origin, direction, aimPos)
-                    end
-                end
-            end
-        end
-        return RaycastOriginal(self, origin, direction, params)
-    end
-    if newc then pcall(function() handler = newc(handler) end) end
-
-    local ok = pcall(function() workspace.Raycast = handler end)
-    if not ok then return end
-
-    RaycastHookActive = true
-    Aimbot.Internal.HookHandlers.Raycast     = handler
-    Aimbot.Internal.HookHandlers.RaycastOrig = oldRaycast
-
-    -- Optionally hook the deprecated RaycastWorkspace for legacy games
-    if type(workspace.RaycastWorkspace) == "function" then
-        local oldRW = workspace.RaycastWorkspace
-        RaycastWSOriginal = oldRW
-        local function rwHandler(self, origin, direction, params)
-            if not H.ShuttingDown and IsModeHooked("Raycast") then
-                if not (checkC and checkC()) then
-                    if ShouldRedirect("Raycast") then
-                        local target = Aimbot.LockPartInstance
-                        if target and IsAlive(target) then
-                            local aimPos = PredictPartPosition(target)
-                            direction = PatchRaycastDir(origin, direction, aimPos)
-                        end
-                    end
-                end
-            end
-            return RaycastWSOriginal(self, origin, direction, params)
-        end
-        if newc then pcall(function() rwHandler = newc(rwHandler) end) end
-        local ok2 = pcall(function() workspace.RaycastWorkspace = rwHandler end)
-        if ok2 then
-            RaycastWSActive = true
-            Aimbot.Internal.HookHandlers.RaycastWS     = rwHandler
-            Aimbot.Internal.HookHandlers.RaycastWSOrig = oldRW
-        end
-    end
-end
-
-local function RemoveRaycastHook()
-    if RaycastHookActive and RaycastOriginal then
-        pcall(function() workspace.Raycast = RaycastOriginal end)
-    end
-    if RaycastWSActive and RaycastWSOriginal then
-        pcall(function() workspace.RaycastWorkspace = RaycastWSOriginal end)
-    end
-    RaycastHookActive = false
-    RaycastWSActive   = false
-    RaycastOriginal   = nil
-    RaycastWSOriginal = nil
-    Aimbot.Internal.HookHandlers.Raycast   = nil
-    Aimbot.Internal.HookHandlers.RaycastWS = nil
-end
-
-local V3UnitActive = false
-local V3_oldIndex = nil
-
-local function SetupVector3UnitHook()
-    if V3UnitActive then return end
-    local v3Sample = Vector3.new(1, 0, 0)
-    local ok, mt = pcall(getrawmetatable, v3Sample)
-    if not ok or not mt then return end
-    local savedOriginal = getgenv().__AirHubV3IndexOriginal
-    if not savedOriginal then
-        savedOriginal = mt.__index
-        getgenv().__AirHubV3IndexOriginal = savedOriginal
-    end
-    V3_oldIndex = savedOriginal
-
-    local handler = function(self, k)
-        if k == "Unit" and not H.ShuttingDown and IsModeHooked("Vector3Unit") then
-            local mag = math.sqrt(self.X*self.X + self.Y*self.Y + self.Z*self.Z)
-            if math.abs(mag - 1) < 0.25 and mag > 0.0001 then
-                if not ShouldRedirect("Vector3Unit") then
-                    return V3_oldIndex(self, k)
-                end
-                local target = Aimbot.LockPartInstance
-                if target and IsAlive(target) then
-                    local aimPos = PredictPartPosition(target)
-                    local camPos = workspace.CurrentCamera.CFrame.Position
-                    local dir = aimPos - camPos
-                    local dm = dir.Magnitude
-                    if dm > 0.0001 then
-                        return Vector3.new(dir.X/dm, dir.Y/dm, dir.Z/dm)
-                    end
-                end
-            end
-        end
-        return V3_oldIndex(self, k)
-    end
-
-    mt.__index = handler
-    V3UnitActive = true
-    Aimbot.Internal.HookHandlers.V3Unit     = handler
-    Aimbot.Internal.HookHandlers.V3UnitOrig = savedOriginal
-end
-
-local function RemoveVector3UnitHook()
-    if not V3UnitActive then return end
-    local ok, mt = pcall(getrawmetatable, Vector3.new(1, 0, 0))
-    if ok and mt and V3_oldIndex then mt.__index = V3_oldIndex end
-    V3UnitActive = false
-    Aimbot.Internal.HookHandlers.V3Unit = nil
-end
-
-local SPR_Active = false
-local SPR_Original = nil
-
-local function SetupScreenPointToRayHook()
-    if SPR_Active then return end
-    local cam = workspace.CurrentCamera
-    if not cam then return end
-    local old = cam.ScreenPointToRay
-    if type(old) ~= "function" then return end
-    SPR_Original = old
-
-    local newc = EXEC.newcclosure
-    local function handler(self, x, y)
-        if not H.ShuttingDown and IsModeHooked("ScreenPointToRay") then
-            if not ShouldRedirect("ScreenPointToRay") then
-                return SPR_Original(self, x, y)
-            end
-            local target = Aimbot.LockPartInstance
-            if target and IsAlive(target) and self and self.CFrame then
-                local aimPos = PredictPartPosition(target)
-                local camPos = self.CFrame.Position
-                local dir = aimPos - camPos
-                if dir.Magnitude > 0.0001 then
-                    local okRay, ray = pcall(Ray.new, camPos, dir.Unit)
-                    if okRay and ray then return ray end
-                end
-            end
-        end
-        return SPR_Original(self, x, y)
-    end
-    if newc then pcall(function() handler = newc(handler) end) end
-
-    local ok = pcall(function() cam.ScreenPointToRay = handler end)
-    if ok then
-        SPR_Active = true
-        Aimbot.Internal.HookHandlers.SPR      = handler
-        Aimbot.Internal.HookHandlers.SPR_Orig = old
-    end
-end
-
-local function RemoveScreenPointToRayHook()
-    if not SPR_Active then return end
-    local cam = workspace.CurrentCamera
-    if cam and SPR_Original then
-        pcall(function() cam.ScreenPointToRay = SPR_Original end)
-    end
-    SPR_Active = false
-    SPR_Original = nil
-    Aimbot.Internal.HookHandlers.SPR = nil
-end
-
-local MouseHooked = false
-local originalGetMouse = nil
-
-local function GetMouseSpoof()
+local function AV_GetTargetPosition()
     local target = Aimbot.LockPartInstance
-    if not target or not IsAlive(target) then return nil end
-    local origin = GetCheckOrigin()
-    local vp = GetVisiblePointOnPart(origin, target)
-    if vp then return vp end
-    if not Aimbot.Settings.WallCheck then return PredictPartPosition(target) end
+    if target and IsAlive(target) then
+        return PredictPartPosition(target)
+    end
     return nil
 end
 
-local function SetupMouseHook()
-    if MouseHooked then return end
-    local prevRestore = getgenv().__AirHubMouseHitRestore
-    if prevRestore then
-        originalGetMouse = prevRestore
-    else
-        local current = LocalPlayer.GetMouse
-        if current == nil then return end
-        originalGetMouse = current
-        getgenv().__AirHubMouseHitRestore = current
+local function AV_HandleNamecall(self, ...)
+    if H.ShuttingDown then
+        return AV_Original(self, ...)
     end
-
-    LocalPlayer.GetMouse = function()
-        local realMouse = originalGetMouse(LocalPlayer)
-        return setmetatable({}, {
-            __index = function(t, k)
-                if not H.ShuttingDown then
-                    local isHit  = (k == "Hit")  and IsModeHooked("MouseHit")
-                    local isFull = (k == "Hit" or k == "UnitRay" or k == "Target" or k == "TargetSurface")
-                                   and IsModeHooked("MouseFull")
-                    if isHit or isFull then
-                        local mode = isHit and "MouseHit" or "MouseFull"
-                        if not ShouldRedirect(mode) then
-                            return realMouse[k]
-                        end
-                        local target = Aimbot.LockPartInstance
-                        if target and IsAlive(target) then
-                            local aimPos = GetMouseSpoof() or PredictPartPosition(target)
-                            if k == "Hit" then return aimPos end
-                            if k == "UnitRay" then
-                                local camPos = workspace.CurrentCamera.CFrame.Position
-                                local dir = aimPos - camPos
-                                if dir.Magnitude > 0.0001 then
-                                    return Ray.new(camPos, dir.Unit)
-                                end
-                            end
-                            if k == "Target" then return target end
-                            if k == "TargetSurface" then return Vector3.new(0, 1, 0) end
-                        end
-                    end
-                end
-                return realMouse[k]
-            end,
-            __newindex = function(t, k, v) realMouse[k] = v end,
-        })
-    end
-    MouseHooked = true
-end
-
-local function RemoveMouseHook()
-    if not MouseHooked then return end
-    local restore = getgenv().__AirHubMouseHitRestore
-    if restore then
-        pcall(function() LocalPlayer.GetMouse = restore end)
-        getgenv().__AirHubMouseHitRestore = nil
-    end
-    MouseHooked = false
-end
-
---// ---------------------------------------------------------------------------
---// Namecall hook
---// ---------------------------------------------------------------------------
-local FS_Active = false
-local FS_Original = nil
-
-local function NamecallImpl(self, ...)
     local method = EXEC.getnamecallmethod and EXEC.getnamecallmethod()
     if type(method) ~= "string" then
-        return FS_Original(self, ...)
+        return AV_Original(self, ...)
+    end
+    if not AV_MODE_SET[method] then
+        return AV_Original(self, ...)
+    end
+    if Aimbot.Settings.SilentAimMode ~= method then
+        return AV_Original(self, ...)
+    end
+    if not ShouldRedirect(method) then
+        return AV_Original(self, ...)
+    end
+    if self ~= workspace then
+        return AV_Original(self, ...)
+    end
+    if EXEC.checkcaller and EXEC.checkcaller() then
+        return AV_Original(self, ...)
     end
 
-    local isShot = (method == "FireServer" or method == "InvokeServer")
-    if isShot
-       and not H.ShuttingDown
-       and typeof(self) == "Instance"
-       and IsModeHooked("FireServer")
-       and not (EXEC.checkcaller and EXEC.checkcaller())
-       and ShouldRedirect("FireServer") then
-        local target = Aimbot.LockPartInstance
-        if target and IsAlive(target) then
-            local aimPos = GetMouseSpoof() or PredictPartPosition(target)
-            local cam = workspace.CurrentCamera
-            local camPos = cam and cam.CFrame.Position or GetCheckOrigin()
+    local targetPos = AV_GetTargetPosition()
+    if not targetPos then
+        return AV_Original(self, ...)
+    end
 
-            if (aimPos - camPos).Magnitude > 0.1 then
-                local args = table.pack(...)
-                local patched = PatchShotArgs(args, camPos, aimPos)
-                if patched > 0 then
-                    DebugHookPrint(string.format("FireServer patched %d args", patched))
-                    return FS_Original(self, table.unpack(args, 1, args.n))
-                end
+    local args = table.pack(...)
+
+    if method == "Raycast" then
+        -- workspace:Raycast(origin, direction, params)
+        local origin = args[1]
+        if typeof(origin) == "Vector3" and typeof(args[2]) == "Vector3" then
+            local dir = targetPos - origin
+            if dir.Magnitude > 0.0001 then
+                args[2] = dir.Unit * 1000
+                return AV_Original(self, table.unpack(args, 1, args.n))
+            end
+        end
+    else
+        -- workspace:FindPartOnRay(ray, ...) / FindPartOnRayWithWhitelist / IgnoreList
+        local ray = args[1]
+        if typeof(ray) == "Ray" then
+            local origin = ray.Origin
+            local dir = targetPos - origin
+            if dir.Magnitude > 0.0001 then
+                args[1] = Ray.new(origin, dir.Unit * 1000)
+                return AV_Original(self, table.unpack(args, 1, args.n))
             end
         end
     end
 
-    return FS_Original(self, ...)
+    return AV_Original(self, ...)
 end
 
-local _lastNamecallErrPrint = 0
-
-local function SetupFireServerHook()
-    if FS_Active then return end
+local function SetupAVHook()
+    if AV_Active then return end
     local hookf, newc = EXEC.hookmetamethod, EXEC.newcclosure
     if not hookf then return end
 
     local function safeHandler(self, ...)
-        local r = table.pack(pcall(NamecallImpl, self, ...))
+        local r = table.pack(pcall(AV_HandleNamecall, self, ...))
         if not r[1] then
-            local now = tick()
-            if now - _lastNamecallErrPrint > 1.0 then
-                _lastNamecallErrPrint = now
-                DebugHookPrint("namecall error: " .. tostring(r[2]))
-            end
-            if FS_Original then
-                return FS_Original(self, ...)
+            if AV_Original then
+                return AV_Original(self, ...)
             end
             return
         end
@@ -2205,297 +1730,156 @@ local function SetupFireServerHook()
     if newc then pcall(function() safeHandler = newc(safeHandler) end) end
 
     local ok = pcall(function()
-        FS_Original = hookf(game, "__namecall", safeHandler)
+        AV_Original = hookf(game, "__namecall", safeHandler)
     end)
-    if ok and FS_Original then
-        FS_Active = true
+    if ok and AV_Original then
+        AV_Active = true
+        Aimbot.Internal.HookHandlers.AVNamecall     = safeHandler
+        Aimbot.Internal.HookHandlers.AVNamecallOrig = AV_Original
+        DebugHookPrint("AV namecall hook installed")
     end
 end
 
-local function RemoveFireServerHook()
-    if not FS_Active then return end
+local function RemoveAVHook()
+    if not AV_Active then return end
     local hookf = EXEC.hookmetamethod
-    if hookf and FS_Original then
-        pcall(function() hookf(game, "__namecall", FS_Original) end)
+    if hookf and AV_Original then
+        pcall(function() hookf(game, "__namecall", AV_Original) end)
     end
-    FS_Active = false
-    FS_Original = nil
+    AV_Active = false
+    AV_Original = nil
+    Aimbot.Internal.HookHandlers.AVNamecall = nil
 end
 
-local GunHandlerHooked = false
-local GunHandlerRef = nil
-local GunHandlerOldShoot = nil
+--// ---------------------------------------------------------------------------
+--// Mouse.Hit / Mouse.Target proxy hook (Averiias)
+--// ---------------------------------------------------------------------------
+local MHT_Active   = false
+local MHT_Original = nil
+local MHT_Proxy    = nil
 
-local function SetupGunHandlerHook()
-    if GunHandlerHooked then return end
-    local modules = ReplicatedStorage:FindFirstChild("Modules")
-    if not modules then return end
-    local guns = modules:FindFirstChild("Guns")
-    if not guns then return end
-    local gunHandlerModule = guns:FindFirstChild("GunHandler")
-    if not gunHandlerModule then return end
-    local success, GunHandler = pcall(require, gunHandlerModule)
-    if not success or not GunHandler or not GunHandler.Shoot then return end
-
-    GunHandlerRef = GunHandler
-    GunHandlerOldShoot = GunHandler.Shoot
-    GunHandler.Shoot = function(p1, p2, p3, p4, p5, p6, p7, p8)
-        local Hg = getgenv().AirHub
-        if Hg and Hg.Aimbot and IsModeHooked("GunHandler") then
-            if not ShouldRedirect("GunHandler") then
-                return GunHandlerOldShoot(p1, p2, p3, p4, p5, p6, p7, p8)
-            end
-            if Hg.Aimbot.Locked and Hg.Aimbot.LockPartInstance
-               and IsAlive(Hg.Aimbot.LockPartInstance) then
-                if p1 == LocalPlayer then
-                    RefreshOldPositionIfNeeded()
-                    local origin = workspace.CurrentCamera.CFrame.Position
-                    local pt = TryGetVisiblePointOnPart(origin, Hg.Aimbot.LockPartInstance)
-                    if pt then
-                        p4 = pt
-                    elseif not Hg.Aimbot.Settings.WallCheck then
-                        p4 = PredictPartPosition(Hg.Aimbot.LockPartInstance)
-                    end
-                end
-            end
-        end
-        return GunHandlerOldShoot(p1, p2, p3, p4, p5, p6, p7, p8)
-    end
-    GunHandlerHooked = true
-end
-
-local function RemoveGunHandlerHook()
-    if not GunHandlerHooked then return end
-    if GunHandlerRef and GunHandlerOldShoot then
-        pcall(function() GunHandlerRef.Shoot = GunHandlerOldShoot end)
-    end
-    GunHandlerHooked = false
-    GunHandlerRef = nil
-    GunHandlerOldShoot = nil
-end
-
-local CFrameHookActive = false
-local CFrameHookOriginal = nil
-
-local function SetupCFrameHook()
-    if CFrameHookActive then return end
-    if type(CFrame) ~= "table" then return end
-    local old = CFrame.lookAt
-    if type(old) ~= "function" then return end
-    CFrameHookOriginal = old
-
-    local newc   = EXEC.newcclosure
-    local checkC = EXEC.checkcaller
-
-    local function handler(at, lookAt, up)
-        if not H.ShuttingDown and IsModeHooked("CFrameHook") then
-            if not (checkC and checkC()) then
-                if not ShouldRedirect("CFrameHook") then
-                    return CFrameHookOriginal(at, lookAt, up)
-                end
+local function MHT_BuildProxy(realMouse)
+    return setmetatable({}, {
+        __index = function(_, k)
+            if not H.ShuttingDown and IsModeHooked("Mouse.Hit/Target") and ShouldRedirect("Mouse.Hit/Target") then
                 local target = Aimbot.LockPartInstance
-                if target and IsAlive(target) and typeof(at) == "Vector3" then
+                if target and IsAlive(target) then
                     local aimPos = PredictPartPosition(target)
-                    if typeof(up) == "Vector3" then
-                        return CFrameHookOriginal(at, aimPos, up)
-                    else
-                        return CFrameHookOriginal(at, aimPos)
-                    end
-                end
-            end
-        end
-        return CFrameHookOriginal(at, lookAt, up)
-    end
-    if newc then pcall(function() handler = newc(handler) end) end
-
-    local ok = pcall(function() CFrame.lookAt = handler end)
-    if ok then CFrameHookActive = true end
-end
-
-local function RemoveCFrameHook()
-    if not CFrameHookActive then return end
-    pcall(function() CFrame.lookAt = CFrameHookOriginal end)
-    CFrameHookActive = false
-    CFrameHookOriginal = nil
-end
-
-local Vector3NewActive = false
-local Vector3NewOriginal = nil
-
-local function SetupVector3NewHook()
-    if Vector3NewActive then return end
-    if type(Vector3) ~= "table" then return end
-    local old = Vector3.new
-    if type(old) ~= "function" then return end
-    Vector3NewOriginal = old
-
-    local newc   = EXEC.newcclosure
-    local checkC = EXEC.checkcaller
-
-    local function handler(x, y, z)
-        if not H.ShuttingDown and IsModeHooked("Vector3New") then
-            if not (checkC and checkC()) then
-                if type(x) == "number" and type(y) == "number" and type(z) == "number" then
-                    local mag = math.sqrt(x*x + y*y + z*z)
-                    if math.abs(mag - 1) < 0.25 and mag > 0.0001 then
-                        if not ShouldRedirect("Vector3New") then
-                            return Vector3NewOriginal(x, y, z)
-                        end
-                        local target = Aimbot.LockPartInstance
-                        if target and IsAlive(target) then
-                            local aimPos = PredictPartPosition(target)
-                            local camPos = workspace.CurrentCamera.CFrame.Position
-                            local dir = aimPos - camPos
-                            local dm = dir.Magnitude
-                            if dm > 0.0001 then
-                                return Vector3NewOriginal(dir.X/dm, dir.Y/dm, dir.Z/dm)
+                    if k == "Target" or k == "target" then
+                        return target
+                    elseif k == "Hit" or k == "hit" then
+                        local hitCF = CFrame.new(aimPos)
+                        if Aimbot.Settings.PredictionEnabled then
+                            local vel = target.AssemblyLinearVelocity or target.Velocity
+                            if vel then
+                                local dt = Aimbot.Settings.PredictionTime or 0.15
+                                hitCF = CFrame.new(aimPos + vel * dt)
                             end
                         end
+                        return hitCF
+                    elseif k == "UnitRay" then
+                        local camPos = workspace.CurrentCamera.CFrame.Position
+                        local dir = aimPos - camPos
+                        if dir.Magnitude > 0.0001 then
+                            return Ray.new(camPos, dir.Unit)
+                        end
+                    elseif k == "TargetSurface" then
+                        return Vector3.new(0, 1, 0)
                     end
                 end
             end
-        end
-        return Vector3NewOriginal(x, y, z)
-    end
-    if newc then pcall(function() handler = newc(handler) end) end
+            return realMouse[k]
+        end,
+        __newindex = function(_, k, v)
+            realMouse[k] = v
+        end,
+    })
+end
 
-    local ok = pcall(function() Vector3.new = handler end)
+local function SetupMHTProxy()
+    if MHT_Active then return end
+
+    local prevRestore = getgenv().__AirHubMHTRestore
+    if prevRestore then
+        MHT_Original = prevRestore
+    else
+        local current = LocalPlayer.GetMouse
+        if type(current) ~= "function" then return end
+        MHT_Original = current
+        getgenv().__AirHubMHTRestore = current
+    end
+
+    MHT_Proxy = function(self)
+        local realMouse = MHT_Original(self)
+        return MHT_BuildProxy(realMouse)
+    end
+    if EXEC.newcclosure then
+        pcall(function() MHT_Proxy = EXEC.newcclosure(MHT_Proxy) end)
+    end
+
+    local ok = pcall(function() LocalPlayer.GetMouse = MHT_Proxy end)
     if ok then
-        Vector3NewActive = true
-        Aimbot.Internal.HookHandlers.V3New     = handler
-        Aimbot.Internal.HookHandlers.V3NewOrig = Vector3NewOriginal
+        MHT_Active = true
+        Aimbot.Internal.HookHandlers.MHT_Proxy    = MHT_Proxy
+        Aimbot.Internal.HookHandlers.MHT_Original = MHT_Original
+        DebugHookPrint("Mouse.Hit/Target proxy installed")
     end
 end
 
-local function RemoveVector3NewHook()
-    if not Vector3NewActive then return end
-    pcall(function() Vector3.new = Vector3NewOriginal end)
-    Vector3NewActive = false
-    Vector3NewOriginal = nil
-    Aimbot.Internal.HookHandlers.V3New = nil
+local function RemoveMHTProxy()
+    if not MHT_Active then return end
+    local restore = getgenv().__AirHubMHTRestore
+    if restore then
+        pcall(function() LocalPlayer.GetMouse = restore end)
+        getgenv().__AirHubMHTRestore = nil
+    end
+    MHT_Active = false
+    MHT_Proxy = nil
+    Aimbot.Internal.HookHandlers.MHT_Proxy = nil
 end
 
-task.spawn(function()
-    for _ = 1, 20 do
-        if H.ShuttingDown then return end
-        SetupGunHandlerHook()
-        if GunHandlerHooked then return end
-        task.wait(0.5)
-    end
-end)
-
+--// ---------------------------------------------------------------------------
+--// Hook management / watchdog
+--// ---------------------------------------------------------------------------
 local function VerifyAndFixHooks()
     if H.ShuttingDown then return end
     local Hh = Aimbot.Internal.HookHandlers
 
-    if RayNewActive and Hh.RayNew then
-        local ok, cur = pcall(function() return Ray.new end)
-        if ok and cur ~= Hh.RayNew then
-            warn("[AirHub] Hook watchdog: RayNew was overwritten — reinstalling")
-            RayNewActive = false
-            if IsModeHooked("RayNew") then SetupRayNewHook() end
-        end
+    local mode    = Aimbot.Settings.SilentAimMode
+    local enabled = Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim
+
+    -- AV namecall
+    local wantAV = enabled and AV_MODE_SET[mode] == true
+    if AV_Active and not wantAV then
+        RemoveAVHook()
+    elseif not AV_Active and wantAV then
+        SetupAVHook()
     end
 
-    if RaycastHookActive and Hh.Raycast then
-        local ok, cur = pcall(function() return workspace.Raycast end)
-        if ok and cur ~= Hh.Raycast then
-            warn("[AirHub] Hook watchdog: Raycast was overwritten — reinstalling")
-            RaycastHookActive = false
-            if IsModeHooked("Raycast") then SetupRaycastHook() end
-        end
-    end
-
-    if RaycastWSActive and Hh.RaycastWS then
-        local ok, cur = pcall(function() return workspace.RaycastWorkspace end)
-        if ok and cur ~= Hh.RaycastWS then
-            warn("[AirHub] Hook watchdog: RaycastWorkspace was overwritten — reinstalling")
-            RaycastWSActive = false
-            if IsModeHooked("Raycast") then SetupRaycastHook() end
-        end
-    end
-
-    if Vector3NewActive and Hh.V3New then
-        local ok, cur = pcall(function() return Vector3.new end)
-        if ok and cur ~= Hh.V3New then
-            warn("[AirHub] Hook watchdog: Vector3New was overwritten — reinstalling")
-            Vector3NewActive = false
-            if IsModeHooked("Vector3New") then SetupVector3NewHook() end
-        end
-    end
-
-    if RayHookActive and Hh.RayHook and Hh.RayHookOrig then
-        local ok, mt = pcall(getrawmetatable, Ray.new(Vector3.zero, Vector3.zero))
-        if ok and mt and mt.__index ~= Hh.RayHook then
-            warn("[AirHub] Hook watchdog: RayHook __index was overwritten — reinstalling")
-            RayHookActive = false
-            if IsModeHooked("RayHook") then SetupRayHook() end
-        end
-    end
-
-    if V3UnitActive and Hh.V3Unit and Hh.V3UnitOrig then
-        local ok, mt = pcall(getrawmetatable, Vector3.new(1, 0, 0))
-        if ok and mt and mt.__index ~= Hh.V3Unit then
-            warn("[AirHub] Hook watchdog: Vector3Unit __index was overwritten — reinstalling")
-            V3UnitActive = false
-            if IsModeHooked("Vector3Unit") then SetupVector3UnitHook() end
-        end
-    end
-
-    if SPR_Active and Hh.SPR then
-        local cam = workspace.CurrentCamera
-        if cam then
-            local ok, cur = pcall(function() return cam.ScreenPointToRay end)
-            if ok and cur ~= Hh.SPR then
-                warn("[AirHub] Hook watchdog: ScreenPointToRay was overwritten — reinstalling")
-                SPR_Active = false
-                if IsModeHooked("ScreenPointToRay") then SetupScreenPointToRayHook() end
-            end
+    -- MHT proxy watchdog
+    if MHT_Active and Hh.MHT_Proxy then
+        local ok, cur = pcall(function() return LocalPlayer.GetMouse end)
+        if ok and cur ~= Hh.MHT_Proxy then
+            warn("[AirHub] Hook watchdog: Mouse.Hit/Target proxy was overwritten — reinstalling")
+            MHT_Active = false
+            SetupMHTProxy()
         end
     end
 end
 
 local function ManageHooks()
-    local desired = {}
+    local mode    = Aimbot.Settings.SilentAimMode
+    local enabled = Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim
 
-    local function want(name)
-        return IsModeHooked(name)
-    end
+    local wantAV  = enabled and AV_MODE_SET[mode] == true
+    local wantMHT = enabled and mode == "Mouse.Hit/Target"
 
-    desired.RayHook          = want("RayHook")
-    desired.RayNew           = want("RayNew")
-    desired.Raycast          = want("Raycast")
-    desired.Vector3Unit      = want("Vector3Unit")
-    desired.ScreenPointToRay = want("ScreenPointToRay")
-    desired.Mouse            = want("MouseHit") or want("MouseFull")
-    desired.FireServer       = want("FireServer")
-    desired.CFrameHook       = want("CFrameHook")
-    desired.Vector3New       = want("Vector3New")
-
-    local key = table.concat({
-        tostring(desired.RayHook),
-        tostring(desired.RayNew),
-        tostring(desired.Raycast),
-        tostring(desired.Vector3Unit),
-        tostring(desired.ScreenPointToRay),
-        tostring(desired.Mouse),
-        tostring(desired.FireServer),
-        tostring(desired.CFrameHook),
-        tostring(desired.Vector3New),
-    }, "|")
-
+    local key = tostring(wantAV) .. "|" .. tostring(wantMHT)
     if Aimbot.Internal.LastManageKey == key then return end
     Aimbot.Internal.LastManageKey = key
 
-    if desired.RayHook          then SetupRayHook()            else RemoveRayHook()            end
-    if desired.RayNew           then SetupRayNewHook()         else RemoveRayNewHook()         end
-    if desired.Raycast          then SetupRaycastHook()        else RemoveRaycastHook()        end
-    if desired.Vector3Unit      then SetupVector3UnitHook()    else RemoveVector3UnitHook()    end
-    if desired.ScreenPointToRay then SetupScreenPointToRayHook() else RemoveScreenPointToRayHook() end
-    if desired.Mouse            then SetupMouseHook()          else RemoveMouseHook()          end
-    if desired.FireServer       then SetupFireServerHook()     else RemoveFireServerHook()     end
-    if desired.CFrameHook       then SetupCFrameHook()         else RemoveCFrameHook()         end
-    if desired.Vector3New       then SetupVector3NewHook()     else RemoveVector3NewHook()     end
+    if wantAV then SetupAVHook() else RemoveAVHook() end
+    if wantMHT then SetupMHTProxy() else RemoveMHTProxy() end
 end
 
 --// ---------------------------------------------------------------------------
@@ -2717,17 +2101,8 @@ LoadAimbot()
 --// Public exports
 --// ---------------------------------------------------------------------------
 Aimbot.CancelLock            = CancelLock
-Aimbot.RemoveRayHook         = RemoveRayHook
-Aimbot.RemoveRayNewHook      = RemoveRayNewHook
-Aimbot.RemoveRaycastHook     = RemoveRaycastHook
-Aimbot.RemoveVector3UnitHook = RemoveVector3UnitHook
-Aimbot.RemoveSPRHook         = RemoveScreenPointToRayHook
-Aimbot.RemoveMouseHook       = RemoveMouseHook
-Aimbot.RemoveFireServerHook  = RemoveFireServerHook
-Aimbot.RemoveMouseHitHook    = RemoveMouseHook
-Aimbot.RemoveGunHandlerHook  = RemoveGunHandlerHook
-Aimbot.RemoveCFrameHook      = RemoveCFrameHook
-Aimbot.RemoveVector3NewHook  = RemoveVector3NewHook
+Aimbot.RemoveAVHook          = RemoveAVHook
+Aimbot.RemoveMHTProxy        = RemoveMHTProxy
 Aimbot.GetVisiblePointOnPart = GetVisiblePointOnPart
 Aimbot.GetMousePos           = GetMousePos
 Aimbot.PredictPartPosition   = PredictPartPosition
@@ -2779,7 +2154,7 @@ local function Diagnose()
     end
 
     warn("==========================================================")
-    warn("          AirHub Aimbot - DIAGNOSTICS")
+    warn("          AirHub Aimbot - DIAGNOSTICS (v21)")
     warn("==========================================================")
 
     T(H ~= nil, "H (AirHub) exists")
@@ -2803,9 +2178,9 @@ local function Diagnose()
 
     InvalidateModeCache()
     if Aimbot.IsModeAvailable then
-        local modes = { "RayHook", "RayNew", "Raycast", "Vector3Unit", "ScreenPointToRay",
-                        "MouseHit", "MouseFull", "GunHandler", "FireServer",
-                        "MouseLock", "Mouse", "Camera", "CFrameHook", "Vector3New" }
+        local modes = { "Camera", "Mouse", "Raycast", "FindPartOnRay",
+                        "FindPartOnRayWithWhitelist", "FindPartOnRayWithIgnoreList",
+                        "Mouse.Hit/Target" }
         for _, m in ipairs(modes) do
             local ok, reason = Aimbot.IsModeAvailable(m)
             T(ok, "hook: " .. m, reason)
@@ -2821,7 +2196,7 @@ local function Diagnose()
                       "PatchShotArgs", "PatchValueRecursive",
                       "VerifyAndFixHooks", "InvalidateModeCache",
                       "GetWorkingMethods", "CycleAutowork", "DebugPrint",
-                      "RemoveRaycastHook" }
+                      "RemoveAVHook", "RemoveMHTProxy" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
     end
