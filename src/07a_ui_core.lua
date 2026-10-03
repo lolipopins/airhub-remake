@@ -311,7 +311,6 @@ task.delay(math.random(1, 3), function()
         "Camera",
         "Mouse",
         "Raycast",
-        "Raycast v2",
         "FindPartOnRay",
         "FindPartOnRayWithWhitelist",
         "FindPartOnRayWithIgnoreList",
