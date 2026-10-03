@@ -1,6 +1,6 @@
 --// AirHub - 07a_ui_core.lua
---// v21: Silent Aim modes = Camera / Mouse / Raycast / FindPartOnRay*
---//      / Mouse.Hit/Target (Averiias methods ported).
+--// v22: Silent Aim modes = Camera / Mouse / Raycast / Raycast v2
+--//      / FindPartOnRay* / Mouse.Hit/Target.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
@@ -306,11 +306,12 @@ task.delay(math.random(1, 3), function()
     local teamModes      = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
     local wallCheckModes = { "Fast", "Perfect" }
 
-    -- v21: only Camera / Mouse from AirHub + Averiias methods.
+    -- v22: only Camera / Mouse from AirHub + Averiias methods + defensive Raycast v2.
     local silentAimModes = {
         "Camera",
         "Mouse",
         "Raycast",
+        "Raycast v2",
         "FindPartOnRay",
         "FindPartOnRayWithWhitelist",
         "FindPartOnRayWithIgnoreList",
@@ -431,6 +432,7 @@ task.delay(math.random(1, 3), function()
 
             -- Turn off hooks that don't belong to the selected mode.
             local isAVMode = (v == "Raycast"
+                              or v == "Raycast v2"
                               or v == "FindPartOnRay"
                               or v == "FindPartOnRayWithWhitelist"
                               or v == "FindPartOnRayWithIgnoreList")
