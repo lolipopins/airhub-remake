@@ -2,8 +2,7 @@
 --// Visuals, Anti-Aim (Body + Desync), Movement, Settings tabs.
 --// v25: Logging/Sounds pre-initialized in 02_aimbot; UI just ensures they exist.
 --// NEW: Spider modes UI + Pixelwalk / Wallfucker sections.
---// FIX: validate ALL tabs (VisualsTab, AntiTab, MovementTab, SettingsTab)
---//      before touching them — prevents "attempt to index nil with 'CreateSection'".
+--// FIX: validate ALL tabs before touching them.
 
 local H = getgenv().AirHub
 if not H or not H._UI then warn("[AirHub] 07b: 07a not loaded"); return end
@@ -123,7 +122,7 @@ task.spawn(function()
         Enabled = false, AutoJumpKey = "Space", BypassJump = true, JumpCooldown = 0.1,
         Spider = {
             Enabled = false, Mode = "Default", Range = 2.5, RayCount = 8,
-            Pixelwalk  = { DownRange = 4.0, MaxWidth = 0.6, SnapDistance = 3.5, StickPower = 1.0, ForceRunning = true },
+            Pixelwalk  = { DownRange = 5.0, MaxWidth = 0.6, SnapDistance = 4.0, StickPower = 1.0, ForceRunning = true, CoyoteTime = 0.15, MaxFallSpeed = 5.0, PredictTime = 0.04, HeightOffset = 2.0, RequireFlat = true },
             Wallfucker = { Chance = 0.5, WallRange = 3.0, HoldY = true, PushStrength = 0.0, RayCount = 8 },
         },
     }
@@ -133,14 +132,24 @@ task.spawn(function()
     Bhop.Settings.Spider.Range      = Bhop.Settings.Spider.Range or 2.5
     Bhop.Settings.Spider.RayCount   = Bhop.Settings.Spider.RayCount or 8
     Bhop.Settings.Spider.Pixelwalk  = Bhop.Settings.Spider.Pixelwalk or {
-        DownRange = 4.0, MaxWidth = 0.6, SnapDistance = 3.5, StickPower = 1.0, ForceRunning = true,
+        DownRange = 5.0, MaxWidth = 0.6, SnapDistance = 4.0,
+        StickPower = 1.0, ForceRunning = true,
+        CoyoteTime = 0.15, MaxFallSpeed = 5.0, PredictTime = 0.04,
+        HeightOffset = 2.0, RequireFlat = true,
     }
-    Bhop.Settings.Spider.Pixelwalk.DownRange    = Bhop.Settings.Spider.Pixelwalk.DownRange or 4.0
+    Bhop.Settings.Spider.Pixelwalk.DownRange    = Bhop.Settings.Spider.Pixelwalk.DownRange or 5.0
     Bhop.Settings.Spider.Pixelwalk.MaxWidth     = Bhop.Settings.Spider.Pixelwalk.MaxWidth or 0.6
-    Bhop.Settings.Spider.Pixelwalk.SnapDistance = Bhop.Settings.Spider.Pixelwalk.SnapDistance or 3.5
+    Bhop.Settings.Spider.Pixelwalk.SnapDistance = Bhop.Settings.Spider.Pixelwalk.SnapDistance or 4.0
     Bhop.Settings.Spider.Pixelwalk.StickPower   = Bhop.Settings.Spider.Pixelwalk.StickPower or 1.0
+    Bhop.Settings.Spider.Pixelwalk.CoyoteTime   = Bhop.Settings.Spider.Pixelwalk.CoyoteTime or 0.15
+    Bhop.Settings.Spider.Pixelwalk.MaxFallSpeed = Bhop.Settings.Spider.Pixelwalk.MaxFallSpeed or 5.0
+    Bhop.Settings.Spider.Pixelwalk.PredictTime  = Bhop.Settings.Spider.Pixelwalk.PredictTime or 0.04
+    Bhop.Settings.Spider.Pixelwalk.HeightOffset = Bhop.Settings.Spider.Pixelwalk.HeightOffset or 2.0
     if Bhop.Settings.Spider.Pixelwalk.ForceRunning == nil then
         Bhop.Settings.Spider.Pixelwalk.ForceRunning = true
+    end
+    if Bhop.Settings.Spider.Pixelwalk.RequireFlat == nil then
+        Bhop.Settings.Spider.Pixelwalk.RequireFlat = true
     end
 
     Bhop.Settings.Spider.Wallfucker = Bhop.Settings.Spider.Wallfucker or {
@@ -511,19 +520,33 @@ task.spawn(function()
     --// ===== Spider: Pixelwalk =====
     local pxwSec = MovementTab:CreateSection({ Name = "Spider: Pixelwalk", Side = "Right" })
     pxwSec:AddSlider({ Name = "Down Range", Value = Bhop.Settings.Spider.Pixelwalk.DownRange,
-        Min = 1, Max = 10, Decimals = 1,
+        Min = 1, Max = 12, Decimals = 1,
         Callback = function(v) Bhop.Settings.Spider.Pixelwalk.DownRange = v end })
     pxwSec:AddSlider({ Name = "Max Part Width (thin)", Value = Bhop.Settings.Spider.Pixelwalk.MaxWidth,
         Min = 0.05, Max = 5, Decimals = 2,
         Callback = function(v) Bhop.Settings.Spider.Pixelwalk.MaxWidth = v end })
     pxwSec:AddSlider({ Name = "Snap Distance", Value = Bhop.Settings.Spider.Pixelwalk.SnapDistance,
-        Min = 0.1, Max = 6, Decimals = 2,
+        Min = 0.1, Max = 8, Decimals = 2,
         Callback = function(v) Bhop.Settings.Spider.Pixelwalk.SnapDistance = v end })
     pxwSec:AddSlider({ Name = "Stick Power (0..1)", Value = Bhop.Settings.Spider.Pixelwalk.StickPower,
         Min = 0, Max = 1, Decimals = 2,
         Callback = function(v) Bhop.Settings.Spider.Pixelwalk.StickPower = v end })
+    pxwSec:AddSlider({ Name = "Coyote Time (s)", Value = Bhop.Settings.Spider.Pixelwalk.CoyoteTime,
+        Min = 0, Max = 0.5, Decimals = 2,
+        Callback = function(v) Bhop.Settings.Spider.Pixelwalk.CoyoteTime = v end })
+    pxwSec:AddSlider({ Name = "Max Fall Speed", Value = Bhop.Settings.Spider.Pixelwalk.MaxFallSpeed,
+        Min = 0, Max = 30, Decimals = 1,
+        Callback = function(v) Bhop.Settings.Spider.Pixelwalk.MaxFallSpeed = v end })
+    pxwSec:AddSlider({ Name = "Predict Time (s)", Value = Bhop.Settings.Spider.Pixelwalk.PredictTime,
+        Min = 0, Max = 0.15, Decimals = 3,
+        Callback = function(v) Bhop.Settings.Spider.Pixelwalk.PredictTime = v end })
+    pxwSec:AddSlider({ Name = "Height Offset", Value = Bhop.Settings.Spider.Pixelwalk.HeightOffset,
+        Min = 0, Max = 5, Decimals = 1,
+        Callback = function(v) Bhop.Settings.Spider.Pixelwalk.HeightOffset = v end })
     pxwSec:AddToggle({ Name = "Force Running State", Value = Bhop.Settings.Spider.Pixelwalk.ForceRunning ~= false,
         Callback = function(v) Bhop.Settings.Spider.Pixelwalk.ForceRunning = v end })
+    pxwSec:AddToggle({ Name = "Require Flat Surface", Value = Bhop.Settings.Spider.Pixelwalk.RequireFlat ~= false,
+        Callback = function(v) Bhop.Settings.Spider.Pixelwalk.RequireFlat = v end })
 
     --// ===== Spider: Wallfucker =====
     local wfkSec = MovementTab:CreateSection({ Name = "Spider: Wallfucker", Side = "Right" })
