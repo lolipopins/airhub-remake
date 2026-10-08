@@ -1,25 +1,5 @@
 --// AirHub - 06a_movement_fly_bhop.lua
 --// Fly + Bhop + Spider (Default / Pixelwalk / Wallfucker) + TargetOrbit.
---//
---// NEW: Fly.Settings.TargetOrbit — круговое движение (орбита) вокруг цели
---// Aimbot'а через velocity. Скорость орбиты задаётся, радиус берётся из
---// настроек (по умолчанию "недостающие стады" — разница между текущей
---// дистанцией и целевым радиусом корректируется радиальной составляющей).
---// Если цели нет — fallback на обычный флай (velocity по направлению
---// movement keys).
---//
---// NEW (Spider modes):
---//   * "Default"    — старая логика: raycast по кругу, используется для
---//                    bypass'а bhop-прыжка при касании стены.
---//   * "Pixelwalk"  — удержание и ходьба по очень тонким объектам
---//                    (заборам, решёткам, тонким балкам). Не использует
---//                    баннихоп: самостоятельно гасит падение по Y, пока
---//                    под игроком есть тонкая поверхность. Опционально
---//                    форсит состояние Running, чтобы работал ввод.
---//   * "Wallfucker" — каждый кадр кидает шанс (Chance). Если шанс прошёл
---//                    И рядом есть стена — гасит падение (и по желанию
---//                    чуть толкает вверх). На следующем кадре шанс
---//                    бросается заново — «не даёт упасть на кадр».
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 06a: core not loaded"); return end
@@ -38,17 +18,10 @@ H.Fly = {
         Enabled = false, ToggleKey = "F", Toggle = false,
         Method = "BodyVelocity", Speed = 30, UpSpeed = 20,
         Smoothness = 0.5, UseKeys = true,
-
-        --// ==== Target Orbit ====
         TargetOrbit = {
-            Enabled     = false,     --// включить орбиту вокруг цели Aimbot
-            OrbitSpeed  = 20,        --// тангенциальная скорость орбиты (studs/s)
-            Radius      = 15,        --// желаемый радиус орбиты (studs)
-            Height      = 0,         --// вертикальный сдвиг от target-позиции
-            Correction  = 3,         --// жёсткость радиальной коррекции
-            VerticalCorrection = 3,  --// жёсткость вертикальной коррекции
-            Clockwise   = true,      --// направление вращения
-            FallbackToFly = true,    --// если нет цели — обычный флай
+            Enabled = false, OrbitSpeed = 20, Radius = 15, Height = 0,
+            Correction = 3, VerticalCorrection = 3, Clockwise = true,
+            FallbackToFly = true,
         },
     },
     Internal = {
@@ -138,11 +111,6 @@ local function Fly_GetMoveDir()
     return moveDir
 end
 
---// ---------------------------------------------------------------------------
---// TARGET ORBIT
---// ---------------------------------------------------------------------------
-
---// Возвращает позицию текущей цели Aimbot (LockPart), либо nil.
 local function Fly_GetAimbotTargetPos()
     local A = H.Aimbot
     if not A then return nil end
@@ -153,7 +121,6 @@ local function Fly_GetAimbotTargetPos()
     return nil
 end
 
---// Клампление вектора до длины maxLen (без math.sign).
 local function Fly_ClampVec(v, maxLen)
     local m = v.Magnitude
     if m > maxLen and m > 0.0001 then
@@ -162,10 +129,6 @@ local function Fly_ClampVec(v, maxLen)
     return v
 end
 
---// Считает velocity для орбиты вокруг targetPos.
---//   tangential   — вращение (по часовой / против) со скоростью OrbitSpeed
---//   radial       — коррекция дистанции к Radius (те самые "недостающие стады")
---//   vertical     — коррекция по Y к targetPos.Y + Height
 local function Fly_ComputeOrbitVelocity(hrp, targetPos)
     local O = Fly.Settings.TargetOrbit
     local orbitSpeed = O.OrbitSpeed or 20
@@ -184,7 +147,6 @@ local function Fly_ComputeOrbitVelocity(hrp, targetPos)
         tangentDir = Vector3.new(0, 0, 1)
     else
         radialDir  = horizontal.Unit
-        --// тангенс: поворот radial на 90° вокруг Y
         if O.Clockwise then
             tangentDir = Vector3.new( radialDir.Z, 0, -radialDir.X)
         else
@@ -192,16 +154,11 @@ local function Fly_ComputeOrbitVelocity(hrp, targetPos)
         end
     end
 
-    --// касательная составляющая — сама орбита
     local tangential = tangentDir * orbitSpeed
-
-    --// радиальная коррекция: сколько стадов НЕ ХВАТАЕТ до целевого радиуса
     local radialError = dist - radius
     local radial = radialDir * (radialError * corr)
-    --// ограничим радиальную составляющую, чтобы не вылетать с рывком
     radial = Fly_ClampVec(radial, orbitSpeed)
 
-    --// вертикальная коррекция: тянемся к targetY
     local targetY = targetPos.Y + height
     local yVel = (targetY - hrp.Position.Y) * vCorr
     if math.abs(yVel) > orbitSpeed then
@@ -211,7 +168,6 @@ local function Fly_ComputeOrbitVelocity(hrp, targetPos)
     return tangential + radial + Vector3.new(0, yVel, 0)
 end
 
---// Применяет velocity к HRP выбранным методом.
 local function Fly_ApplyVelocity(hrp, vel)
     local S = Fly.Settings
     local I = Fly.Internal
@@ -228,7 +184,6 @@ local function Fly_ApplyVelocity(hrp, vel)
     elseif S.Method == "Velocity" then
         hrp.Velocity = vel
     elseif S.Method == "CFrame" then
-        --// для CFrame используем дискретное смещение (dt посчитан в апдейте)
         local now = tick()
         local dt = now - (I.LastCFrameTick or now)
         I.LastCFrameTick = now
@@ -259,21 +214,16 @@ local function Fly_Update()
     Fly_EnsureInstance(hrp)
 
     local targetVel = nil
-
-    --// ==== TARGET ORBIT ====
     local O = S.TargetOrbit
     if O and O.Enabled then
         local targetPos = Fly_GetAimbotTargetPos()
         if targetPos then
             targetVel = Fly_ComputeOrbitVelocity(hrp, targetPos)
         elseif not O.FallbackToFly then
-            --// нет цели и fallback выключен — стоим на месте
             targetVel = Vector3.new(0, 0, 0)
         end
-        --// если fallback включён — targetVel остаётся nil и переходим к обычному флаю
     end
 
-    --// ==== ОБЫЧНЫЙ ФЛАЙ ====
     if targetVel == nil then
         local moveDir = Fly_GetMoveDir()
         if moveDir.Y ~= 0 then
@@ -383,23 +333,19 @@ H.Bhop = {
             Mode     = "Default",
             Range    = 2.5,
             RayCount = 8,
-
-            --// ==== PIXELWALK ====
             Pixelwalk = {
-                DownRange    = 4.0,   --// максимальная дистанция рейкаста вниз
-                MaxWidth     = 0.6,   --// считаем "тонким" если min(X,Z) <= MaxWidth
-                SnapDistance = 3.5,   --// на каком расстоянии уже гасим падение
-                StickPower   = 1.0,   --// 0..1 — насколько сильно гасим падение
-                ForceRunning = true,  --// форсить HumanoidStateType.Running на тонком
+                DownRange    = 4.0,
+                MaxWidth     = 0.6,
+                SnapDistance = 3.5,
+                StickPower   = 1.0,
+                ForceRunning = true,
             },
-
-            --// ==== WALLFUCKER ====
             Wallfucker = {
-                Chance       = 0.5,   --// шанс зацепа в кадр (0..1)
-                WallRange    = 3.0,   --// радиус рейкаста вокруг игрока
-                HoldY        = true,  --// гасить падение по Y, пока держимся
-                PushStrength = 0.0,   --// доп. подброс вверх в studs/s (0 — выкл)
-                RayCount     = 8,     --// кол-во горизонтальных лучей
+                Chance       = 0.5,
+                WallRange    = 3.0,
+                HoldY        = true,
+                PushStrength = 0.0,
+                RayCount     = 8,
             },
         },
     },
@@ -434,9 +380,7 @@ Track(LocalPlayer.CharacterAdded:Connect(function()
     Bhop.Internal.WallNormal = nil
 end))
 
---// ---------------------------------------------------------------------------
---// Spider — Default (raycast around)
---// ---------------------------------------------------------------------------
+--// Spider — Default
 local function Spider_DetectWall(char, hrp)
     local rayParams = RaycastParams.new()
     rayParams.FilterDescendantsInstances = { char }
@@ -462,12 +406,7 @@ local function Spider_DetectWall(char, hrp)
     return false
 end
 
---// ---------------------------------------------------------------------------
 --// Spider — Pixelwalk
---// Позволяет удерживаться и ходить по очень тонким объектам (заборы, балки,
---// решётки). Не использует баннихоп: самостоятельно гасит падение по Y,
---// пока под игроком есть тонкая (или близкая) поверхность.
---// ---------------------------------------------------------------------------
 local function Spider_Pixelwalk(char, hrp, hum)
     local P = Bhop.Settings.Spider.Pixelwalk or {}
     local rayParams = RaycastParams.new()
@@ -480,8 +419,6 @@ local function Spider_Pixelwalk(char, hrp, hum)
     local snapDistance = P.SnapDistance or 3.5
     local stickPower   = math.clamp(P.StickPower or 1.0, 0, 1)
 
-    --// Небольшая сетка смещений, чтобы поймать сверхтонкий объект,
-    --// который может оказаться ровно между лучами.
     local offsets = {
         Vector3.new(0,     0,  0),
         Vector3.new( 0.4,  0,  0),
@@ -514,15 +451,11 @@ local function Spider_Pixelwalk(char, hrp, hum)
         return false
     end
 
-    --// Если под нами нет тонкого объекта И мы ещё далеко от поверхности —
-    --// не мешаем обычному падению.
     if not thin and bestHit.Distance > snapDistance then
         Bhop.Internal.WallNormal = nil
         return false
     end
 
-    --// Гасим падение по Y (без этого игрок проваливается сквозь тонкие парты,
-    --// которые Humanoid не считает полом).
     local vel = hrp.Velocity
     if vel.Y < 0 then
         local newY = vel.Y * (1 - stickPower)
@@ -530,8 +463,6 @@ local function Spider_Pixelwalk(char, hrp, hum)
         hrp.Velocity = Vector3.new(vel.X, newY, vel.Z)
     end
 
-    --// На тонкой поверхности Humanoid часто уходит в Freefall — тогда
-    --// не работают WASD. Форсим Running, чтобы вернуть управление.
     if P.ForceRunning ~= false and hum then
         pcall(function()
             if hum:GetState() == Enum.HumanoidStateType.Freefall then
@@ -544,12 +475,7 @@ local function Spider_Pixelwalk(char, hrp, hum)
     return true
 end
 
---// ---------------------------------------------------------------------------
 --// Spider — Wallfucker
---// Каждый кадр бросает шанс. Если шанс прошёл И рядом стена — гасит
---// падение (опционально подкидывает вверх). На следующем кадре шанс
---// бросается заново — «не даёт упасть на кадр».
---// ---------------------------------------------------------------------------
 local function Spider_Wallfucker(char, hrp)
     local W = Bhop.Settings.Spider.Wallfucker or {}
     local chance   = math.clamp(W.Chance or 0.5, 0, 1)
@@ -558,7 +484,6 @@ local function Spider_Wallfucker(char, hrp)
     local push     = W.PushStrength or 0
     local rayCount = math.max(4, W.RayCount or 8)
 
-    --// Бросок шанса. Каждый кадр — заново.
     if math.random() > chance then
         Bhop.Internal.WallNormal = nil
         return false
@@ -586,7 +511,6 @@ local function Spider_Wallfucker(char, hrp)
         return false
     end
 
-    --// Держим: гасим падение по Y.
     if holdY then
         local vel = hrp.Velocity
         if vel.Y < 0 or push > 0 then
@@ -601,9 +525,6 @@ local function Spider_Wallfucker(char, hrp)
     return true
 end
 
---// ---------------------------------------------------------------------------
---// Bhop / Spider main loop
---// ---------------------------------------------------------------------------
 task.spawn(function()
     while not H.ShuttingDown and task.wait(0.01) do
         if not Bhop.Settings.Enabled then
