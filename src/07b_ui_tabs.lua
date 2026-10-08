@@ -2,6 +2,8 @@
 --// Visuals, Anti-Aim (Body + Desync), Movement, Settings tabs.
 --// v25: Logging/Sounds pre-initialized in 02_aimbot; UI just ensures they exist.
 --// NEW: Spider modes UI + Pixelwalk / Wallfucker sections.
+--// FIX: validate ALL tabs (VisualsTab, AntiTab, MovementTab, SettingsTab)
+--//      before touching them — prevents "attempt to index nil with 'CreateSection'".
 
 local H = getgenv().AirHub
 if not H or not H._UI then warn("[AirHub] 07b: 07a not loaded"); return end
@@ -9,10 +11,23 @@ if not H or not H._UI then warn("[AirHub] 07b: 07a not loaded"); return end
 task.spawn(function()
     local deadline = tick() + 10
     while tick() < deadline do
-        if H._UI.MovementTab and H._UI.SettingsTab then break end
+        if H._UI.VisualsTab and H._UI.AntiTab
+           and H._UI.MovementTab and H._UI.SettingsTab then
+            break
+        end
         task.wait(0.1)
     end
-    if not H._UI.MovementTab then warn("[AirHub] 07b: timeout waiting for tabs"); return end
+
+    local missing = {}
+    if not H._UI.VisualsTab  then missing[#missing+1] = "VisualsTab"  end
+    if not H._UI.AntiTab     then missing[#missing+1] = "AntiTab"     end
+    if not H._UI.MovementTab then missing[#missing+1] = "MovementTab" end
+    if not H._UI.SettingsTab then missing[#missing+1] = "SettingsTab" end
+
+    if #missing > 0 then
+        warn("[AirHub] 07b: timeout waiting for tabs, missing: " .. table.concat(missing, ", "))
+        return
+    end
 
     local Util             = H.Util
     local ShowError        = Util.ShowError
