@@ -1,5 +1,5 @@
 --// AirHub - 06a_movement_fly_bhop.lua
---// Fly + Bhop + Spider + TargetOrbit.
+--// Fly + Bhop + Spider (Default / Pixelwalk / Wallfucker) + TargetOrbit.
 --//
 --// NEW: Fly.Settings.TargetOrbit — круговое движение (орбита) вокруг цели
 --// Aimbot'а через velocity. Скорость орбиты задаётся, радиус берётся из
@@ -7,6 +7,19 @@
 --// дистанцией и целевым радиусом корректируется радиальной составляющей).
 --// Если цели нет — fallback на обычный флай (velocity по направлению
 --// movement keys).
+--//
+--// NEW (Spider modes):
+--//   * "Default"    — старая логика: raycast по кругу, используется для
+--//                    bypass'а bhop-прыжка при касании стены.
+--//   * "Pixelwalk"  — удержание и ходьба по очень тонким объектам
+--//                    (заборам, решёткам, тонким балкам). Не использует
+--//                    баннихоп: самостоятельно гасит падение по Y, пока
+--//                    под игроком есть тонкая поверхность. Опционально
+--//                    форсит состояние Running, чтобы работал ввод.
+--//   * "Wallfucker" — каждый кадр кидает шанс (Chance). Если шанс прошёл
+--//                    И рядом есть стена — гасит падение (и по желанию
+--//                    чуть толкает вверх). На следующем кадре шанс
+--//                    бросается заново — «не даёт упасть на кадр».
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 06a: core not loaded"); return end
@@ -355,13 +368,40 @@ Fly.ClearInstances = Fly_ClearInstances
 Fly.GetAimbotTargetPos = Fly_GetAimbotTargetPos
 Fly.ComputeOrbitVelocity = Fly_ComputeOrbitVelocity
 
+--// ===========================================================================
+--// BHOP + SPIDER
+--// ===========================================================================
 H.Bhop = {
     Settings = {
         Enabled = false,
         AutoJumpKey = "Space",
         BypassJump = true,
         JumpCooldown = 0.1,
-        Spider = { Enabled = false, Range = 2.5, RayCount = 8 },
+        Spider = {
+            Enabled  = false,
+            --// "Default" | "Pixelwalk" | "Wallfucker"
+            Mode     = "Default",
+            Range    = 2.5,
+            RayCount = 8,
+
+            --// ==== PIXELWALK ====
+            Pixelwalk = {
+                DownRange    = 4.0,   --// максимальная дистанция рейкаста вниз
+                MaxWidth     = 0.6,   --// считаем "тонким" если min(X,Z) <= MaxWidth
+                SnapDistance = 3.5,   --// на каком расстоянии уже гасим падение
+                StickPower   = 1.0,   --// 0..1 — насколько сильно гасим падение
+                ForceRunning = true,  --// форсить HumanoidStateType.Running на тонком
+            },
+
+            --// ==== WALLFUCKER ====
+            Wallfucker = {
+                Chance       = 0.5,   --// шанс зацепа в кадр (0..1)
+                WallRange    = 3.0,   --// радиус рейкаста вокруг игрока
+                HoldY        = true,  --// гасить падение по Y, пока держимся
+                PushStrength = 0.0,   --// доп. подброс вверх в studs/s (0 — выкл)
+                RayCount     = 8,     --// кол-во горизонтальных лучей
+            },
+        },
     },
     Internal = {
         KeyHeld = false, LastJumpTime = 0, Active = false,
@@ -391,8 +431,12 @@ Track(LocalPlayer.CharacterAdded:Connect(function()
     Bhop.Internal.KeyHeld = false
     Bhop.Internal.Active = false
     Bhop.Internal.SpiderTouching = false
+    Bhop.Internal.WallNormal = nil
 end))
 
+--// ---------------------------------------------------------------------------
+--// Spider — Default (raycast around)
+--// ---------------------------------------------------------------------------
 local function Spider_DetectWall(char, hrp)
     local rayParams = RaycastParams.new()
     rayParams.FilterDescendantsInstances = { char }
@@ -418,11 +462,154 @@ local function Spider_DetectWall(char, hrp)
     return false
 end
 
+--// ---------------------------------------------------------------------------
+--// Spider — Pixelwalk
+--// Позволяет удерживаться и ходить по очень тонким объектам (заборы, балки,
+--// решётки). Не использует баннихоп: самостоятельно гасит падение по Y,
+--// пока под игроком есть тонкая (или близкая) поверхность.
+--// ---------------------------------------------------------------------------
+local function Spider_Pixelwalk(char, hrp, hum)
+    local P = Bhop.Settings.Spider.Pixelwalk or {}
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = { char }
+    rayParams.FilterType = RAY_FILTER
+    rayParams.IgnoreWater = true
+
+    local downRange    = P.DownRange    or 4.0
+    local maxWidth     = P.MaxWidth     or 0.6
+    local snapDistance = P.SnapDistance or 3.5
+    local stickPower   = math.clamp(P.StickPower or 1.0, 0, 1)
+
+    --// Небольшая сетка смещений, чтобы поймать сверхтонкий объект,
+    --// который может оказаться ровно между лучами.
+    local offsets = {
+        Vector3.new(0,     0,  0),
+        Vector3.new( 0.4,  0,  0),
+        Vector3.new(-0.4,  0,  0),
+        Vector3.new( 0,    0,  0.4),
+        Vector3.new( 0,    0, -0.4),
+        Vector3.new( 0.25, 0,  0.25),
+        Vector3.new(-0.25, 0, -0.25),
+    }
+
+    local bestHit = nil
+    local thin    = false
+    local origin  = hrp.Position
+    local down    = Vector3.new(0, -downRange, 0)
+
+    for _, off in ipairs(offsets) do
+        local r = workspace:Raycast(origin + off, down, rayParams)
+        if r and r.Instance and r.Instance.CanCollide then
+            local sz = r.Instance.Size
+            local minAxis = math.min(sz.X, sz.Z)
+            if minAxis <= maxWidth then thin = true end
+            if not bestHit or r.Distance < bestHit.Distance then
+                bestHit = r
+            end
+        end
+    end
+
+    if not bestHit then
+        Bhop.Internal.WallNormal = nil
+        return false
+    end
+
+    --// Если под нами нет тонкого объекта И мы ещё далеко от поверхности —
+    --// не мешаем обычному падению.
+    if not thin and bestHit.Distance > snapDistance then
+        Bhop.Internal.WallNormal = nil
+        return false
+    end
+
+    --// Гасим падение по Y (без этого игрок проваливается сквозь тонкие парты,
+    --// которые Humanoid не считает полом).
+    local vel = hrp.Velocity
+    if vel.Y < 0 then
+        local newY = vel.Y * (1 - stickPower)
+        if math.abs(newY) < 0.05 then newY = 0 end
+        hrp.Velocity = Vector3.new(vel.X, newY, vel.Z)
+    end
+
+    --// На тонкой поверхности Humanoid часто уходит в Freefall — тогда
+    --// не работают WASD. Форсим Running, чтобы вернуть управление.
+    if P.ForceRunning ~= false and hum then
+        pcall(function()
+            if hum:GetState() == Enum.HumanoidStateType.Freefall then
+                hum:ChangeState(Enum.HumanoidStateType.Running)
+            end
+        end)
+    end
+
+    Bhop.Internal.WallNormal = bestHit.Normal
+    return true
+end
+
+--// ---------------------------------------------------------------------------
+--// Spider — Wallfucker
+--// Каждый кадр бросает шанс. Если шанс прошёл И рядом стена — гасит
+--// падение (опционально подкидывает вверх). На следующем кадре шанс
+--// бросается заново — «не даёт упасть на кадр».
+--// ---------------------------------------------------------------------------
+local function Spider_Wallfucker(char, hrp)
+    local W = Bhop.Settings.Spider.Wallfucker or {}
+    local chance   = math.clamp(W.Chance or 0.5, 0, 1)
+    local wallRange= W.WallRange or 3.0
+    local holdY    = W.HoldY ~= false
+    local push     = W.PushStrength or 0
+    local rayCount = math.max(4, W.RayCount or 8)
+
+    --// Бросок шанса. Каждый кадр — заново.
+    if math.random() > chance then
+        Bhop.Internal.WallNormal = nil
+        return false
+    end
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = { char }
+    rayParams.FilterType = RAY_FILTER
+    rayParams.IgnoreWater = true
+
+    local step = (math.pi * 2) / rayCount
+    local bestNormal = nil
+    for i = 0, rayCount - 1 do
+        local angle = i * step
+        local dir = Vector3.new(math.cos(angle), 0, math.sin(angle))
+        local r = workspace:Raycast(hrp.Position, dir * wallRange, rayParams)
+        if r and r.Instance and r.Instance.CanCollide then
+            bestNormal = r.Normal
+            break
+        end
+    end
+
+    if not bestNormal then
+        Bhop.Internal.WallNormal = nil
+        return false
+    end
+
+    --// Держим: гасим падение по Y.
+    if holdY then
+        local vel = hrp.Velocity
+        if vel.Y < 0 or push > 0 then
+            local targetY = vel.Y
+            if vel.Y < 0 then targetY = 0 end
+            if push > 0 then targetY = math.max(targetY, push) end
+            hrp.Velocity = Vector3.new(vel.X, targetY, vel.Z)
+        end
+    end
+
+    Bhop.Internal.WallNormal = bestNormal
+    return true
+end
+
+--// ---------------------------------------------------------------------------
+--// Bhop / Spider main loop
+--// ---------------------------------------------------------------------------
 task.spawn(function()
     while not H.ShuttingDown and task.wait(0.01) do
         if not Bhop.Settings.Enabled then
             Bhop.Internal.Active = false
             Bhop.Internal.SpiderTouching = false
+            Bhop.Internal.WallNormal = nil
             continue
         end
         local char = LocalPlayer.Character
@@ -432,9 +619,18 @@ task.spawn(function()
         if not hum or not hrp then continue end
         Bhop.Internal.Active = true
         Bhop.Internal.SpiderTouching = false
+
         if Bhop.Settings.Spider.Enabled then
-            Bhop.Internal.SpiderTouching = Spider_DetectWall(char, hrp)
+            local mode = Bhop.Settings.Spider.Mode or "Default"
+            if mode == "Pixelwalk" then
+                Bhop.Internal.SpiderTouching = Spider_Pixelwalk(char, hrp, hum)
+            elseif mode == "Wallfucker" then
+                Bhop.Internal.SpiderTouching = Spider_Wallfucker(char, hrp)
+            else
+                Bhop.Internal.SpiderTouching = Spider_DetectWall(char, hrp)
+            end
         end
+
         if Bhop.Internal.KeyHeld then
             local now = tick()
             if now - Bhop.Internal.LastJumpTime >= Bhop.Settings.JumpCooldown then
@@ -458,7 +654,26 @@ Bhop.Functions = {
     ResetSettings = function()
         Bhop.Settings = {
             Enabled = false, AutoJumpKey = "Space", BypassJump = true, JumpCooldown = 0.1,
-            Spider = { Enabled = false, Range = 2.5, RayCount = 8 },
+            Spider = {
+                Enabled  = false,
+                Mode     = "Default",
+                Range    = 2.5,
+                RayCount = 8,
+                Pixelwalk = {
+                    DownRange    = 4.0,
+                    MaxWidth     = 0.6,
+                    SnapDistance = 3.5,
+                    StickPower   = 1.0,
+                    ForceRunning = true,
+                },
+                Wallfucker = {
+                    Chance       = 0.5,
+                    WallRange    = 3.0,
+                    HoldY        = true,
+                    PushStrength = 0.0,
+                    RayCount     = 8,
+                },
+            },
         }
         Bhop.Internal = {
             KeyHeld = false, LastJumpTime = 0, Active = false,
