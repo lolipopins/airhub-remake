@@ -329,20 +329,20 @@ H.Bhop = {
         JumpCooldown = 0.1,
         Spider = {
             Enabled  = false,
-            Mode     = "Default",          --// "Default" | "Pixelwalk" | "Wallfucker"
+            Mode     = "Default",
             Range    = 2.5,
             RayCount = 8,
             Pixelwalk = {
-                DownRange    = 5.0,        --// максимальная дистанция рейкаста вниз
-                MaxWidth     = 0.6,        --// считаем "тонким" если min(X,Z) <= MaxWidth
-                SnapDistance = 4.0,        --// на каком расстоянии уже гасим падение
-                StickPower   = 1.0,        --// 0..1 — насколько сильно гасим падение
-                ForceRunning = true,       --// форсить HumanoidStateType.Running
-                CoyoteTime   = 0.15,       --// окно прощения после потери поверхности (s)
-                MaxFallSpeed = 5.0,        --// лимит скорости падения вблизи поверхности
-                PredictTime  = 0.04,       --// время предсказания для origin рейкаста
-                HeightOffset = 2.0,        --// доп. origin ниже центра HRP
-                RequireFlat  = true,       --// считать «полом» только поверхность с Normal.Y>=0.5
+                DownRange    = 5.0,
+                MaxWidth     = 0.6,
+                SnapDistance = 4.0,
+                StickPower   = 1.0,
+                ForceRunning = true,
+                CoyoteTime   = 0.15,
+                MaxFallSpeed = 5.0,
+                PredictTime  = 0.04,
+                HeightOffset = 2.0,
+                RequireFlat  = true,
             },
             Wallfucker = {
                 Chance       = 0.5,
@@ -442,8 +442,6 @@ local function Spider_Pixelwalk(char, hrp, hum)
     local vel = hrp.Velocity
     local now = tick()
 
-    --// Origins: текущая позиция, предсказанная, сдвинутая вниз, сдвинутая
-    --// по горизонтали (look-ahead).
     local lookAhead = Vector3.new(vel.X, 0, vel.Z) * (predictTime * 2)
     local predicted = hrp.Position
         + Vector3.new(0, vel.Y * predictTime, 0)
@@ -456,7 +454,6 @@ local function Spider_Pixelwalk(char, hrp, hum)
         hrp.Position + lookAhead,
     }
 
-    --// Смещения вокруг центра (в горизонтальной плоскости).
     local offsets = {
         Vector3.new(0,     0,  0),
         Vector3.new( 0.5,  0,  0),
@@ -495,7 +492,6 @@ local function Spider_Pixelwalk(char, hrp, hum)
         end
     end
 
-    --// Coyote time
     if thinFound then
         I.Pixelwalk_LastThin = now
         I.Pixelwalk_LastThinNormal = bestThinHit and bestThinHit.Normal or nil
@@ -508,7 +504,6 @@ local function Spider_Pixelwalk(char, hrp, hum)
         return false
     end
 
-    --// Тонкой поверхности нет, мы не в coyote, и мы далеко от любой — не мешаем.
     if not thinFound and not inCoyote then
         if bestHit and bestHit.Distance > snapDistance then
             I.WallNormal = nil
@@ -516,14 +511,12 @@ local function Spider_Pixelwalk(char, hrp, hum)
         end
     end
 
-    --// ==== Stick: гасим падение по Y ====
     if vel.Y < 0 then
         local newY = vel.Y * (1 - stickPower)
         if math.abs(newY) < 0.05 then newY = 0 end
         hrp.Velocity = Vector3.new(vel.X, newY, vel.Z)
     end
 
-    --// ==== Fall limiter (страховка) ====
     if not thinFound and not inCoyote and bestHit
        and bestHit.Distance <= snapDistance then
         local y = hrp.Velocity.Y
@@ -532,7 +525,6 @@ local function Spider_Pixelwalk(char, hrp, hum)
         end
     end
 
-    --// ==== Force Running ====
     if forceRunning and hum then
         pcall(function()
             local st = hum:GetState()
