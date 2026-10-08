@@ -329,16 +329,20 @@ H.Bhop = {
         JumpCooldown = 0.1,
         Spider = {
             Enabled  = false,
-            --// "Default" | "Pixelwalk" | "Wallfucker"
-            Mode     = "Default",
+            Mode     = "Default",          --// "Default" | "Pixelwalk" | "Wallfucker"
             Range    = 2.5,
             RayCount = 8,
             Pixelwalk = {
-                DownRange    = 4.0,
-                MaxWidth     = 0.6,
-                SnapDistance = 3.5,
-                StickPower   = 1.0,
-                ForceRunning = true,
+                DownRange    = 5.0,        --// максимальная дистанция рейкаста вниз
+                MaxWidth     = 0.6,        --// считаем "тонким" если min(X,Z) <= MaxWidth
+                SnapDistance = 4.0,        --// на каком расстоянии уже гасим падение
+                StickPower   = 1.0,        --// 0..1 — насколько сильно гасим падение
+                ForceRunning = true,       --// форсить HumanoidStateType.Running
+                CoyoteTime   = 0.15,       --// окно прощения после потери поверхности (s)
+                MaxFallSpeed = 5.0,        --// лимит скорости падения вблизи поверхности
+                PredictTime  = 0.04,       --// время предсказания для origin рейкаста
+                HeightOffset = 2.0,        --// доп. origin ниже центра HRP
+                RequireFlat  = true,       --// считать «полом» только поверхность с Normal.Y>=0.5
             },
             Wallfucker = {
                 Chance       = 0.5,
@@ -352,6 +356,7 @@ H.Bhop = {
     Internal = {
         KeyHeld = false, LastJumpTime = 0, Active = false,
         SpiderTouching = false, WallNormal = nil,
+        Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
     },
 }
 local Bhop = H.Bhop
@@ -378,9 +383,13 @@ Track(LocalPlayer.CharacterAdded:Connect(function()
     Bhop.Internal.Active = false
     Bhop.Internal.SpiderTouching = false
     Bhop.Internal.WallNormal = nil
+    Bhop.Internal.Pixelwalk_LastThin = 0
+    Bhop.Internal.Pixelwalk_LastThinNormal = nil
 end))
 
+--// ---------------------------------------------------------------------------
 --// Spider — Default
+--// ---------------------------------------------------------------------------
 local function Spider_DetectWall(char, hrp)
     local rayParams = RaycastParams.new()
     rayParams.FilterDescendantsInstances = { char }
@@ -406,76 +415,143 @@ local function Spider_DetectWall(char, hrp)
     return false
 end
 
---// Spider — Pixelwalk
+--// ---------------------------------------------------------------------------
+--// Spider — Pixelwalk (v2)
+--// Multi-origin + predictive cast + coyote time + fall limiter.
+--// ---------------------------------------------------------------------------
 local function Spider_Pixelwalk(char, hrp, hum)
     local P = Bhop.Settings.Spider.Pixelwalk or {}
+    local I = Bhop.Internal
+
     local rayParams = RaycastParams.new()
     rayParams.FilterDescendantsInstances = { char }
     rayParams.FilterType = RAY_FILTER
     rayParams.IgnoreWater = true
 
-    local downRange    = P.DownRange    or 4.0
+    local downRange    = P.DownRange    or 5.0
     local maxWidth     = P.MaxWidth     or 0.6
-    local snapDistance = P.SnapDistance or 3.5
+    local snapDistance = P.SnapDistance or 4.0
     local stickPower   = math.clamp(P.StickPower or 1.0, 0, 1)
+    local coyoteTime   = P.CoyoteTime   or 0.15
+    local maxFallSpeed = P.MaxFallSpeed or 5.0
+    local predictTime  = P.PredictTime  or 0.04
+    local heightOffset = P.HeightOffset or 2.0
+    local requireFlat  = P.RequireFlat ~= false
+    local forceRunning = P.ForceRunning ~= false
 
-    local offsets = {
-        Vector3.new(0,     0,  0),
-        Vector3.new( 0.4,  0,  0),
-        Vector3.new(-0.4,  0,  0),
-        Vector3.new( 0,    0,  0.4),
-        Vector3.new( 0,    0, -0.4),
-        Vector3.new( 0.25, 0,  0.25),
-        Vector3.new(-0.25, 0, -0.25),
+    local vel = hrp.Velocity
+    local now = tick()
+
+    --// Origins: текущая позиция, предсказанная, сдвинутая вниз, сдвинутая
+    --// по горизонтали (look-ahead).
+    local lookAhead = Vector3.new(vel.X, 0, vel.Z) * (predictTime * 2)
+    local predicted = hrp.Position
+        + Vector3.new(0, vel.Y * predictTime, 0)
+        + lookAhead
+
+    local origins = {
+        hrp.Position,
+        predicted,
+        hrp.Position - Vector3.new(0, heightOffset, 0),
+        hrp.Position + lookAhead,
     }
 
-    local bestHit = nil
-    local thin    = false
-    local origin  = hrp.Position
-    local down    = Vector3.new(0, -downRange, 0)
+    --// Смещения вокруг центра (в горизонтальной плоскости).
+    local offsets = {
+        Vector3.new(0,     0,  0),
+        Vector3.new( 0.5,  0,  0),
+        Vector3.new(-0.5,  0,  0),
+        Vector3.new( 0,    0,  0.5),
+        Vector3.new( 0,    0, -0.5),
+        Vector3.new( 0.35, 0,  0.35),
+        Vector3.new(-0.35, 0, -0.35),
+        Vector3.new( 0.35, 0, -0.35),
+        Vector3.new(-0.35, 0,  0.35),
+    }
 
-    for _, off in ipairs(offsets) do
-        local r = workspace:Raycast(origin + off, down, rayParams)
-        if r and r.Instance and r.Instance.CanCollide then
-            local sz = r.Instance.Size
-            local minAxis = math.min(sz.X, sz.Z)
-            if minAxis <= maxWidth then thin = true end
-            if not bestHit or r.Distance < bestHit.Distance then
-                bestHit = r
+    local down = Vector3.new(0, -downRange, 0)
+    local bestHit, bestThinHit = nil, nil
+    local thinFound = false
+
+    for _, origin in ipairs(origins) do
+        for _, off in ipairs(offsets) do
+            local r = workspace:Raycast(origin + off, down, rayParams)
+            if r and r.Instance and r.Instance.CanCollide then
+                local isFlat = r.Normal.Y >= 0.5
+                if (not requireFlat) or isFlat then
+                    local sz = r.Instance.Size
+                    local minAxis = math.min(sz.X, sz.Z)
+                    if minAxis <= maxWidth then
+                        thinFound = true
+                        if not bestThinHit or r.Distance < bestThinHit.Distance then
+                            bestThinHit = r
+                        end
+                    end
+                end
+                if not bestHit or r.Distance < bestHit.Distance then
+                    bestHit = r
+                end
             end
         end
     end
 
-    if not bestHit then
-        Bhop.Internal.WallNormal = nil
+    --// Coyote time
+    if thinFound then
+        I.Pixelwalk_LastThin = now
+        I.Pixelwalk_LastThinNormal = bestThinHit and bestThinHit.Normal or nil
+    end
+    local inCoyote = I.Pixelwalk_LastThin
+        and (now - I.Pixelwalk_LastThin) < coyoteTime
+
+    if not bestHit and not inCoyote then
+        I.WallNormal = nil
         return false
     end
 
-    if not thin and bestHit.Distance > snapDistance then
-        Bhop.Internal.WallNormal = nil
-        return false
+    --// Тонкой поверхности нет, мы не в coyote, и мы далеко от любой — не мешаем.
+    if not thinFound and not inCoyote then
+        if bestHit and bestHit.Distance > snapDistance then
+            I.WallNormal = nil
+            return false
+        end
     end
 
-    local vel = hrp.Velocity
+    --// ==== Stick: гасим падение по Y ====
     if vel.Y < 0 then
         local newY = vel.Y * (1 - stickPower)
         if math.abs(newY) < 0.05 then newY = 0 end
         hrp.Velocity = Vector3.new(vel.X, newY, vel.Z)
     end
 
-    if P.ForceRunning ~= false and hum then
+    --// ==== Fall limiter (страховка) ====
+    if not thinFound and not inCoyote and bestHit
+       and bestHit.Distance <= snapDistance then
+        local y = hrp.Velocity.Y
+        if y < -maxFallSpeed then
+            hrp.Velocity = Vector3.new(hrp.Velocity.X, -maxFallSpeed, hrp.Velocity.Z)
+        end
+    end
+
+    --// ==== Force Running ====
+    if forceRunning and hum then
         pcall(function()
-            if hum:GetState() == Enum.HumanoidStateType.Freefall then
+            local st = hum:GetState()
+            if st == Enum.HumanoidStateType.Freefall
+               or st == Enum.HumanoidStateType.FallingDown then
                 hum:ChangeState(Enum.HumanoidStateType.Running)
             end
         end)
     end
 
-    Bhop.Internal.WallNormal = bestHit.Normal
+    I.WallNormal = (bestThinHit and bestThinHit.Normal)
+        or (bestHit and bestHit.Normal)
+        or I.Pixelwalk_LastThinNormal
     return true
 end
 
+--// ---------------------------------------------------------------------------
 --// Spider — Wallfucker
+--// ---------------------------------------------------------------------------
 local function Spider_Wallfucker(char, hrp)
     local W = Bhop.Settings.Spider.Wallfucker or {}
     local chance   = math.clamp(W.Chance or 0.5, 0, 1)
@@ -531,6 +607,8 @@ task.spawn(function()
             Bhop.Internal.Active = false
             Bhop.Internal.SpiderTouching = false
             Bhop.Internal.WallNormal = nil
+            Bhop.Internal.Pixelwalk_LastThin = 0
+            Bhop.Internal.Pixelwalk_LastThinNormal = nil
             continue
         end
         local char = LocalPlayer.Character
@@ -581,11 +659,16 @@ Bhop.Functions = {
                 Range    = 2.5,
                 RayCount = 8,
                 Pixelwalk = {
-                    DownRange    = 4.0,
+                    DownRange    = 5.0,
                     MaxWidth     = 0.6,
-                    SnapDistance = 3.5,
+                    SnapDistance = 4.0,
                     StickPower   = 1.0,
                     ForceRunning = true,
+                    CoyoteTime   = 0.15,
+                    MaxFallSpeed = 5.0,
+                    PredictTime  = 0.04,
+                    HeightOffset = 2.0,
+                    RequireFlat  = true,
                 },
                 Wallfucker = {
                     Chance       = 0.5,
@@ -599,6 +682,7 @@ Bhop.Functions = {
         Bhop.Internal = {
             KeyHeld = false, LastJumpTime = 0, Active = false,
             SpiderTouching = false, WallNormal = nil,
+            Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
         }
     end,
 }
