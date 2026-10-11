@@ -4,10 +4,8 @@
 --// Desync modes: Default / OldPosition / Void / InPlayer
 --// Desync methods: CFrame / Position / Velocity / Motor6D / HipHeight / Network
 --// Animation Breaker:
---//   Mode = None / Speed / Freeze / Jitter / Replace
---//   Replace = подменяет игровые анимации на набор из Preset
---//   Presets = Default R15 / Default R6 / Zombie / Ninja / Pirate / Robot /
---//             Toy / Levitation / Custom (пользовательские ID из UI)
+--//   Preset = одна из встроенных анимаций (или "Custom" → CustomId)
+--//   Mode   = Speed (множитель) | RandomFrames (прыжки в случайный кадр)
 --// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 03_antiaim: core not loaded") return end
@@ -74,34 +72,20 @@ H.AntiAim = {
     AnimationBreaker = {
         Settings = {
             Enabled        = false,
-            Mode           = "None",   -- None / Speed / Freeze / Jitter / Replace
-            Preset         = "None",   -- name из AB.AnimationPresets
-            Speed          = 5,        -- Speed mode (отриц. = реверс)
-            FreezeFrame    = 0,        -- Freeze mode
-            JitterInterval = 0.15,
-            JitterMin      = 0.1,
-            JitterMax      = 10,
-            ApplyToServer  = true,     -- SetNetworkOwner(LocalPlayer)
-            CustomIds = {
-                Idle  = "",
-                Walk  = "",
-                Run   = "",
-                Jump  = "",
-                Fall  = "",
-                Climb = "",
-            },
+            Mode           = "Speed",       -- Speed | RandomFrames
+            Preset         = "None",        -- "None" | preset name | "Custom"
+            CustomId       = "",            -- rbxassetid://... (когда Preset = "Custom")
+            Speed          = 1,             -- Speed mode
+            RandomInterval = 0.1,           -- RandomFrames mode
+            ApplyToServer  = true,          -- SetNetworkOwner(LocalPlayer)
         },
         Internal = {
-            JitterTimer     = 0,
-            JitterSpeed     = 1,
-            LoadedTracks    = {},      -- [slot] = { AnimationTrack... }
-            OurTracksSet    = {},      -- [track] = true
-            LoadedPreset    = nil,     -- имя загруженного пресета
-            AnimConnection  = nil,
+            CurrentTrack    = nil,          -- AnimationTrack
+            CurrentKey      = nil,          -- "name:presetName" или "custom:ID" — чтобы понять, надо ли перегружать
+            AnimConnection  = nil,          -- Animator.AnimationPlayed hook
             LastHRP         = nil,
             NetworkOwnerSet = false,
-            LastSlot        = nil,
-            LastPresetSrc   = nil,     -- "builtin" | "custom" (для перезагрузки при смене ID)
+            RandomTimer     = 0,
         },
         Functions = {},
     },
@@ -418,103 +402,37 @@ local function StopDesync()
 end
 
 --// ===========================================================================
---// Animation Breaker
+--// Animation Breaker — presets (single animation each)
 --// ===========================================================================
---//
---// Built-in animation packs (Roblox catalog IDs).
---// Каждый пресет = { idle, walk, run, jump, fall, climb }.
---// Значения = массивы ID (одна анимация или несколько для idle-вариаций).
---//
 AB.AnimationPresets = {
-    ["None"] = {},
-
-    ["Default R15"] = {
-        idle  = {507766666, 507766951, 507766388},
-        walk  = {507777826},
-        run   = {507767714},
-        jump  = {507765000},
-        fall  = {507767968},
-        climb = {507765644},
-    },
-
-    ["Default R6"] = {
-        idle  = {180435571, 180435792},
-        walk  = {180426354},
-        run   = {180426354},
-        jump  = {125750702},
-        fall  = {180436148},
-        climb = {180436334},
-    },
-
-    ["Zombie R15"] = {
-        idle  = {616006778, 616008087, 616013216},
-        walk  = {616008936},
-        run   = {616010382},
-        jump  = {616005621},
-        fall  = {616011806},
-        climb = {616003253},
-    },
-
-    ["Ninja R15"] = {
-        idle  = {656117400, 656118341},
-        walk  = {656121766},
-        run   = {656118852},
-        jump  = {656117878},
-        fall  = {656115606},
-        climb = {656114359},
-    },
-
-    ["Pirate R15"] = {
-        idle  = {750781171},
-        walk  = {750777382},
-        run   = {750779262},
-        jump  = {750783974},
-        fall  = {750783830},
-        climb = {750785693},
-    },
-
-    ["Robot R15"] = {
-        idle  = {616088791},
-        walk  = {616090535},
-        run   = {616091379},
-        jump  = {616087306},
-        fall  = {616087669},
-        climb = {616086359},
-    },
-
-    ["Toy R15"] = {
-        idle  = {782850875, 782848174},
-        walk  = {782845990},
-        run   = {782846968},
-        jump  = {782849141},
-        fall  = {782848400},
-        climb = {782846459},
-    },
-
-    ["Levitation R15"] = {
-        idle  = {616006778},
-        walk  = {616008936},
-        run   = {616010382},
-    },
-
-    --// Специальный: читает AB.Settings.CustomIds
-    ["Custom"] = nil,
+    ["None"]              = nil,
+    ["Default R15 Idle"]  = 507766666,
+    ["Default R15 Walk"]  = 507777826,
+    ["Default R15 Run"]   = 507767714,
+    ["Default R15 Jump"]  = 507765000,
+    ["Default R15 Fall"]  = 507767968,
+    ["Default R6 Idle"]   = 180435571,
+    ["Default R6 Walk"]   = 180426354,
+    ["Default R6 Run"]    = 180426354,
+    ["Default R6 Jump"]   = 125750702,
+    ["Default R6 Fall"]   = 180436148,
+    ["Zombie Idle"]       = 616006778,
+    ["Zombie Walk"]       = 616008936,
+    ["Zombie Run"]        = 616010382,
+    ["Zombie Jump"]       = 616005621,
+    ["Ninja Idle"]        = 656117400,
+    ["Ninja Run"]         = 656118852,
+    ["Pirate Idle"]       = 750781171,
+    ["Pirate Run"]        = 750779262,
+    ["Robot Idle"]        = 616088791,
+    ["Toy Idle"]          = 782850875,
+    ["Levitation Idle"]   = 616006778,
+    ["Custom"]            = nil,   -- читает AB.Settings.CustomId
 }
 
 --// ---------------------------------------------------------------------------
 --// Animation Breaker helpers
 --// ---------------------------------------------------------------------------
-local function ParseIds(str)
-    -- Принимает "507766666, 507766951" или "rbxassetid://507766666"
-    local ids = {}
-    if type(str) ~= "string" or str == "" then return ids end
-    for num in string.gmatch(str, "%d+") do
-        local n = tonumber(num)
-        if n and n > 0 then ids[#ids + 1] = n end
-    end
-    return ids
-end
-
 local function GetAnimator(char)
     if not char then return nil end
     local hum = char:FindFirstChildOfClass("Humanoid")
@@ -522,95 +440,49 @@ local function GetAnimator(char)
     return hum:FindFirstChildOfClass("Animator")
 end
 
-local function GetActiveSlot(hum)
-    if not hum then return "idle" end
-    local ok, state = pcall(function() return hum:GetState() end)
-    if not ok then return "idle" end
-
-    if state == Enum.HumanoidStateType.Freefall then return "fall" end
-    if state == Enum.HumanoidStateType.Jumping  then return "jump" end
-    if state == Enum.HumanoidStateType.Climbing then return "climb" end
-    if state == Enum.HumanoidStateType.Swimming then return "run" end
-    if state == Enum.HumanoidStateType.Running
-       or state == Enum.HumanoidStateType.RunningNoPhysics
-       or state == Enum.HumanoidStateType.Landed then
-        if hum.MoveDirection.Magnitude > 0.1 then
-            return "run"
-        else
-            return "idle"
-        end
-    end
-    return "idle"
+local function ParseAssetId(str)
+    if type(str) ~= "string" then return nil end
+    str = str:gsub("%s", "")
+    if str == "" then return nil end
+    if str:match("^rbxassetid://%d+$") then return str end
+    local n = tonumber(str:match("%d+") or "")
+    if n and n > 0 then return "rbxassetid://" .. n end
+    return nil
 end
 
-local function StopAllOurTracks()
-    for _, tracks in pairs(AB.Internal.LoadedTracks) do
-        for _, t in ipairs(tracks) do
-            pcall(function() t:Stop(0) end)
-        end
+local function ResolvePresetId()
+    local presetName = AB.Settings.Preset
+    if presetName == "Custom" then
+        return ParseAssetId(AB.Settings.CustomId)
     end
-    AB.Internal.LoadedTracks = {}
-    AB.Internal.OurTracksSet = {}
+    local id = AB.AnimationPresets[presetName]
+    if id then return "rbxassetid://" .. tostring(id) end
+    return nil
+end
+
+local function CurrentKey()
+    -- Уникальный ключ текущего выбранного источника — чтобы перезагружать трек только при смене
+    if AB.Settings.Preset == "Custom" then
+        return "custom:" .. tostring(AB.Settings.CustomId or "")
+    end
+    return "preset:" .. tostring(AB.Settings.Preset or "None")
+end
+
+local function StopOurTrack()
+    if AB.Internal.CurrentTrack then
+        pcall(function() AB.Internal.CurrentTrack:Stop(0) end)
+        AB.Internal.CurrentTrack = nil
+    end
 end
 
 local function StopGameTracks(animator)
     local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
     if not ok or not tracks then return end
     for _, t in ipairs(tracks) do
-        if not AB.Internal.OurTracksSet[t] then
+        if t ~= AB.Internal.CurrentTrack then
             pcall(function() t:Stop(0) end)
         end
     end
-end
-
-local function ResolvePresetTable()
-    local presetName = AB.Settings.Preset
-    if presetName == "Custom" then
-        local ci = AB.Settings.CustomIds or {}
-        local out = {}
-        local function fill(slot, key)
-            local ids = ParseIds(ci[key])
-            if #ids > 0 then out[slot] = ids end
-        end
-        fill("idle",  "Idle")
-        fill("walk",  "Walk")
-        fill("run",   "Run")
-        fill("jump",  "Jump")
-        fill("fall",  "Fall")
-        fill("climb", "Climb")
-        if next(out) == nil then return nil end
-        return out
-    end
-    return AB.AnimationPresets[presetName]
-end
-
-local function LoadPresetTracks(animator, presetTable)
-    StopAllOurTracks()
-    if not presetTable then return end
-
-    local loaded = {}
-    local set    = {}
-
-    for slot, ids in pairs(presetTable) do
-        local slotTracks = {}
-        for _, id in ipairs(ids) do
-            local anim = Instance.new("Animation")
-            anim.AnimationId = "rbxassetid://" .. tostring(id)
-            local ok, track = pcall(function() return animator:LoadAnimation(anim) end)
-            if ok and track then
-                track.Looped   = true
-                track.Priority = Enum.AnimationPriority.Action4
-                slotTracks[#slotTracks + 1] = track
-                set[track] = true
-            end
-        end
-        if #slotTracks > 0 then
-            loaded[slot] = slotTracks
-        end
-    end
-
-    AB.Internal.LoadedTracks = loaded
-    AB.Internal.OurTracksSet = set
 end
 
 local function AttachAnimHook(animator)
@@ -621,126 +493,62 @@ local function AttachAnimHook(animator)
     AB.Internal.AnimConnection = animator.AnimationPlayed:Connect(function(track)
         if H.ShuttingDown then return end
         if not AB.Settings.Enabled then return end
-        if AB.Settings.Mode ~= "Replace" then return end
-        if AB.Internal.OurTracksSet[track] then return end
+        if track == AB.Internal.CurrentTrack then return end
         pcall(function() track:Stop(0) end)
     end)
 end
 
---// ---------------------------------------------------------------------------
---// Per-mode appliers
---// ---------------------------------------------------------------------------
-local function ApplyReplaceMode(animator, hum)
-    local presetName = AB.Settings.Preset
-    local presetSrc
-    if presetName == "Custom" then
-        local ci = AB.Settings.CustomIds or {}
-        presetSrc = table.concat({
-            ci.Idle or "", ci.Walk or "", ci.Run or "",
-            ci.Jump or "", ci.Fall or "", ci.Climb or "",
-        }, "|")
-    else
-        presetSrc = "builtin:" .. tostring(presetName)
-    end
+local function LoadPresetTrack(animator)
+    StopOurTrack()
+    local assetId = ResolvePresetId()
+    if not assetId then return end
 
-    if AB.Internal.LoadedPreset ~= presetName
-       or AB.Internal.LastPresetSrc ~= presetSrc then
-        local presetTable = ResolvePresetTable()
-        if not presetTable or next(presetTable) == nil then
-            StopAllOurTracks()
-            AB.Internal.LoadedPreset  = nil
-            AB.Internal.LastPresetSrc = presetSrc
-            return
-        end
-        LoadPresetTracks(animator, presetTable)
-        AB.Internal.LoadedPreset  = presetName
-        AB.Internal.LastPresetSrc = presetSrc
-        AB.Internal.LastSlot      = nil
-    end
+    local anim = Instance.new("Animation")
+    anim.AnimationId = assetId
+    local ok, track = pcall(function() return animator:LoadAnimation(anim) end)
+    if not ok or not track then return end
 
-    StopGameTracks(animator)
-
-    local slot = GetActiveSlot(hum)
-    local tracksForSlot = AB.Internal.LoadedTracks[slot]
-    if not tracksForSlot or #tracksForSlot == 0 then
-        tracksForSlot = AB.Internal.LoadedTracks.idle
-        slot = "idle"
-    end
-    if not tracksForSlot or #tracksForSlot == 0 then return end
-
-    local activeTrack
-    if slot == "idle" and #tracksForSlot > 1 then
-        if AB.Internal.LastSlot ~= "idle" or math.random() < 0.02 then
-            activeTrack = tracksForSlot[math.random(1, #tracksForSlot)]
-        else
-            for _, t in ipairs(tracksForSlot) do
-                if t.IsPlaying then activeTrack = t break end
-            end
-            activeTrack = activeTrack or tracksForSlot[1]
-        end
-    else
-        activeTrack = tracksForSlot[1]
-    end
-
-    for s, slotTracks in pairs(AB.Internal.LoadedTracks) do
-        for _, t in ipairs(slotTracks) do
-            if t ~= activeTrack and t.IsPlaying then
-                pcall(function() t:Stop(0.1) end)
-            end
-        end
-    end
-
-    if not activeTrack.IsPlaying then
-        pcall(function() activeTrack:Play(0.1) end)
-    end
-
-    AB.Internal.LastSlot = slot
+    track.Looped   = true
+    track.Priority = Enum.AnimationPriority.Action4
+    pcall(function() track:Play(0.1) end)
+    AB.Internal.CurrentTrack = track
 end
 
-local function ApplySpeedMode(animator)
+--// ---------------------------------------------------------------------------
+--// Modes
+--// ---------------------------------------------------------------------------
+local function ApplySpeedMode()
+    local tr = AB.Internal.CurrentTrack
+    if not tr then return end
     local speed = tonumber(AB.Settings.Speed) or 1
-    local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
-    if not ok or not tracks then return end
-    for _, t in ipairs(tracks) do
-        pcall(function()
-            if t.Speed ~= speed then t.Speed = speed end
-        end)
-    end
+    pcall(function()
+        if tr.Speed ~= speed then tr.Speed = speed end
+    end)
 end
 
-local function ApplyFreezeMode(animator)
-    local frame = tonumber(AB.Settings.FreezeFrame) or 0
-    local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
-    if not ok or not tracks then return end
-    for _, t in ipairs(tracks) do
-        pcall(function()
-            if t.Speed ~= 0 then t.Speed = 0 end
-            t.TimePosition = frame
-        end)
-    end
-end
+local function ApplyRandomFramesMode(dt)
+    local tr = AB.Internal.CurrentTrack
+    if not tr then return end
 
-local function ApplyJitterMode(animator, dt)
-    local interval = tonumber(AB.Settings.JitterInterval) or 0.15
-    if interval < 0.01 then interval = 0.01 end
-    AB.Internal.JitterTimer = AB.Internal.JitterTimer + dt
-    if AB.Internal.JitterTimer >= interval then
-        AB.Internal.JitterTimer = 0
-        local mn = tonumber(AB.Settings.JitterMin) or 0.1
-        local mx = tonumber(AB.Settings.JitterMax) or 10
-        if mx < mn then mx = mn end
-        AB.Internal.JitterSpeed = mn + math.random() * (mx - mn)
-    end
-    local speed = AB.Internal.JitterSpeed
-    local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
-    if not ok or not tracks then return end
-    for _, t in ipairs(tracks) do
-        pcall(function() t.Speed = speed end)
+    -- замораживаем движение и прыгаем по кадрам
+    pcall(function() if tr.Speed ~= 0 then tr.Speed = 0 end end)
+
+    local interval = tonumber(AB.Settings.RandomInterval) or 0.1
+    if interval < 0.02 then interval = 0.02 end
+
+    AB.Internal.RandomTimer = AB.Internal.RandomTimer + dt
+    if AB.Internal.RandomTimer >= interval then
+        AB.Internal.RandomTimer = 0
+        local length = 0
+        pcall(function() length = tr.Length end)
+        if length and length > 0 then
+            pcall(function() tr.TimePosition = math.random() * length end)
+        end
     end
 end
 
 --// ---------------------------------------------------------------------------
---// Main entry (called from Heartbeat)
+--// Main entry (Heartbeat)
 --// ---------------------------------------------------------------------------
 local function ApplyAnimationBreaker(dt)
     if H.ShuttingDown then return end
@@ -748,28 +556,27 @@ local function ApplyAnimationBreaker(dt)
 
     local char = LocalPlayer.Character
     if not char then
-        StopAllOurTracks()
+        StopOurTrack()
         AB.Internal.NetworkOwnerSet = false
         AB.Internal.LastHRP         = nil
-        AB.Internal.LoadedPreset    = nil
-        AB.Internal.LastPresetSrc   = nil
+        AB.Internal.CurrentKey      = nil
         return
     end
 
     local animator = GetAnimator(char)
     if not animator then
-        AB.Internal.LoadedPreset = nil
+        AB.Internal.CurrentKey = nil
         return
     end
 
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if hrp ~= AB.Internal.LastHRP then
+        -- респавн / смена персонажа
         AB.Internal.LastHRP         = hrp
         AB.Internal.NetworkOwnerSet = false
-        StopAllOurTracks()
-        AB.Internal.LoadedPreset    = nil
-        AB.Internal.LastPresetSrc   = nil
-        AB.Internal.LastSlot        = nil
+        StopOurTrack()
+        AB.Internal.CurrentKey      = nil
+        AB.Internal.RandomTimer     = 0
         AttachAnimHook(animator)
     end
 
@@ -778,43 +585,37 @@ local function ApplyAnimationBreaker(dt)
         AB.Internal.NetworkOwnerSet = true
     end
 
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    local mode = AB.Settings.Mode or "None"
-
-    if mode == "None" then
-        if AB.Internal.LoadedPreset then
-            StopAllOurTracks()
-            AB.Internal.LoadedPreset  = nil
-            AB.Internal.LastPresetSrc = nil
-            AB.Internal.LastSlot      = nil
-        end
+    -- Нет выбранного источника — ничего не играем
+    if AB.Settings.Preset == "None" then
+        StopOurTrack()
+        AB.Internal.CurrentKey = nil
         return
     end
 
-    if mode == "Replace" then
-        if not AB.Internal.AnimConnection then AttachAnimHook(animator) end
-        ApplyReplaceMode(animator, hum)
+    -- (Re)load если сменился источник
+    local key = CurrentKey()
+    if AB.Internal.CurrentKey ~= key then
+        AB.Internal.CurrentKey = key
+        LoadPresetTrack(animator)
+        AB.Internal.RandomTimer = 0
+    end
 
-    elseif mode == "Speed" then
-        if AB.Internal.LoadedPreset then
-            StopAllOurTracks()
-            AB.Internal.LoadedPreset = nil
-        end
-        ApplySpeedMode(animator)
+    -- Гарантируем, что трек играет (Roblox иногда сам его прикрывает)
+    local tr = AB.Internal.CurrentTrack
+    if not tr then return end
+    if not tr.IsPlaying then
+        pcall(function() tr:Play(0.1) end)
+    end
 
-    elseif mode == "Freeze" then
-        if AB.Internal.LoadedPreset then
-            StopAllOurTracks()
-            AB.Internal.LoadedPreset = nil
-        end
-        ApplyFreezeMode(animator)
+    -- Убиваем чужие анимации, которые игра пытается запустить
+    StopGameTracks(animator)
 
-    elseif mode == "Jitter" then
-        if AB.Internal.LoadedPreset then
-            StopAllOurTracks()
-            AB.Internal.LoadedPreset = nil
-        end
-        ApplyJitterMode(animator, dt)
+    -- Применяем режим
+    local mode = AB.Settings.Mode or "Speed"
+    if mode == "RandomFrames" then
+        ApplyRandomFramesMode(dt)
+    else
+        ApplySpeedMode()
     end
 end
 
@@ -834,36 +635,23 @@ end
 
 local function StopAnimationBreaker()
     ResetAllSpeeds()
-    StopAllOurTracks()
+    StopOurTrack()
     if AB.Internal.AnimConnection then
         pcall(function() AB.Internal.AnimConnection:Disconnect() end)
         AB.Internal.AnimConnection = nil
     end
-    AB.Internal.JitterTimer     = 0
-    AB.Internal.JitterSpeed     = 1
-    AB.Internal.LoadedPreset    = nil
-    AB.Internal.LastPresetSrc   = nil
-    AB.Internal.LastSlot        = nil
+    AB.Internal.CurrentKey      = nil
+    AB.Internal.RandomTimer     = 0
     AB.Internal.NetworkOwnerSet = false
     AB.Internal.LastHRP         = nil
 end
 
 local function ReloadAnimationPreset()
-    StopAllOurTracks()
-    AB.Internal.LoadedPreset  = nil
-    AB.Internal.LastPresetSrc = nil
-    AB.Internal.LastSlot      = nil
+    StopOurTrack()
+    AB.Internal.CurrentKey  = nil
+    AB.Internal.RandomTimer = 0
 end
 
-AB.Functions.ApplyPreset = function(name)
-    if AB.AnimationPresets[name] == nil and name ~= "Custom" then return false end
-    AB.Settings.Preset = name
-    if AB.Settings.Enabled then
-        AB.Settings.Mode = "Replace"
-        ReloadAnimationPreset()
-    end
-    return true
-end
 AB.Functions.Reload = ReloadAnimationPreset
 AB.Functions.Stop   = StopAnimationBreaker
 AB.Functions.ListPresets = function()
@@ -871,6 +659,12 @@ AB.Functions.ListPresets = function()
     for k in pairs(AB.AnimationPresets) do out[#out + 1] = k end
     table.sort(out)
     return out
+end
+AB.Functions.ApplyPreset = function(name)
+    if AB.AnimationPresets[name] == nil and name ~= "Custom" then return false end
+    AB.Settings.Preset = name
+    ReloadAnimationPreset()
+    return true
 end
 
 RunService.Heartbeat:Connect(function(dt)
@@ -1087,22 +881,12 @@ AntiAim.Functions = {
         }
         AB.Settings = {
             Enabled        = false,
-            Mode           = "None",
+            Mode           = "Speed",
             Preset         = "None",
-            Speed          = 5,
-            FreezeFrame    = 0,
-            JitterInterval = 0.15,
-            JitterMin      = 0.1,
-            JitterMax      = 10,
+            CustomId       = "",
+            Speed          = 1,
+            RandomInterval = 0.1,
             ApplyToServer  = true,
-            CustomIds = {
-                Idle  = "",
-                Walk  = "",
-                Run   = "",
-                Jump  = "",
-                Fall  = "",
-                Climb = "",
-            },
         }
         pcall(StopAnimationBreaker)
 
@@ -1149,9 +933,8 @@ AntiAim.StopDesync     = StopDesync
 AntiAim.CleanupAntiAim = CleanupAntiAim
 
 --// Animation Breaker public aliases
-AntiAim.StartAnimationBreaker   = function() AB.Settings.Enabled = true end
-AntiAim.StopAnimationBreaker    = StopAnimationBreaker
-AntiAim.ReloadAnimationPreset   = ReloadAnimationPreset
-AntiAim.ApplyAnimationPreset    = AB.Functions.ApplyPreset
-AntiAim.AnimationPresets        = AB.AnimationPresets
-AntiAim.ParseAnimationIds       = ParseIds
+AntiAim.StartAnimationBreaker = function() AB.Settings.Enabled = true end
+AntiAim.StopAnimationBreaker  = StopAnimationBreaker
+AntiAim.ReloadAnimationPreset = ReloadAnimationPreset
+AntiAim.ApplyAnimationPreset  = AB.Functions.ApplyPreset
+AntiAim.AnimationPresets      = AB.AnimationPresets
