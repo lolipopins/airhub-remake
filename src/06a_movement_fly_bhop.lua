@@ -2,18 +2,16 @@
 --// Fly + Bhop (Old / New) + Spider (Default / Pixelwalk / Wallfucker).
 --//
 --// Bhop "New" = порт Counter Blox HvH (ImGui) bhop:
---//   InputBegan(Space)  -> KeyHeld = true
+--//   InputBegan(Space)  -> KeyHeld = true    (БЕЗ gpe-фильтра!)
 --//   InputEnded(Space)  -> KeyHeld = false
 --//   RunService.Heartbeat каждый кадр пока KeyHeld:
 --//     Humanoid.Jump = not Humanoid.Jump
 --//     if GetState()==Freefall and MoveDirection.Magnitude>0:
 --//         Character:TranslateBy(MoveDirection / AirBoostDivisor)
 --//
---// FIX 2024: SpaceReleasePulse эхо-файрил InputEnded и убивал KeyHeld после
---// первого прыжка. Теперь:
---//   - SpaceReleasePulse по умолчанию = false (hookmetamethod достаточно)
---//   - pulse пропускается, если hookmetamethod уже установлен
---//   - pulse защищён counter-guard: свои эхо InputEnded игнорируются
+--// FIX: gameProcessedEvent для Space = true (игра обрабатывает прыжок),
+--// поэтому фильтр "if gpe then return end" полностью ломал bhop.
+--// Убран. Остальные проверки (textbox, keyboard) сохранены.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 06a: core not loaded"); return end
@@ -264,8 +262,8 @@ end
 
 Track(RunService.RenderStepped:Connect(function() xpcall(Fly_Update, HandleError) end))
 
-Track(UserInputService.InputBegan:Connect(function(inp, gpe)
-    if gpe then return end
+--// FIX: убран gpe-фильтр — в некоторых играх клавиша F может быть game-обработана
+Track(UserInputService.InputBegan:Connect(function(inp)
     if UserInputService:GetFocusedTextBox() then return end
     if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
     if not Fly.Settings.Enabled then return end
@@ -347,15 +345,11 @@ H.Bhop = {
         BypassJump  = true,
         JumpCooldown= 0.05,
 
-        --// Counter Blox port params:
         AirBoost        = true,
         AirBoostDivisor = 5.9,
 
-        --// Space-bind fix:
-        BlockSpaceFromGame = true,    --// hookmetamethod блокирует Space от игры
-        SpaceReleasePulse  = false,   --// ВАЖНО: default false!
-                                      --// Включать только если hookmetamethod недоступен.
-                                      --// Иначе эхо от SendKeyEvent валит KeyHeld.
+        BlockSpaceFromGame = true,
+        SpaceReleasePulse  = false,   --// default off
 
         Spider = {
             Enabled  = false,
@@ -389,7 +383,7 @@ H.Bhop = {
         Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
         HookInstalled = false,
         Humanoid = nil,
-        PendingPulses = 0,   --// counter-guard для эхо InputEnded от наших пульсов
+        PendingPulses = 0,
     },
 }
 local Bhop = H.Bhop
@@ -430,22 +424,12 @@ end
 
 --// ---------------------------------------------------------------------------
 --// Space release fallback
---//
---// ВАЖНО: VirtualInputManager:SendKeyEvent(false, Space) в большинстве
---// эксплоитов эхо-файрит UserInputService.InputEnded. Это сбрасывает
---// KeyHeld и bhop умирает после первого прыжка. Поэтому:
---//   1) SpaceReleasePulse = false по умолчанию (hookmetamethod достаточно)
---//   2) если hookmetamethod установлен — pulse вообще не шлём
---//   3) если всё же шлём — counter-guard гасит свои эхо в InputEnded
 --// ---------------------------------------------------------------------------
 local function Bhop_SpaceReleasePulse()
     if not Bhop.Settings.SpaceReleasePulse then return end
-    --// Хук уже блокирует Space от игры — пульс не нужен
     if Bhop.Internal.HookInstalled then return end
 
-    --// Counter-guard: помечаем, что сейчас придёт наше эхо InputEnded
     Bhop.Internal.PendingPulses = (Bhop.Internal.PendingPulses or 0) + 1
-    --// Защита от утечки счётчика, если эксплоит НЕ файрит InputEnded
     if Bhop.Internal.PendingPulses > 4 then
         Bhop.Internal.PendingPulses = 4
     end
@@ -459,18 +443,21 @@ local function Bhop_SpaceReleasePulse()
 
     local kr = rawget(getfenv(), "keyrelease")
     if type(kr) == "function" then
-        pcall(function() kr(0x20) end)  --// VK_SPACE
+        pcall(function() kr(0x20) end)
     end
 end
 
 --// ---------------------------------------------------------------------------
 --// Input — Space как триггер bhop
+--//
+--// КРИТИЧНО: НЕ ставить сюда `if gpe then return end`.
+--// Space в игре всегда помечается gameProcessedEvent = true (прыжок),
+--// поэтому любой фильтр по gpe полностью ломает bhop.
 --// ---------------------------------------------------------------------------
-Track(UserInputService.InputBegan:Connect(function(inp, gpe)
-    if gpe then return end
+Track(UserInputService.InputBegan:Connect(function(inp)
+    if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
     if UserInputService:GetFocusedTextBox() then return end
     if not Bhop.Settings.Enabled then return end
-    if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
     local kc = SafeKeyCode(Bhop.Settings.AutoJumpKey)
     if kc and inp.KeyCode == kc then
         Bhop.Internal.KeyHeld = true
@@ -481,7 +468,6 @@ end))
 Track(UserInputService.InputEnded:Connect(function(inp)
     if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
 
-    --// Эхо от собственного pulse — проглатываем, не трогаем KeyHeld
     if (Bhop.Internal.PendingPulses or 0) > 0 then
         Bhop.Internal.PendingPulses = Bhop.Internal.PendingPulses - 1
         return
@@ -742,7 +728,6 @@ local function Bhop_Tick()
     I.Humanoid = hum
     I.SpiderTouching = false
 
-    --// Spider
     if S.Spider.Enabled then
         local smode = S.Spider.Mode or "Default"
         if smode == "Pixelwalk" then
@@ -756,7 +741,6 @@ local function Bhop_Tick()
 
     if not I.KeyHeld then return end
 
-    --// Fallback pulse — только если пользователь включил и hook не встал
     local trigger = SafeKeyCode(S.AutoJumpKey)
     if trigger == Enum.KeyCode.Space then
         Bhop_SpaceReleasePulse()
@@ -766,10 +750,8 @@ local function Bhop_Tick()
 
     if bmode == "New" then
         --// === Counter Blox bhop (точный порт) ===
-        --// 1) toggle jump каждый кадр
         hum.Jump = not hum.Jump
 
-        --// 2) air boost in Freefall while moving
         if S.AirBoost
            and hum:GetState() == Enum.HumanoidStateType.Freefall
            and hum.MoveDirection.Magnitude > 0 then
@@ -781,7 +763,6 @@ local function Bhop_Tick()
             end
         end
     else
-        --// Old mode: cooldown + bypass
         local now = tick()
         if now - (I.LastJumpTime or 0) >= (S.JumpCooldown or 0.05) then
             local bypass = S.BypassJump
