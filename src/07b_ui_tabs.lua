@@ -70,6 +70,7 @@ task.spawn(function()
     local StopDesync           = orNoop(AntiAim.StopDesync,          "AntiAim.StopDesync")
     local StartDesync          = orNoop(AntiAim.StartDesync,         "AntiAim.StartDesync")
     local Bhop_VirtualKeyUp    = orNoop(Bhop.VirtualKeyUp,           "Bhop.VirtualKeyUp")
+    local Bhop_StateToggleRestore = orNoop(Bhop.StateToggleRestore,  "Bhop.StateToggleRestore")
 
     --// ===== VISUALS / WALLHACK normalization =====
     WallHack.Settings        = WallHack.Settings        or {}
@@ -122,6 +123,8 @@ task.spawn(function()
     Bhop.Settings.AutoJumpKey     = Bhop.Settings.AutoJumpKey     or "Space"
     if Bhop.Settings.BypassJump == nil then Bhop.Settings.BypassJump = true end
     Bhop.Settings.JumpCooldown    = Bhop.Settings.JumpCooldown    or 0.05
+    Bhop.Settings.VirtualHoldMs   = Bhop.Settings.VirtualHoldMs   or 20
+    Bhop.Settings.StateToggleHoldMs = Bhop.Settings.StateToggleHoldMs or 100
 
     Bhop.Settings.Spider            = Bhop.Settings.Spider or {}
     Bhop.Settings.Spider.Enabled    = Bhop.Settings.Spider.Enabled or false
@@ -160,6 +163,10 @@ task.spawn(function()
     if type(Bhop.VirtualKeyUp) ~= "function" then
         Bhop.VirtualKeyUp = function() end
         Bhop_VirtualKeyUp = Bhop.VirtualKeyUp
+    end
+    if type(Bhop.StateToggleRestore) ~= "function" then
+        Bhop.StateToggleRestore = function() end
+        Bhop_StateToggleRestore = Bhop.StateToggleRestore
     end
 
     --// ===== SPEED / FASTSTOP / STRAFER / NOCLIP =====
@@ -429,7 +436,7 @@ task.spawn(function()
     local flyMethods   = { "BodyVelocity", "LinearVelocity", "Velocity", "CFrame" }
     local flyKeys      = { "F", "G", "H", "V", "B", "N", "Space", "LeftShift" }
     local bhopKeys     = { "Space", "LeftControl", "LeftShift", "C", "X", "Z" }
-    local bhopModes    = { "ChangeState", "VirtualInput" }
+    local bhopModes    = { "ChangeState", "VirtualInput", "Keypress", "HumJump", "JumpState", "StateToggle", "ResetJump", "Hybrid" }
     local speedMethods = { "WalkSpeed", "CFrame", "Velocity" }
     local spiderModes  = { "Default", "Pixelwalk", "Wallfucker" }
 
@@ -491,12 +498,15 @@ task.spawn(function()
                 Bhop.Internal.Active = false
                 Bhop.Internal.SpiderTouching = false
                 Bhop_VirtualKeyUp()
+                Bhop_StateToggleRestore()
             end
         end })
     bhopSec:AddDropdown({ Name = "Mode", Value = Bhop.Settings.Mode or "ChangeState", List = bhopModes,
         Callback = function(v)
-            Bhop.Settings.Mode = v
+            --// при смене режима сбрасываем всё, что могло залипнуть
             Bhop_VirtualKeyUp()
+            Bhop_StateToggleRestore()
+            Bhop.Settings.Mode = v
         end })
     bhopSec:AddDropdown({ Name = "Jump Key", Value = Bhop.Settings.AutoJumpKey or "Space", List = bhopKeys,
         Callback = function(v) Bhop.Settings.AutoJumpKey = v end })
@@ -505,6 +515,12 @@ task.spawn(function()
     bhopSec:AddSlider({ Name = "Jump Cooldown", Value = Bhop.Settings.JumpCooldown or 0.05,
         Min = 0.01, Max = 0.5, Decimals = 2,
         Callback = function(v) Bhop.Settings.JumpCooldown = v end })
+    bhopSec:AddSlider({ Name = "Virtual/Keypress Hold (ms)", Value = Bhop.Settings.VirtualHoldMs or 20,
+        Min = 1, Max = 200,
+        Callback = function(v) Bhop.Settings.VirtualHoldMs = v end })
+    bhopSec:AddSlider({ Name = "StateToggle Hold (ms)", Value = Bhop.Settings.StateToggleHoldMs or 100,
+        Min = 10, Max = 500,
+        Callback = function(v) Bhop.Settings.StateToggleHoldMs = v end })
 
     --// ===== Spider (mode + Default settings) =====
     local spiderSec = MovementTab:CreateSection({ Name = "Spider (Bhop assist)", Side = "Right" })
