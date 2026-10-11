@@ -1,11 +1,13 @@
 --// AirHub - 06a_movement_fly_bhop.lua
---// Fly + Bhop (Old / New) + Spider (Default / Pixelwalk / Wallfucker) + TargetOrbit.
+--// Fly + Bhop (Old / New) + Spider (Default / Pixelwalk / Wallfucker).
 --//
---// Space-bind fix:
---//   Приоритет 1: hookmetamethod на __namecall — UserInputService:IsKeyDown(Space)
---//                возвращает false, пока bhop держит Space. Игра не видит зажатия.
---//   Приоритет 2: VirtualInputManager key-up pulse каждый кадр.
---//   Приоритет 3: keyrelease(0x20) как fallback.
+--// Bhop "New" mode = прямой порт Counter Blox bhop:
+--//   - UserInputService.InputBegan / InputEnded трекают Space
+--//   - RunService.Heartbeat крутит hum.Jump = not hum.Jump
+--//   - Air Boost: character:TranslateBy(hum.MoveDirection / 5.9)
+--//                при HumanoidState == Freefall и MoveDirection.Magnitude > 0
+--//
+--// Space-block fix (hookmetamethod + release pulse) сохранён как опция.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 06a: core not loaded"); return end
@@ -20,6 +22,9 @@ local SafeKeyCode = Util.SafeKeyCode
 local RAY_FILTER = Util.RAY_FILTER
 local VirtualInputManager = Util.VirtualInputManager
 
+--// ===========================================================================
+--// FLY
+--// ===========================================================================
 H.Fly = {
     Settings = {
         Enabled = false, ToggleKey = "F", Toggle = false,
@@ -331,18 +336,18 @@ Fly.ComputeOrbitVelocity = Fly_ComputeOrbitVelocity
 H.Bhop = {
     Settings = {
         Enabled = false,
-        Mode        = "Old",       --// "Old" | "New"
-        AutoJumpKey = "Space",     --// Space по умолчанию
+        Mode        = "New",       --// "Old" | "New"  (New = Counter Blox port)
+        AutoJumpKey = "Space",
         BypassJump  = true,
         JumpCooldown= 0.05,
 
-        --// New mode:
+        --// Counter Blox port:
         AirBoost        = true,
         AirBoostDivisor = 5.9,
 
         --// Space-bind fix:
-        BlockSpaceFromGame = true,   --// hookmetamethod: игра не видит зажатый Space
-        SpaceReleasePulse  = true,   --// fallback: key-up pulse каждый кадр
+        BlockSpaceFromGame = true,
+        SpaceReleasePulse  = true,
 
         Spider = {
             Enabled  = false,
@@ -375,16 +380,13 @@ H.Bhop = {
         SpiderTouching = false, WallNormal = nil,
         Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
         HookInstalled = false,
+        Humanoid = nil,          --// Counter Blox: cached humanoid
     },
 }
 local Bhop = H.Bhop
 
 --// ---------------------------------------------------------------------------
---// Space-block через hookmetamethod
---// Пока bhop активен и Space зажат для bhop, любые вызовы
---// UserInputService:IsKeyDown(Space) возвращают false.
---// Это значит: игра физически не может увидеть зажатый Space.
---// Наш собственный bhop работает через InputBegan/InputEnded — ему всё равно.
+--// Space-block через hookmetamethod (опционально)
 --// ---------------------------------------------------------------------------
 local function Bhop_InstallSpaceHook()
     if Bhop.Internal.HookInstalled then return end
@@ -418,12 +420,11 @@ local function Bhop_InstallSpaceHook()
 end
 
 --// ---------------------------------------------------------------------------
---// Space release fallback (VirtualInputManager / keyrelease)
+--// Space release fallback
 --// ---------------------------------------------------------------------------
 local function Bhop_SpaceReleasePulse()
     if not Bhop.Settings.SpaceReleasePulse then return end
 
-    --// 1) VirtualInputManager (основной)
     if VirtualInputManager then
         pcall(function()
             VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
@@ -431,15 +432,14 @@ local function Bhop_SpaceReleasePulse()
         return
     end
 
-    --// 2) keyrelease (fallback)
     local kr = rawget(getfenv(), "keyrelease")
     if type(kr) == "function" then
-        pcall(function() kr(0x20) end)  -- 0x20 = VK_SPACE
+        pcall(function() kr(0x20) end)  --// VK_SPACE
     end
 end
 
 --// ---------------------------------------------------------------------------
---// Input — Space как триггер bhop
+--// Input — Space как триггер bhop (Counter Blox style: InputBegan/Ended)
 --// ---------------------------------------------------------------------------
 Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     if gpe then return end
@@ -450,7 +450,6 @@ Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     if kc and inp.KeyCode == kc then
         Bhop.Internal.KeyHeld = true
         Bhop_InstallSpaceHook()
-        --// Сразу отдаём игре key-up, чтобы не залипло на кадр
         if inp.KeyCode == Enum.KeyCode.Space then
             Bhop_SpaceReleasePulse()
         end
@@ -472,6 +471,7 @@ Track(LocalPlayer.CharacterAdded:Connect(function()
     Bhop.Internal.WallNormal = nil
     Bhop.Internal.Pixelwalk_LastThin = 0
     Bhop.Internal.Pixelwalk_LastThinNormal = nil
+    Bhop.Internal.Humanoid = nil
 end))
 
 --// ---------------------------------------------------------------------------
@@ -680,99 +680,97 @@ local function Spider_Wallfucker(char, hrp)
 end
 
 --// ===========================================================================
---// Bhop main loop — task.spawn + task.wait(0.01)
+--// BHOP main loop — RunService.Heartbeat (Counter Blox style)
 --// ===========================================================================
-task.spawn(function()
-    --// Устанавливаем hook при старте, если bhop уже enabled
-    if Bhop.Settings.Enabled and Bhop.Settings.BlockSpaceFromGame then
+local function Bhop_Update()
+    if H.ShuttingDown then return end
+
+    local S = Bhop.Settings
+    local I = Bhop.Internal
+
+    if not S.Enabled then
+        I.Active = false
+        I.SpiderTouching = false
+        I.WallNormal = nil
+        I.Pixelwalk_LastThin = 0
+        I.Pixelwalk_LastThinNormal = nil
+        return
+    end
+
+    if not I.HookInstalled and S.BlockSpaceFromGame then
         Bhop_InstallSpaceHook()
     end
 
-    while not H.ShuttingDown and task.wait(0.01) do
-        local S = Bhop.Settings
-        local I = Bhop.Internal
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp then return end
+    if hum.Health <= 0 then return end
 
-        if not S.Enabled then
-            I.Active = false
-            I.SpiderTouching = false
-            I.WallNormal = nil
-            I.Pixelwalk_LastThin = 0
-            I.Pixelwalk_LastThinNormal = nil
-            continue
+    I.Active = true
+    I.Humanoid = hum
+    I.SpiderTouching = false
+
+    --// Spider
+    if S.Spider.Enabled then
+        local smode = S.Spider.Mode or "Default"
+        if smode == "Pixelwalk" then
+            I.SpiderTouching = Spider_Pixelwalk(char, hrp, hum)
+        elseif smode == "Wallfucker" then
+            I.SpiderTouching = Spider_Wallfucker(char, hrp)
+        else
+            I.SpiderTouching = Spider_DetectWall(char, hrp)
         end
+    end
 
-        --// Устанавливаем hook на лету, если не получилось при загрузке
-        if not I.HookInstalled and S.BlockSpaceFromGame then
-            Bhop_InstallSpaceHook()
-        end
+    if not I.KeyHeld then return end
 
-        local char = LocalPlayer.Character
-        if not char then continue end
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        if not hum or not hrp then continue end
-        if hum.Health <= 0 then continue end
+    --// Fallback: пока Space зажат — пульсируем key-up
+    local trigger = SafeKeyCode(S.AutoJumpKey)
+    if trigger == Enum.KeyCode.Space then
+        Bhop_SpaceReleasePulse()
+    end
 
-        I.Active = true
-        I.SpiderTouching = false
+    local bmode = S.Mode or "New"
 
-        --// Spider
-        if S.Spider.Enabled then
-            local smode = S.Spider.Mode or "Default"
-            if smode == "Pixelwalk" then
-                I.SpiderTouching = Spider_Pixelwalk(char, hrp, hum)
-            elseif smode == "Wallfucker" then
-                I.SpiderTouching = Spider_Wallfucker(char, hrp)
-            else
-                I.SpiderTouching = Spider_DetectWall(char, hrp)
+    if bmode == "New" then
+        --// === Counter Blox bhop (точный порт) ===
+        hum.Jump = not hum.Jump
+
+        if S.AirBoost
+           and hum:GetState() == Enum.HumanoidStateType.Freefall
+           and hum.MoveDirection.Magnitude > 0 then
+            local divisor = S.AirBoostDivisor or 5.9
+            if divisor > 0 then
+                char:TranslateBy(hum.MoveDirection / divisor)
             end
         end
-
-        --// Bhop
-        if I.KeyHeld then
-            --// Fallback: пока Space зажат для bhop — пульсируем key-up
-            local trigger = SafeKeyCode(S.AutoJumpKey)
-            if trigger == Enum.KeyCode.Space then
-                Bhop_SpaceReleasePulse()
-            end
-
-            local bmode = S.Mode or "Old"
-
-            if bmode == "New" then
-                pcall(function() hum.Jump = not hum.Jump end)
-
-                if S.AirBoost
-                   and hum:GetState() == Enum.HumanoidStateType.Freefall
-                   and hum.MoveDirection.Magnitude > 0 then
-                    local divisor = S.AirBoostDivisor or 5.9
-                    if divisor > 0 then
-                        pcall(function()
-                            char:TranslateBy(hum.MoveDirection / divisor)
-                        end)
-                    end
-                end
-            else
-                local now = tick()
-                if now - (I.LastJumpTime or 0) >= (S.JumpCooldown or 0.05) then
-                    local bypass = S.BypassJump
-                    if I.SpiderTouching then bypass = true end
-                    local isGround = hum.FloorMaterial ~= Enum.Material.Air
-                    if bypass or isGround then
-                        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
-                        pcall(function() hum.Jump = true end)
-                        I.LastJumpTime = now
-                    end
-                end
+    else
+        --// Old mode: cooldown + bypass
+        local now = tick()
+        if now - (I.LastJumpTime or 0) >= (S.JumpCooldown or 0.05) then
+            local bypass = S.BypassJump
+            if I.SpiderTouching then bypass = true end
+            local isGround = hum.FloorMaterial ~= Enum.Material.Air
+            if bypass or isGround then
+                pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+                pcall(function() hum.Jump = true end)
+                I.LastJumpTime = now
             end
         end
     end
-end)
+end
+
+Track(RunService.Heartbeat:Connect(function()
+    xpcall(Bhop_Update, HandleError)
+end))
 
 Bhop.Functions = {
     ResetSettings = function()
         Bhop.Settings = {
             Enabled = false,
-            Mode = "Old",
+            Mode = "New",
             AutoJumpKey = "Space",
             BypassJump = true,
             JumpCooldown = 0.05,
@@ -810,7 +808,7 @@ Bhop.Functions = {
             KeyHeld = false, LastJumpTime = 0, Active = false,
             SpiderTouching = false, WallNormal = nil,
             Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
-            HookInstalled = false,
+            HookInstalled = false, Humanoid = nil,
         }
     end,
 }
