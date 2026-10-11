@@ -1,9 +1,12 @@
 --// AirHub - 02_aimbot.lua
---// v26: Multi-Point targeting (Head/Torso/Arms/Legs presets) + Visuals
---//      (Drawing.Circle points + Drawing.Line to nearest/locked target).
---// v25: Logging/Sounds init moved to top so shots log before 07b loads.
---// H.Sound aliased to H.Sounds. Fallback Util.AddLog if missing.
---// Modes: Camera / Mouse / Raycast / FindPartOnRay* / Mouse.Hit/Target
+--// v26: Multi-Point = grid sampling on part surface -> aim at nearest VISIBLE
+--//      sub-point (works when only part of body is visible, e.g. 30% of head).
+--//      Improved "Nearest" LockPart: scans all parts + grid sample on each,
+--//      picks closest visible sub-point to mouse.
+--//      Visuals: draw sampled visible points + line to nearest/aim target.
+--// v25: Logging/Sounds init at top so shots log before 07b loads.
+--//      H.Sound aliased to H.Sounds. Fallback Util.AddLog if missing.
+--//      Modes: Camera / Mouse / Raycast / FindPartOnRay* / Mouse.Hit/Target
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
     warn("[AirHub] 02_aimbot: core not loaded")
@@ -14,7 +17,6 @@ if H.Aimbot then
     return
 end
 
---// v25: early init of Logging/Sounds so shots before 07b still log.
 if not H.Logging then
     H.Logging = {
         Enabled  = true,
@@ -35,7 +37,6 @@ if not H.Sounds then
         KillsoundVolume  = 1,
     }
 end
---// 07b UI writes to H.Sound, Util reads from H.Sounds — unify.
 H.Sound = H.Sounds
 
 local Util                = H.Util
@@ -50,7 +51,6 @@ local HandleError         = Util.HandleError
 local AddLog              = Util.AddLog
 local RAY_FILTER          = Util.RAY_FILTER
 
---// v25: safety nets for Util helpers.
 if type(AddLog) ~= "function" then
     H.ActiveLogs = H.ActiveLogs or {}
     AddLog = function(text, color)
@@ -128,25 +128,31 @@ H.Aimbot = {
         IgnoreGameProcessed = true,
         Debug = true,
 
-        --// ==== Multi-Point targeting ====
-        --// Presets: HeadOnly | HeadTorso | HeadTorsoArms | HeadTorsoLegs | Full
+        --// ===== v26: Multi-Point =====
+        --// Grid sampling of points on a part's front-facing surface.
+        --// Enables aiming at the nearest VISIBLE sub-point (e.g. 30% of head
+        --// poking out from behind a wall). Also improves "Nearest" LockPart.
         MultiPoint = {
-            Enabled           = false,
-            Mode              = "HeadTorso",
-            UseNearestToMouse = true,
+            Enabled         = false,
+            Density         = 3,      -- 2..8 subdivisions per axis on each face
+            ApplyToNearest  = true,   -- also use grid sampling for LockPart="Nearest"
+            FrontFacingOnly = true,   -- only sample points on camera-facing side
         },
 
-        --// ==== Multi-Point + Line visualization ====
+        --// ===== v26: Multi-Point + Line visualization =====
         MultiPointVisuals = {
-            Enabled        = false,
-            PointColor     = Color3.fromRGB(255, 100, 100),
-            PointRadius    = 5,
-            PointFilled    = true,
-            ShowLine       = true,
-            LineColor      = Color3.fromRGB(255, 200, 70),
-            LineThickness  = 2,
+            Enabled       = false,
+            PointColor    = Color3.fromRGB(255, 100, 100),   -- sampled but blocked
+            VisibleColor  = Color3.fromRGB(80, 255, 80),     -- actually visible
+            PointRadius   = 4,
+            PointFilled   = true,
+            ShowLine      = true,
+            LineColor     = Color3.fromRGB(255, 200, 70),
+            LineThickness = 2,
             -- "Mouse" | "Camera" | "PlayerHRP"
-            LineFrom       = "Mouse",
+            LineFrom      = "Mouse",
+            -- show grid on all parts of the locked target, not only the locked part
+            ShowAllParts  = true,
         },
 
         AutoShoot = {
@@ -186,6 +192,8 @@ H.Aimbot = {
         WatchdogAccum = 0,
         ModeCache    = {},
         CachedAimPos = nil,
+        -- v26: last sampled points (for visuals)
+        LastSamplePoints = {},
         HookHandlers = {
             AVNamecall    = nil, AVNamecallOrig = nil,
             MHT_Proxy     = nil, MHT_Original   = nil,
@@ -221,19 +229,17 @@ local Typing        = false
 local LastShotTime  = 0
 local lastDelta     = tick()
 
+--// Parts list for normal aiming (used by VISIBLE_PARTS-based scans)
 local VISIBLE_PARTS = {
     "Head", "HumanoidRootPart", "UpperTorso", "LowerTorso",
     "Torso", "Left Arm", "Right Arm",
 }
 
---// ==== Multi-Point presets ====
-local MULTIPOINT_PRESETS = {
-    HeadOnly      = { "Head" },
-    HeadTorso     = { "Head", "UpperTorso", "LowerTorso" },
-    HeadTorsoArms = { "Head", "UpperTorso", "LowerTorso", "Left Arm", "Right Arm" },
-    HeadTorsoLegs = { "Head", "UpperTorso", "LowerTorso", "Left Leg", "Right Leg" },
-    Full          = { "Head", "UpperTorso", "LowerTorso",
-                      "Left Arm", "Right Arm", "Left Leg", "Right Leg" },
+--// v26: expanded parts list for "Nearest" mode (adds legs)
+local NEAREST_PARTS = {
+    "Head", "UpperTorso", "LowerTorso", "Torso",
+    "Left Arm", "Right Arm",
+    "Left Leg", "Right Leg",
 }
 
 local function ShouldBypassWallCheck()
@@ -313,20 +319,51 @@ local function GetActualPartName(lockPart)
     return { lockPart }
 end
 
---// ==== Multi-Point helpers ====
-local function GetMultiPointParts(char)
-    if not char then return nil end
-    local mp = Aimbot.Settings.MultiPoint
-    if not mp or not mp.Enabled then return nil end
-    local names = MULTIPOINT_PRESETS[mp.Mode or "HeadTorso"] or MULTIPOINT_PRESETS.HeadTorso
+--// ===========================================================================
+--// v26: Multi-Point grid sampling on part surface
+--// ===========================================================================
+--// Generates a grid of points across the FACES of a part's bounding box.
+--// If camPos is provided and FrontFacingOnly is on, only points on faces
+--// whose outward normal points toward camPos are kept.
+local function SamplePointsOnPart(part, density, origin)
+    if not part or not part:IsA("BasePart") then return {} end
+    density = math.floor(math.clamp(tonumber(density) or 3, 2, 8))
+    local size = part.Size
+    local cf   = part.CFrame
+    local hx, hy, hz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
+    local stepX = (density > 1) and (size.X / (density - 1)) or 0
+    local stepY = (density > 1) and (size.Y / (density - 1)) or 0
+    local stepZ = (density > 1) and (size.Z / (density - 1)) or 0
+
+    local center = cf.Position
+    local camVec = origin and (origin - center) or nil
+
     local out = {}
-    for _, name in ipairs(names) do
-        local p = char:FindFirstChild(name)
-        if p and p:IsA("BasePart") and IsAlive(p) then
-            table.insert(out, p)
+    for ix = 0, density - 1 do
+        local tx = -hx + ix * stepX
+        local isXFace = (ix == 0 or ix == density - 1)
+        for iy = 0, density - 1 do
+            local ty = -hy + iy * stepY
+            local isYFace = (iy == 0 or iy == density - 1)
+            for iz = 0, density - 1 do
+                local isZFace = (iz == 0 or iz == density - 1)
+                if isXFace or isYFace or isZFace then
+                    local tz = -hz + iz * stepZ
+                    local pt = (cf * CFrame.new(tx, ty, tz)).Position
+                    local ok = true
+                    if camVec then
+                        local toPt = pt - center
+                        if toPt:Dot(camVec) <= 0 then
+                            ok = false
+                        end
+                    end
+                    if ok then
+                        out[#out + 1] = pt
+                    end
+                end
+            end
         end
     end
-    if #out == 0 then return nil end
     return out
 end
 
@@ -465,11 +502,72 @@ local function IsPointVisible(origin, pt, params)
     return workspace:Raycast(origin, pt - origin, params) == nil
 end
 
-local function GetVisiblePointOnPart(origin, part)
+--// ===========================================================================
+--// v26: GetVisiblePointOnPart
+--// - Multi-Point OFF: original logic (center check, optional Perfect 8-corner).
+--// - Multi-Point ON : grid-sample the part surface, filter visible points,
+--//                    return the one nearest to the mouse cursor.
+--// Optional `density` overrides MultiPoint.Density (used for cheap pre-checks).
+--// ===========================================================================
+local function GetVisiblePointOnPart(origin, part, density)
     if not part or not part:IsA("BasePart") or not IsAlive(part) then return nil end
 
+    local mp = Aimbot.Settings.MultiPoint
+    local useGrid = mp and mp.Enabled
+
+    --// Predicted center of the part
     local aimPos = PredictPartPosition(part)
 
+    --// Fast path: no wall check required, grid disabled -> return center
+    if (not useGrid) and (not Aimbot.Settings.WallCheck or ShouldBypassWallCheck()) then
+        return aimPos
+    end
+
+    --// ---------- Multi-Point ON ----------
+    if useGrid then
+        local doWallCheck = Aimbot.Settings.WallCheck and not ShouldBypassWallCheck()
+        local params      = doWallCheck and BuildRayParams(part.Parent) or nil
+
+        local cam = workspace.CurrentCamera
+        local mousePos = GetMousePos()
+
+        local dens = density or mp.Density or 3
+        local rawPts = SamplePointsOnPart(
+            part,
+            dens,
+            mp.FrontFacingOnly and cam.CFrame.Position or nil
+        )
+        if #rawPts == 0 then return nil end
+
+        -- Apply the same prediction offset to all sampled points
+        local offset = aimPos - part.Position
+
+        local bestPt, bestDist = nil, math.huge
+        for i = 1, #rawPts do
+            local worldPt = rawPts[i] + offset
+            local visible = true
+            if doWallCheck then
+                local d = worldPt - origin
+                local mag = d.Magnitude
+                if mag >= 0.001 then
+                    visible = (workspace:Raycast(origin, d, params) == nil)
+                end
+            end
+            if visible then
+                local screen, on = cam:WorldToViewportPoint(worldPt)
+                if on then
+                    local sdist = (mousePos - Vector2.new(screen.X, screen.Y)).Magnitude
+                    if sdist < bestDist then
+                        bestDist = sdist
+                        bestPt   = worldPt
+                    end
+                end
+            end
+        end
+        return bestPt
+    end
+
+    --// ---------- Multi-Point OFF: original logic ----------
     if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
         return aimPos
     end
@@ -518,56 +616,39 @@ local function GetVisiblePointOnPart(origin, part)
     return nil
 end
 
---// ==== Multi-Point picker: returns (part, point) of best visible point ====
-local function PickMultiPointTarget(char, origin)
-    local parts = GetMultiPointParts(char)
-    if not parts then return nil, nil end
+--// ===========================================================================
+--// v26: FindNearestPartToMouse
+--// Improved: scans all NEAREST_PARTS; with Multi-Point ON each part is
+--// grid-sampled to find its nearest visible sub-point.
+--// Returns (part, worldPoint) or (nil, nil).
+-- ===========================================================================
+local function FindNearestPartToMouse(char, origin)
+    if not char then return nil, nil end
+    local mp = Aimbot.Settings.MultiPoint
+    local useGrid = mp and mp.Enabled and mp.ApplyToNearest
+    local density = useGrid and (mp.Density or 3) or nil
 
-    local mousePos   = GetMousePos()
-    local useNearest = Aimbot.Settings.MultiPoint.UseNearestToMouse ~= false
+    local mousePos = GetMousePos()
     local bestPart, bestPoint, bestDist = nil, nil, math.huge
 
-    for _, p in ipairs(parts) do
-        local pt = GetVisiblePointOnPart(origin, p)
-        if pt then
-            local screen, on = workspace.CurrentCamera:WorldToViewportPoint(pt)
-            if on then
-                local d
-                if useNearest then
-                    d = (mousePos - Vector2.new(screen.X, screen.Y)).Magnitude
-                else
-                    d = (pt - origin).Magnitude
-                end
-                if d < bestDist then
-                    bestDist  = d
-                    bestPart  = p
-                    bestPoint = pt
-                end
-            end
-        end
-    end
-
-    return bestPart, bestPoint
-end
-
-local function FindNearestPartToMouse(char, origin)
-    if not char then return nil end
-    local mousePos = GetMousePos()
-    local bestPart, bestDist = nil, math.huge
-    for _, name in ipairs(VISIBLE_PARTS) do
+    for _, name in ipairs(NEAREST_PARTS) do
         local part = char:FindFirstChild(name)
-        if part and part:IsA("BasePart") then
-            local pt = GetVisiblePointOnPart(origin, part)
+        if part and part:IsA("BasePart") and IsAlive(part) then
+            local pt = GetVisiblePointOnPart(origin, part, density)
             if pt then
                 local screen, on = workspace.CurrentCamera:WorldToViewportPoint(pt)
                 if on then
                     local d = (mousePos - Vector2.new(screen.X, screen.Y)).Magnitude
-                    if d < bestDist then bestDist = d; bestPart = part end
+                    if d < bestDist then
+                        bestDist  = d
+                        bestPart  = part
+                        bestPoint = pt
+                    end
                 end
             end
         end
     end
-    return bestPart
+    return bestPart, bestPoint
 end
 
 local function FindVisiblePart(char, origin, preferredParts)
@@ -664,12 +745,7 @@ local function GetClosestPlayer()
         local lockPart = Aimbot.Settings.LockPart
         local part
 
-        --// v26: Multi-Point first, then fall back to normal logic.
-        local mpPart, mpPoint = PickMultiPointTarget(targetChar, origin)
-        if mpPart then
-            part = mpPart
-            Aimbot.Internal.CachedAimPos = mpPoint
-        elseif lockPart == "Nearest" then
+        if lockPart == "Nearest" then
             part = FindNearestPartToMouse(targetChar, origin)
         else
             local preferred = GetActualPartName(lockPart)
@@ -712,26 +788,27 @@ local function GetClosestPlayer()
         })
     end
 
-    local ignoreFOV = Aimbot.Settings.IgnoreFOV
+    local ignoreFOV  = Aimbot.Settings.IgnoreFOV
     local fovEnabled = Aimbot.FOVSettings.Enabled and not ignoreFOV
-    local required = fovEnabled and Aimbot.FOVSettings.Amount or 999999
+    local required   = fovEnabled and Aimbot.FOVSettings.Amount or 999999
     local bestTarget, bestPart, bestDist = nil, nil, math.huge
     local bestGhostChar = nil
     local mousePos = GetMousePos()
     local origin = GetCheckOrigin()
+
+    --// Cheap pre-check density during target selection to avoid perf spikes
+    local preDensity = 2
 
     for _, cand in ipairs(candidates) do
         if IsTargetValid(cand.character, cand.player) then
             local charTarget = cand.character
             local lockPart = Aimbot.Settings.LockPart
             local targetPart = nil
+            local targetPoint = nil
 
-            --// v26: Multi-Point first.
-            local mpPart, mpPoint = PickMultiPointTarget(charTarget, origin)
-            if mpPart then
-                targetPart = mpPart
-            elseif lockPart == "Nearest" then
-                targetPart = FindNearestPartToMouse(charTarget, origin)
+            if lockPart == "Nearest" then
+                targetPart, targetPoint = FindNearestPartToMouse(charTarget, origin)
+                --// FindNearestPartToMouse uses full density; but pre-check is cheap.
             else
                 local preferred = GetActualPartName(lockPart)
                 if Aimbot.Settings.FallbackToVisible then
@@ -739,14 +816,15 @@ local function GetClosestPlayer()
                 else
                     for _, name in ipairs(preferred) do
                         local p = charTarget:FindFirstChild(name)
-                        if p and p:IsA("BasePart") and GetVisiblePointOnPart(origin, p) then
+                        if p and p:IsA("BasePart") and GetVisiblePointOnPart(origin, p, preDensity) then
                             targetPart = p; break
                         end
                     end
                 end
             end
             if targetPart and IsAlive(targetPart) then
-                local point = GetVisiblePointOnPart(origin, targetPart) or PredictPartPosition(targetPart)
+                local point = targetPoint or GetVisiblePointOnPart(origin, targetPart, preDensity)
+                            or PredictPartPosition(targetPart)
                 local vec, on = workspace.CurrentCamera:WorldToViewportPoint(point)
                 local dist
                 if ignoreFOV then
@@ -755,9 +833,9 @@ local function GetClosestPlayer()
                     dist = on and (mousePos - Vector2.new(vec.X, vec.Y)).Magnitude or math.huge
                 end
                 if dist < bestDist and (ignoreFOV or dist < required) then
-                    bestDist   = dist
-                    bestTarget = cand.player or charTarget
-                    bestPart   = targetPart
+                    bestDist      = dist
+                    bestTarget    = cand.player or charTarget
+                    bestPart      = targetPart
                     bestGhostChar = cand.isGhost and charTarget or nil
                 end
             end
@@ -774,10 +852,10 @@ local function GetClosestPlayer()
 end
 
 --// ===========================================================================
---// v26: Multi-Point + Line visualization (Drawing API)
+--// v26: Multi-Point + Line visualization
 --// ===========================================================================
 local MPV = {
-    Points = {},  -- pool of Drawing.Circle
+    Points = {},  -- pool of Drawing.Circle for sampled points
     Line   = nil, -- Drawing.Line
 }
 
@@ -785,7 +863,7 @@ local function EnsureMPVPoint(i)
     local d = MPV.Points[i]
     if not d then
         d = Drawing.new("Circle")
-        d.NumSides     = 16
+        d.NumSides     = 12
         d.Thickness    = 1
         d.Transparency = 1
         d.ZIndex       = 3
@@ -810,6 +888,24 @@ local function HideMPV()
     if MPV.Line then pcall(function() MPV.Line.Visible = false end) end
 end
 
+--// Which parts to visualize
+local function GetVisualizedParts(char)
+    local cfg = Aimbot.Settings.MultiPointVisuals
+    if cfg.ShowAllParts then
+        local out = {}
+        for _, name in ipairs(NEAREST_PARTS) do
+            local p = char:FindFirstChild(name)
+            if p and p:IsA("BasePart") and IsAlive(p) then
+                out[#out + 1] = p
+            end
+        end
+        return out
+    end
+    local lp = Aimbot.LockPartInstance
+    if lp and IsAlive(lp) then return { lp } end
+    return {}
+end
+
 local function DrawMultiPointVisuals()
     local cfg = Aimbot.Settings.MultiPointVisuals
     if not cfg or not cfg.Enabled then HideMPV() return end
@@ -818,34 +914,59 @@ local function DrawMultiPointVisuals()
     if not char then HideMPV() return end
 
     local mp = Aimbot.Settings.MultiPoint
-    local presetName = (mp and mp.Mode) or "HeadTorso"
-    local names = MULTIPOINT_PRESETS[presetName] or MULTIPOINT_PRESETS.HeadTorso
+    local density = (mp and mp.Density) or 3
 
-    local cam   = workspace.CurrentCamera
+    local cam = workspace.CurrentCamera
+    local camPos = cam.CFrame.Position
+    local origin = GetCheckOrigin()
+    local doWallCheck = Aimbot.Settings.WallCheck and not ShouldBypassWallCheck()
+
+    local parts = GetVisualizedParts(char)
     local shown = 0
+    local storedPts = {}
 
-    for _, name in ipairs(names) do
-        local p = char:FindFirstChild(name)
-        if p and p:IsA("BasePart") and IsAlive(p) then
-            local worldPt = PredictPartPosition(p)
+    for _, part in ipairs(parts) do
+        local aimPos = PredictPartPosition(part)
+        local offset = aimPos - part.Position
+        local rawPts = SamplePointsOnPart(
+            part, density,
+            (mp and mp.FrontFacingOnly) and camPos or nil
+        )
+
+        local params = doWallCheck and BuildRayParams(part.Parent) or nil
+
+        for i = 1, #rawPts do
+            local worldPt = rawPts[i] + offset
+            local visible = true
+            if doWallCheck then
+                local d = worldPt - origin
+                local mag = d.Magnitude
+                if mag >= 0.001 then
+                    visible = (workspace:Raycast(origin, d, params) == nil)
+                end
+            end
+
             local screen, on = cam:WorldToViewportPoint(worldPt)
-            shown = shown + 1
-            local d = EnsureMPVPoint(shown)
             if on then
+                shown = shown + 1
+                local d = EnsureMPVPoint(shown)
                 d.Position = Vector2.new(screen.X, screen.Y)
-                d.Radius   = cfg.PointRadius or 5
-                d.Color    = cfg.PointColor or Color3.fromRGB(255, 100, 100)
+                d.Radius   = cfg.PointRadius or 4
+                d.Color    = visible and (cfg.VisibleColor or Color3.fromRGB(80, 255, 80))
+                                    or  (cfg.PointColor   or Color3.fromRGB(255, 100, 100))
                 d.Filled   = cfg.PointFilled ~= false
                 d.Visible  = true
-            else
-                d.Visible  = false
+                storedPts[#storedPts + 1] = { world = worldPt, visible = visible }
             end
         end
     end
-    -- hide leftover circles from previous frame
+
+    --// Hide leftover circles from previous frame
     for i = shown + 1, #MPV.Points do
         pcall(function() MPV.Points[i].Visible = false end)
     end
+
+    Aimbot.Internal.LastSamplePoints = storedPts
 
     --// Line to aim point
     if cfg.ShowLine then
@@ -873,7 +994,7 @@ local function DrawMultiPointVisuals()
                 local s, on = cam:WorldToViewportPoint(cam.CFrame.Position)
                 if on then fromV2 = Vector2.new(s.X, s.Y) end
             else
-                fromV2 = GetMousePos()  -- "Mouse"
+                fromV2 = GetMousePos()
             end
 
             local toScreen, toOn = cam:WorldToViewportPoint(aimPoint)
@@ -903,10 +1024,12 @@ local function DestroyMultiPointVisuals()
         pcall(function() MPV.Line:Remove() end)
         MPV.Line = nil
     end
+    Aimbot.Internal.LastSamplePoints = {}
 end
 
 --// ===========================================================================
-
+--// Logging / hitsound
+--// ===========================================================================
 local function LogShot(targetChar, targetName, startHealth, hitPartName, wasVisible)
     if not targetChar then return end
 
@@ -926,7 +1049,6 @@ local function LogShot(targetChar, targetName, startHealth, hitPartName, wasVisi
     local endHealth = hum.Health
     local hit = endHealth < startHealth
 
-    --// v25: sounds only when explicitly enabled.
     local S = H.Sounds or H.Sound or {}
     if hit then
         if hum.Health <= 0 then
@@ -1025,6 +1147,9 @@ end
 local function WaitForShotPoint(targetPart)
     if not targetPart or not IsAlive(targetPart) then return nil, false end
     if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
+        --// If Multi-Point enabled, still resolve best sub-point (no wall check)
+        local pt = GetVisiblePointOnPart(GetCheckOrigin(), targetPart)
+        if pt then return pt, true end
         return PredictPartPosition(targetPart), true
     end
     local origin = GetCheckOrigin()
@@ -1365,7 +1490,8 @@ local function PerformWallbang_RemotePatch(targetPart, btn)
         EXEC.hookmetamethod, EXEC.getnamecallmethod, EXEC.newcclosure, EXEC.checkcaller
     if not hookf or not getMethod or not newc then return false end
 
-    local aimPos   = PredictPartPosition(targetPart)
+    local aimPos   = GetVisiblePointOnPart(GetCheckOrigin(), targetPart)
+                     or PredictPartPosition(targetPart)
     local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
     WB.HoldUntil = tick() + holdTime
 
@@ -1542,7 +1668,6 @@ end
 --// ---------------------------------------------------------------------------
 --// PerformSilentShot
 --// ---------------------------------------------------------------------------
-
 local AV_MODE_SET = {
     ["Raycast"]                     = true,
     ["FindPartOnRay"]               = true,
@@ -1676,7 +1801,7 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
 end
 
 --// ---------------------------------------------------------------------------
---// AV namecall hook — v25 bulletproof
+--// AV namecall hook
 --// ---------------------------------------------------------------------------
 local AV_Active   = false
 local AV_Original = nil
@@ -1821,7 +1946,7 @@ local function SetupAVHook()
     AV_Active = true
     Aimbot.Internal.HookHandlers.AVNamecall     = handler
     Aimbot.Internal.HookHandlers.AVNamecallOrig = orig
-    DebugHookPrint("AV namecall hook installed (v25)")
+    DebugHookPrint("AV namecall hook installed (v26)")
 end
 
 local function RemoveAVHook()
@@ -2002,6 +2127,7 @@ local function LoadAimbot()
                 if Aimbot.Locked and Aimbot.LockPartInstance and IsAlive(Aimbot.LockPartInstance) then
                     local targetPart = Aimbot.LockPartInstance
                     local origin = GetCheckOrigin()
+                    --// Multi-Point applies here: best visible sub-point on locked part
                     local visiblePoint = GetVisiblePointOnPart(origin, targetPart)
                     if visiblePoint then
                         Aimbot.FOVCircle.Color = Color3.fromRGB(255, 200, 70)
@@ -2030,7 +2156,7 @@ local function LoadAimbot()
             end
         end
 
-        --// v26: Multi-Point + Line visuals (drawn every frame for smoothness)
+        --// v26: draw multi-point + line every frame (smooth)
         pcall(DrawMultiPointVisuals)
 
         ManageHooks()
@@ -2220,11 +2346,10 @@ Aimbot.DisableDesyncDuringShot  = DisableDesyncDuringShot
 Aimbot.FireClickNoDesync        = FireClickNoDesync
 
 --// v26: Multi-Point exports
-Aimbot.MULTIPOINT_PRESETS        = MULTIPOINT_PRESETS
-Aimbot.GetMultiPointParts        = GetMultiPointParts
-Aimbot.PickMultiPointTarget      = PickMultiPointTarget
-Aimbot.DrawMultiPointVisuals     = DrawMultiPointVisuals
-Aimbot.DestroyMultiPointVisuals  = DestroyMultiPointVisuals
+Aimbot.SamplePointsOnPart       = SamplePointsOnPart
+Aimbot.FindNearestPartToMouse   = FindNearestPartToMouse
+Aimbot.DrawMultiPointVisuals    = DrawMultiPointVisuals
+Aimbot.DestroyMultiPointVisuals = DestroyMultiPointVisuals
 
 --// ---------------------------------------------------------------------------
 --// DIAGNOSTICS
@@ -2270,6 +2395,20 @@ local function Diagnose()
         T(getExec(name) ~= nil, "executor: " .. name)
     end
 
+    --// Multi-Point self-test: sample points on a test part
+    do
+        local testOK, testErr = pcall(function()
+            local p = Instance.new("Part")
+            p.Size = Vector3.new(2, 2, 2)
+            p.CFrame = CFrame.new(0, 0, 0)
+            local pts = SamplePointsOnPart(p, 3, Vector3.new(10, 0, 0))
+            p:Destroy()
+            assert(type(pts) == "table" and #pts > 0,
+                "SamplePointsOnPart returned no points")
+        end)
+        T(testOK, "Multi-Point: SamplePointsOnPart works", testErr)
+    end
+
     InvalidateModeCache()
     if Aimbot.IsModeAvailable then
         local modes = { "Camera", "Mouse", "Raycast", "FindPartOnRay",
@@ -2291,7 +2430,7 @@ local function Diagnose()
                       "VerifyAndFixHooks", "InvalidateModeCache",
                       "GetWorkingMethods", "CycleAutowork", "DebugPrint",
                       "RemoveAVHook", "RemoveMHTProxy",
-                      "GetMultiPointParts", "PickMultiPointTarget",
+                      "SamplePointsOnPart", "FindNearestPartToMouse",
                       "DrawMultiPointVisuals", "DestroyMultiPointVisuals" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
