@@ -430,6 +430,10 @@ AB.AnimationPresets = {
     ["Robot Idle"]        = 616088791,
     ["Toy Idle"]          = 782850875,
     ["Levitation Idle"]   = 616006778,
+    --// Кастомные (пользовательские) анимации:
+    ["Tornado"]           = 82995540773684,
+    ["AntiAim"]           = 121890511737627,
+    ["Moving AntiAim"]    = 127105358105170,
     ["Custom"]            = nil,
 }
 
@@ -477,7 +481,7 @@ local function StopOurTrack()
     end
 end
 
--- ВАЖНО: CurrentTrack выставляется ДО Play(), иначе хук/движок может его сбить.
+-- ВАЖНО: CurrentTrack выставляется ДО Play(), иначе движок/хук может его сбить.
 local function LoadPresetTrack(animator)
     StopOurTrack()
     local assetId = ResolvePresetId()
@@ -634,7 +638,6 @@ local function ApplyAnimationBreaker(dt)
     local tr = AB.Internal.CurrentTrack
     if not tr then return end
 
-    -- На случай если движок прикрыл наш трек
     local okP, isPlaying = pcall(function() return tr.IsPlaying end)
     if okP and not isPlaying then
         pcall(function() tr:Play(0.15) end)
