@@ -1,8 +1,9 @@
 --// ============================================================================
 --// AirHub — 03_antiaim.lua
---// Anti-Aim (body) + Desync (client-side).
+--// Anti-Aim (body) + Desync (client-side) + Animation Breaker.
 --// Desync modes: Default / OldPosition / Void / InPlayer
 --// Desync methods: CFrame / Position / Velocity / Motor6D / HipHeight / Network
+--// Animation Breaker modes: None / Speed / Freeze / Jitter / Custom
 --// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 03_antiaim: core not loaded") return end
@@ -33,7 +34,7 @@ H.AntiAim = {
         Settings = {
             Enabled            = false,
             Mode               = "Default",
-            Method             = "CFrame",   -- CFrame / Position / Velocity / Motor6D / HipHeight / Network
+            Method             = "CFrame",
             X                  = 5,
             Y                  = 5,
             Z                  = 5,
@@ -64,6 +65,30 @@ H.AntiAim = {
             RotRoll          = 0,
             NetworkClaimed   = false,
         },
+    },
+    --// ---- Animation Breaker ------------------------------------------------
+    AnimationBreaker = {
+        Settings = {
+            Enabled        = false,
+            Preset         = "None",
+            Mode           = "None",       -- None / Speed / Freeze / Jitter / Custom
+            Speed          = 5,            -- multiplier (negative = reverse)
+            FreezeFrame    = 0,            -- seconds into the animation
+            JitterInterval = 0.15,         -- seconds between random speed picks
+            JitterMin      = 0.1,
+            JitterMax      = 10,
+            ApplyToServer  = true,         -- SetNetworkOwner(LocalPlayer)
+            CustomId       = "",           -- rbxassetid://...
+        },
+        Internal = {
+            JitterTimer        = 0,
+            CurrentJitterSpeed = 1,
+            CustomTrack        = nil,
+            CustomTrackId      = "",
+            NetworkOwnerSet    = false,
+            LastHRP            = nil,
+        },
+        Functions = {},
     },
     Internal = {
         BodyLastUpdate    = 0,
@@ -146,13 +171,10 @@ local function GetNearestPlayerHRP(myPos)
     return nearest
 end
 
---// Find RootJoint Motor6D inside HumanoidRootPart
 local function GetRootJoint(hrp)
     if not hrp then return nil end
     for _, child in ipairs(hrp:GetChildren()) do
-        if child:IsA("Motor6D") then
-            return child
-        end
+        if child:IsA("Motor6D") then return child end
     end
     return nil
 end
@@ -206,7 +228,6 @@ local function StartDesync()
         local interval = tonumber(S.UpdateInterval) or 0.05
         if interval < 0.01 then interval = 0.01 end
 
-        --// Capture original values for method-specific restore
         local rootJoint   = GetRootJoint(hrp)
         local oldRootC0   = rootJoint and rootJoint.C0
         local oldHipH     = hum and hum.HipHeight
@@ -276,7 +297,6 @@ local function StartDesync()
             )
         end
 
-        --// ---- Apply method -------------------------------------------------
         local applied = false
         if method == "CFrame" then
             hrp.CFrame = targetCF
@@ -324,7 +344,6 @@ local function StartDesync()
             applied = true
         end
 
-        --// ---- Schedule restore in render step -----------------------------
         if applied then
             RunService:BindToRenderStep(desync.Internal.RenderBindName, 101, function()
                 pcall(function()
@@ -381,6 +400,205 @@ local function StopDesync()
     desync.Internal.RotRoll          = 0
     desync.Internal.NetworkClaimed   = false
 end
+
+--// ===========================================================================
+--// Animation Breaker
+--// ===========================================================================
+local AB = AntiAim.AnimationBreaker
+
+--// Behavior presets. Applied by name from UI / external code.
+AB.Presets = {
+    ["None"]                    = { Mode = "None" },
+    ["Frozen (frame 0)"]        = { Mode = "Freeze", FreezeFrame = 0 },
+    ["Frozen (frame 0.5s)"]     = { Mode = "Freeze", FreezeFrame = 0.5 },
+    ["Super Fast (10x)"]        = { Mode = "Speed",  Speed = 10 },
+    ["Very Fast (5x)"]          = { Mode = "Speed",  Speed = 5 },
+    ["Super Slow (0.1x)"]       = { Mode = "Speed",  Speed = 0.1 },
+    ["Reverse (-1x)"]           = { Mode = "Speed",  Speed = -1 },
+    ["Zero Speed"]              = { Mode = "Speed",  Speed = 0 },
+    ["Jitter (chaos)"]          = { Mode = "Jitter", JitterMin = 0.05, JitterMax = 15, JitterInterval = 0.1 },
+    ["Jitter (subtle)"]         = { Mode = "Jitter", JitterMin = 0.5,  JitterMax = 2,  JitterInterval = 0.3 },
+    ["Custom Animation"]        = { Mode = "Custom" },
+}
+
+local function GetAnimator(char)
+    if not char then return nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return nil end
+    return hum:FindFirstChildOfClass("Animator")
+end
+
+local function StopCustomTrack()
+    if AB.Internal.CustomTrack then
+        pcall(function() AB.Internal.CustomTrack:Stop(0) end)
+        AB.Internal.CustomTrack   = nil
+        AB.Internal.CustomTrackId = ""
+    end
+end
+
+local function ResetAllSpeeds()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local animator = GetAnimator(char)
+    if not animator then return end
+    local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+    if not ok or not tracks then return end
+    for _, track in ipairs(tracks) do
+        pcall(function()
+            if track.Speed ~= 1 then track.Speed = 1 end
+        end)
+    end
+end
+
+local function ApplyAnimationBreaker(dt)
+    if H.ShuttingDown then return end
+    if not AB.Settings.Enabled then return end
+
+    local char = LocalPlayer.Character
+    if not char then
+        StopCustomTrack()
+        AB.Internal.NetworkOwnerSet = false
+        AB.Internal.LastHRP         = nil
+        return
+    end
+
+    local animator = GetAnimator(char)
+    if not animator then return end
+
+    --// HRP change → reset network flag + custom track (respawn)
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp ~= AB.Internal.LastHRP then
+        AB.Internal.LastHRP         = hrp
+        AB.Internal.NetworkOwnerSet = false
+        StopCustomTrack()
+    end
+
+    --// Apply to server (may fail if game locks ownership)
+    if AB.Settings.ApplyToServer and hrp and not AB.Internal.NetworkOwnerSet then
+        pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
+        AB.Internal.NetworkOwnerSet = true
+    end
+
+    local mode = AB.Settings.Mode or "None"
+    if mode == "None" then
+        -- edge case: enabled but no mode → restore speeds
+        ResetAllSpeeds()
+        return
+    end
+
+    local okTracks, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+    if not okTracks or not tracks then return end
+
+    --// ---- Custom mode ---------------------------------------------------
+    if mode == "Custom" then
+        local customId = AB.Settings.CustomId
+        if not customId or customId == "" then return end
+
+        -- Stop game tracks (leave our custom one)
+        for _, track in ipairs(tracks) do
+            if track ~= AB.Internal.CustomTrack then
+                pcall(function() track:Stop(0) end)
+            end
+        end
+
+        if AB.Internal.CustomTrackId ~= customId then
+            StopCustomTrack()
+            local anim = Instance.new("Animation")
+            anim.AnimationId = customId
+            local ok, newTrack = pcall(function() return animator:LoadAnimation(anim) end)
+            if ok and newTrack then
+                newTrack.Looped   = true
+                newTrack.Priority = Enum.AnimationPriority.Action4
+                pcall(function() newTrack:Play(0.1) end)
+                AB.Internal.CustomTrack   = newTrack
+                AB.Internal.CustomTrackId = customId
+            end
+        elseif AB.Internal.CustomTrack and not AB.Internal.CustomTrack.IsPlaying then
+            pcall(function() AB.Internal.CustomTrack:Play(0.1) end)
+        end
+        return
+    end
+
+    --// ---- Speed-based modes --------------------------------------------
+    local speed
+    if mode == "Speed" then
+        speed = tonumber(AB.Settings.Speed) or 1
+
+    elseif mode == "Freeze" then
+        speed = 0
+
+    elseif mode == "Jitter" then
+        local interval = tonumber(AB.Settings.JitterInterval) or 0.15
+        if interval < 0.01 then interval = 0.01 end
+        AB.Internal.JitterTimer = AB.Internal.JitterTimer + dt
+        if AB.Internal.JitterTimer >= interval then
+            AB.Internal.JitterTimer = 0
+            local mn = tonumber(AB.Settings.JitterMin) or 0.1
+            local mx = tonumber(AB.Settings.JitterMax) or 10
+            if mx < mn then mx = mn end
+            AB.Internal.CurrentJitterSpeed = mn + math.random() * (mx - mn)
+        end
+        speed = AB.Internal.CurrentJitterSpeed
+    end
+
+    if speed then
+        local freezeFrame = tonumber(AB.Settings.FreezeFrame) or 0
+        for _, track in ipairs(tracks) do
+            pcall(function()
+                track.Speed = speed
+                if mode == "Freeze" then
+                    track.TimePosition = freezeFrame
+                end
+            end)
+        end
+    end
+end
+
+local function StartAnimationBreaker()
+    AB.Internal.JitterTimer        = 0
+    AB.Internal.CurrentJitterSpeed = 1
+    AB.Internal.NetworkOwnerSet    = false
+    AB.Internal.LastHRP            = nil
+    StopCustomTrack()
+end
+
+local function StopAnimationBreaker()
+    ResetAllSpeeds()
+    StopCustomTrack()
+    AB.Internal.JitterTimer        = 0
+    AB.Internal.CurrentJitterSpeed = 1
+    AB.Internal.NetworkOwnerSet    = false
+    AB.Internal.LastHRP            = nil
+end
+
+local function ApplyAnimPreset(name)
+    local preset = AB.Presets[name]
+    if not preset then return false end
+    local S = AB.Settings
+    for k, v in pairs(preset) do
+        S[k] = v
+    end
+    S.Preset = name
+    return true
+end
+
+AB.Functions.Apply         = ApplyAnimationBreaker
+AB.Functions.ApplyPreset   = ApplyAnimPreset
+AB.Functions.Start         = StartAnimationBreaker
+AB.Functions.Stop          = StopAnimationBreaker
+AB.Functions.ListPresets   = function()
+    local out = {}
+    for k in pairs(AB.Presets) do out[#out + 1] = k end
+    table.sort(out)
+    return out
+end
+
+--// Persistent heartbeat (early-outs when disabled)
+RunService.Heartbeat:Connect(function(dt)
+    if H.ShuttingDown then return end
+    if not AB.Settings.Enabled then return end
+    xpcall(function() ApplyAnimationBreaker(dt) end, HandleError)
+end)
 
 --// ---------------------------------------------------------------------------
 --// Anti-Aim body
@@ -588,6 +806,21 @@ AntiAim.Functions = {
             RefreshOnShot = false,
             RandomRotate = false,
         }
+        --// Reset Animation Breaker
+        AB.Settings = {
+            Enabled        = false,
+            Preset         = "None",
+            Mode           = "None",
+            Speed          = 5,
+            FreezeFrame    = 0,
+            JitterInterval = 0.15,
+            JitterMin      = 0.1,
+            JitterMax      = 10,
+            ApplyToServer  = true,
+            CustomId       = "",
+        }
+        pcall(StopAnimationBreaker)
+
         AntiAim.Internal = {
             BodyLastUpdate = 0, BodyJitterTime = 0, BodyJitterOffset = 0,
             BodyGyro = nil, AlignOrientation = nil,
@@ -629,3 +862,9 @@ AntiAim.Functions = {
 AntiAim.StartDesync    = StartDesync
 AntiAim.StopDesync     = StopDesync
 AntiAim.CleanupAntiAim = CleanupAntiAim
+
+--// Animation Breaker public API
+AntiAim.StartAnimationBreaker = StartAnimationBreaker
+AntiAim.StopAnimationBreaker  = StopAnimationBreaker
+AntiAim.ApplyAnimationPreset  = ApplyAnimPreset
+AntiAim.AnimationPresets      = AB.Presets
