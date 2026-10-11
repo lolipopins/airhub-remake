@@ -8,6 +8,7 @@
 --// Animation Breaker: Preset = одна анимация; Mode = Speed | RandomFrames;
 --//   Preset "None" + Speed/RandomFrames применяется к игровым анимациям;
 --//   Preset "Custom" = пользовательский ID.
+--//   Кастомные пресеты: Tornado / AntiAim / Moving AntiAim.
 
 local H = getgenv().AirHub
 if not H or not H._UI then warn("[AirHub] 07b: 07a not loaded"); return end
@@ -452,6 +453,9 @@ task.spawn(function()
     local animPresetList = {
         "None",
         "Custom",
+        "Tornado",
+        "AntiAim",
+        "Moving AntiAim",
         "Default R15 Idle",
         "Default R15 Walk",
         "Default R15 Run",
