@@ -4,8 +4,11 @@
 --// Desync modes: Default / OldPosition / Void / InPlayer
 --// Desync methods: CFrame / Position / Velocity / Motor6D / HipHeight / Network
 --// Animation Breaker:
---//   Preset = одна из встроенных анимаций (или "Custom" → CustomId)
---//   Mode   = Speed (множитель) | RandomFrames (прыжки в случайный кадр)
+--//   Preset = одна из встроенных анимаций, либо "None" (обычные анимации),
+--//            либо "Custom" (свой ID).
+--//   Mode   = Speed (множитель) | RandomFrames (прыжки в случайный кадр).
+--//   Preset=None + Mode=Speed  → модифицирует скорость игровых анимаций.
+--//   Preset=<набор> + Mode=*   → наш трек Action4 поверх всего.
 --// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 03_antiaim: core not loaded") return end
@@ -74,18 +77,18 @@ H.AntiAim = {
             Enabled        = false,
             Mode           = "Speed",       -- Speed | RandomFrames
             Preset         = "None",        -- "None" | preset name | "Custom"
-            CustomId       = "",            -- rbxassetid://... (когда Preset = "Custom")
+            CustomId       = "",            -- rbxassetid://...
             Speed          = 1,             -- Speed mode
             RandomInterval = 0.1,           -- RandomFrames mode
-            ApplyToServer  = true,          -- SetNetworkOwner(LocalPlayer)
+            ApplyToServer  = true,
         },
         Internal = {
-            CurrentTrack    = nil,          -- AnimationTrack
-            CurrentKey      = nil,          -- "name:presetName" или "custom:ID" — чтобы понять, надо ли перегружать
-            AnimConnection  = nil,          -- Animator.AnimationPlayed hook
+            CurrentTrack    = nil,
+            CurrentKey      = nil,
             LastHRP         = nil,
             NetworkOwnerSet = false,
             RandomTimer     = 0,
+            LastWarnedId    = nil,
         },
         Functions = {},
     },
@@ -402,7 +405,7 @@ local function StopDesync()
 end
 
 --// ===========================================================================
---// Animation Breaker — presets (single animation each)
+--// Animation Breaker — presets (одиночные анимации)
 --// ===========================================================================
 AB.AnimationPresets = {
     ["None"]              = nil,
@@ -427,7 +430,7 @@ AB.AnimationPresets = {
     ["Robot Idle"]        = 616088791,
     ["Toy Idle"]          = 782850875,
     ["Levitation Idle"]   = 616006778,
-    ["Custom"]            = nil,   -- читает AB.Settings.CustomId
+    ["Custom"]            = nil,
 }
 
 --// ---------------------------------------------------------------------------
@@ -461,7 +464,6 @@ local function ResolvePresetId()
 end
 
 local function CurrentKey()
-    -- Уникальный ключ текущего выбранного источника — чтобы перезагружать трек только при смене
     if AB.Settings.Preset == "Custom" then
         return "custom:" .. tostring(AB.Settings.CustomId or "")
     end
@@ -475,74 +477,95 @@ local function StopOurTrack()
     end
 end
 
-local function StopGameTracks(animator)
-    local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
-    if not ok or not tracks then return end
-    for _, t in ipairs(tracks) do
-        if t ~= AB.Internal.CurrentTrack then
-            pcall(function() t:Stop(0) end)
-        end
-    end
-end
-
-local function AttachAnimHook(animator)
-    if AB.Internal.AnimConnection then
-        pcall(function() AB.Internal.AnimConnection:Disconnect() end)
-        AB.Internal.AnimConnection = nil
-    end
-    AB.Internal.AnimConnection = animator.AnimationPlayed:Connect(function(track)
-        if H.ShuttingDown then return end
-        if not AB.Settings.Enabled then return end
-        if track == AB.Internal.CurrentTrack then return end
-        pcall(function() track:Stop(0) end)
-    end)
-end
-
+-- ВАЖНО: CurrentTrack выставляется ДО Play(), иначе хук/движок может его сбить.
 local function LoadPresetTrack(animator)
     StopOurTrack()
     local assetId = ResolvePresetId()
-    if not assetId then return end
+    if not assetId then
+        if AB.Settings.Preset == "Custom" then
+            local cur = tostring(AB.Settings.CustomId or "")
+            if AB.Internal.LastWarnedId ~= cur then
+                AB.Internal.LastWarnedId = cur
+                warn("[AirHub AB] Custom ID не задан или невалиден: '" .. cur .. "'")
+            end
+        end
+        return false
+    end
 
     local anim = Instance.new("Animation")
     anim.AnimationId = assetId
     local ok, track = pcall(function() return animator:LoadAnimation(anim) end)
-    if not ok or not track then return end
+    if not ok or not track then
+        warn("[AirHub AB] LoadAnimation не удался для " .. assetId)
+        return false
+    end
 
     track.Looped   = true
     track.Priority = Enum.AnimationPriority.Action4
-    pcall(function() track:Play(0.1) end)
     AB.Internal.CurrentTrack = track
+    pcall(function() track:Play(0.15) end)
+    return true
 end
 
---// ---------------------------------------------------------------------------
---// Modes
---// ---------------------------------------------------------------------------
-local function ApplySpeedMode()
-    local tr = AB.Internal.CurrentTrack
+-- Установить скорость на всех играющих треках (для Preset=None + Mode=Speed)
+local function ApplySpeedToAllTracks(speed)
+    local char = LocalPlayer.Character
+    if not char then return end
+    local animator = GetAnimator(char)
+    if not animator then return end
+    local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+    if not ok or not tracks then return end
+    for _, t in ipairs(tracks) do
+        pcall(function()
+            t:AdjustSpeed(speed)
+            if t.Speed ~= speed then t.Speed = speed end
+        end)
+    end
+end
+
+-- RandomFrames на все игровые треки (Preset=None + RandomFrames)
+local function ApplyRandomFramesToAllTracks(dt)
+    local interval = tonumber(AB.Settings.RandomInterval) or 0.1
+    if interval < 0.02 then interval = 0.02 end
+    AB.Internal.RandomTimer = AB.Internal.RandomTimer + dt
+    local doJump = AB.Internal.RandomTimer >= interval
+    if doJump then AB.Internal.RandomTimer = 0 end
+
+    local char = LocalPlayer.Character
+    if not char then return end
+    local animator = GetAnimator(char)
+    if not animator then return end
+    local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+    if not ok or not tracks then return end
+    for _, t in ipairs(tracks) do
+        pcall(function()
+            t:AdjustSpeed(0)
+            if t.Speed ~= 0 then t.Speed = 0 end
+            if doJump then
+                local len = t.Length or 0
+                if len > 0 then t.TimePosition = math.random() * len end
+            end
+        end)
+    end
+end
+
+-- RandomFrames на наш конкретный трек
+local function ApplyRandomFramesToOurTrack(tr, dt)
     if not tr then return end
-    local speed = tonumber(AB.Settings.Speed) or 1
     pcall(function()
-        if tr.Speed ~= speed then tr.Speed = speed end
+        tr:AdjustSpeed(0)
+        if tr.Speed ~= 0 then tr.Speed = 0 end
     end)
-end
-
-local function ApplyRandomFramesMode(dt)
-    local tr = AB.Internal.CurrentTrack
-    if not tr then return end
-
-    -- замораживаем движение и прыгаем по кадрам
-    pcall(function() if tr.Speed ~= 0 then tr.Speed = 0 end end)
 
     local interval = tonumber(AB.Settings.RandomInterval) or 0.1
     if interval < 0.02 then interval = 0.02 end
-
     AB.Internal.RandomTimer = AB.Internal.RandomTimer + dt
     if AB.Internal.RandomTimer >= interval then
         AB.Internal.RandomTimer = 0
-        local length = 0
-        pcall(function() length = tr.Length end)
-        if length and length > 0 then
-            pcall(function() tr.TimePosition = math.random() * length end)
+        local len = 0
+        pcall(function() len = tr.Length or 0 end)
+        if len > 0 then
+            pcall(function() tr.TimePosition = math.random() * len end)
         end
     end
 end
@@ -569,15 +592,14 @@ local function ApplyAnimationBreaker(dt)
         return
     end
 
+    -- Респавн / смена персонажа
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if hrp ~= AB.Internal.LastHRP then
-        -- респавн / смена персонажа
         AB.Internal.LastHRP         = hrp
         AB.Internal.NetworkOwnerSet = false
         StopOurTrack()
         AB.Internal.CurrentKey      = nil
         AB.Internal.RandomTimer     = 0
-        AttachAnimHook(animator)
     end
 
     if AB.Settings.ApplyToServer and hrp and not AB.Internal.NetworkOwnerSet then
@@ -585,37 +607,47 @@ local function ApplyAnimationBreaker(dt)
         AB.Internal.NetworkOwnerSet = true
     end
 
-    -- Нет выбранного источника — ничего не играем
+    local mode = AB.Settings.Mode or "Speed"
+
+    -- === Preset = None → модифицируем САМИ игровые анимации ===
     if AB.Settings.Preset == "None" then
-        StopOurTrack()
-        AB.Internal.CurrentKey = nil
+        if AB.Internal.CurrentTrack then StopOurTrack() end
+        AB.Internal.CurrentKey = "preset:None"
+
+        if mode == "RandomFrames" then
+            ApplyRandomFramesToAllTracks(dt)
+        else
+            local speed = tonumber(AB.Settings.Speed) or 1
+            ApplySpeedToAllTracks(speed)
+        end
         return
     end
 
-    -- (Re)load если сменился источник
+    -- === Preset выбран → наш трек Action4 поверх всего ===
     local key = CurrentKey()
     if AB.Internal.CurrentKey ~= key then
-        AB.Internal.CurrentKey = key
+        AB.Internal.CurrentKey  = key
         LoadPresetTrack(animator)
         AB.Internal.RandomTimer = 0
     end
 
-    -- Гарантируем, что трек играет (Roblox иногда сам его прикрывает)
     local tr = AB.Internal.CurrentTrack
     if not tr then return end
-    if not tr.IsPlaying then
-        pcall(function() tr:Play(0.1) end)
+
+    -- На случай если движок прикрыл наш трек
+    local okP, isPlaying = pcall(function() return tr.IsPlaying end)
+    if okP and not isPlaying then
+        pcall(function() tr:Play(0.15) end)
     end
 
-    -- Убиваем чужие анимации, которые игра пытается запустить
-    StopGameTracks(animator)
-
-    -- Применяем режим
-    local mode = AB.Settings.Mode or "Speed"
     if mode == "RandomFrames" then
-        ApplyRandomFramesMode(dt)
+        ApplyRandomFramesToOurTrack(tr, dt)
     else
-        ApplySpeedMode()
+        local speed = tonumber(AB.Settings.Speed) or 1
+        pcall(function()
+            tr:AdjustSpeed(speed)
+            if tr.Speed ~= speed then tr.Speed = speed end
+        end)
     end
 end
 
@@ -636,10 +668,6 @@ end
 local function StopAnimationBreaker()
     ResetAllSpeeds()
     StopOurTrack()
-    if AB.Internal.AnimConnection then
-        pcall(function() AB.Internal.AnimConnection:Disconnect() end)
-        AB.Internal.AnimConnection = nil
-    end
     AB.Internal.CurrentKey      = nil
     AB.Internal.RandomTimer     = 0
     AB.Internal.NetworkOwnerSet = false
