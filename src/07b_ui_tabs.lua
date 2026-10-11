@@ -1,6 +1,6 @@
 --// AirHub - 07b_ui_tabs.lua
 --// Visuals, Anti-Aim (Body + Desync), Movement, Settings tabs.
---// Bhop: 2 modes (Old / New).
+--// Bhop: 2 modes (Old / New) + Space-block fix (hookmetamethod / release pulse).
 --// Spider: 3 modes (Default / Pixelwalk / Wallfucker).
 
 local H = getgenv().AirHub
@@ -125,6 +125,8 @@ task.spawn(function()
     Bhop.Settings.JumpCooldown    = Bhop.Settings.JumpCooldown    or 0.05
     if Bhop.Settings.AirBoost == nil   then Bhop.Settings.AirBoost   = true end
     Bhop.Settings.AirBoostDivisor = Bhop.Settings.AirBoostDivisor or 5.9
+    if Bhop.Settings.BlockSpaceFromGame == nil then Bhop.Settings.BlockSpaceFromGame = true end
+    if Bhop.Settings.SpaceReleasePulse  == nil then Bhop.Settings.SpaceReleasePulse  = true end
 
     Bhop.Settings.Spider            = Bhop.Settings.Spider or {}
     Bhop.Settings.Spider.Enabled    = Bhop.Settings.Spider.Enabled or false
@@ -427,7 +429,7 @@ task.spawn(function()
     local strafeKeys   = { "Space", "LeftShift", "LeftControl", "C", "X", "Z", "Q", "E" }
     local flyMethods   = { "BodyVelocity", "LinearVelocity", "Velocity", "CFrame" }
     local flyKeys      = { "F", "G", "H", "V", "B", "N", "Space", "LeftShift" }
-    local bhopKeys     = { "Space", "LeftControl", "LeftShift", "C", "X", "Z" }
+    local bhopKeys     = { "Space", "LeftShift", "LeftControl", "C", "X", "Z", "E", "Q", "F", "G", "V", "B" }
     local bhopModes    = { "Old", "New" }
     local speedMethods = { "WalkSpeed", "CFrame", "Velocity" }
     local spiderModes  = { "Default", "Pixelwalk", "Wallfucker" }
@@ -480,7 +482,7 @@ task.spawn(function()
     flySec:AddToggle({ Name = "Use WASD + Space/Ctrl", Value = Fly.Settings.UseKeys ~= false,
         Callback = function(v) Fly.Settings.UseKeys = v end })
 
-    --// ===== Bhop (Old / New) =====
+    --// ===== Bhop (Old / New + Space-block fix) =====
     local bhopSec = MovementTab:CreateSection({ Name = "Bhop", Side = "Right" })
     bhopSec:AddToggle({ Name = "Enabled", Value = Bhop.Settings.Enabled,
         Callback = function(v)
@@ -495,6 +497,10 @@ task.spawn(function()
         Callback = function(v) Bhop.Settings.Mode = v end })
     bhopSec:AddDropdown({ Name = "Jump Key", Value = Bhop.Settings.AutoJumpKey or "Space", List = bhopKeys,
         Callback = function(v) Bhop.Settings.AutoJumpKey = v end })
+    bhopSec:AddToggle({ Name = "Block Space from Game (hook)", Value = Bhop.Settings.BlockSpaceFromGame ~= false,
+        Callback = function(v) Bhop.Settings.BlockSpaceFromGame = v end })
+    bhopSec:AddToggle({ Name = "Space Release Pulse (fallback)", Value = Bhop.Settings.SpaceReleasePulse ~= false,
+        Callback = function(v) Bhop.Settings.SpaceReleasePulse = v end })
     bhopSec:AddToggle({ Name = "Bypass Jump Restrictions", Value = Bhop.Settings.BypassJump ~= false,
         Callback = function(v) Bhop.Settings.BypassJump = v end })
     bhopSec:AddSlider({ Name = "Jump Cooldown (Old only)", Value = Bhop.Settings.JumpCooldown or 0.05,
