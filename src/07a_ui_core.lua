@@ -1,8 +1,6 @@
 --// AirHub - 07a_ui_core.lua
---// v24: Multi-Point (mesh-accurate sampling) + Multi-Point Visuals (points)
---//      + Aim Line (separate feature).
---// v22: Silent Aim modes = Camera / Mouse / Raycast / FindPartOnRay* / Mouse.Hit/Target.
-
+--// v25: Multi-Point (mesh-accurate, chams-style Silhouette / Grid),
+--//      Multi-Point Visuals (points), Aim Line (separate).
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
 
@@ -70,9 +68,7 @@ local AA_BIND_NAME         = AntiAim.AA_BIND_NAME or "AirHubAntiAim"
 local function ApplyAllEnabledStates()
     local Hg = getgenv().AirHub
     if not Hg then return end
-
     if WallHack.Settings and WallHack.Settings.Enabled then ApplyGlowToAll() end
-
     if Hg.AntiAim and Hg.AntiAim.Desync and Hg.AntiAim.Desync.Settings
        and Hg.AntiAim.Desync.Settings.Enabled then
         StopDesync()
@@ -85,7 +81,6 @@ local function ApplyAllEnabledStates()
     else
         StopDesync()
     end
-
     if Hg.ServerPosition and Hg.ServerPosition.Settings
        and Hg.ServerPosition.Settings.Enabled then
         StopServerPosition()
@@ -98,7 +93,6 @@ local function ApplyAllEnabledStates()
     else
         StopServerPosition()
     end
-
     if Hg.Fly and Hg.Fly.Settings and Hg.Fly.Internal then
         Fly_ClearInstances()
         Hg.Fly.Internal.Active = Hg.Fly.Settings.Enabled and Hg.Fly.Settings.Toggle or false
@@ -181,7 +175,6 @@ task.delay(math.random(1, 3), function()
 
     Library.UnloadCallback = function()
         H.ShuttingDown = true
-
         if Aimbot.Settings then
             Aimbot.Settings.Enabled = false
             if Aimbot.Settings.AutoShoot then Aimbot.Settings.AutoShoot.Enabled = false end
@@ -194,7 +187,6 @@ task.delay(math.random(1, 3), function()
         if Aimbot.FOVSettings then Aimbot.FOVSettings.Enabled = false end
         if Aimbot.CancelAutoScan then pcall(Aimbot.CancelAutoScan) end
         if Aimbot.TPAimInternal then Aimbot.TPAimInternal.Active = false end
-
         if WallHack.Settings then WallHack.Settings.Enabled = false end
         if WallHack.Visuals then
             if WallHack.Visuals.BoxSettings then WallHack.Visuals.BoxSettings.Enabled = false end
@@ -202,12 +194,10 @@ task.delay(math.random(1, 3), function()
             if WallHack.Visuals.HUDSettings then WallHack.Visuals.HUDSettings.Enabled = false end
             if WallHack.Visuals.SelfESP then WallHack.Visuals.SelfESP.Enabled = false end
         end
-
         if AntiAim.Settings then AntiAim.Settings.Enabled = false end
         if AntiAim.Desync and AntiAim.Desync.Settings then
             AntiAim.Desync.Settings.Enabled = false
         end
-
         if ServerPosition.Settings then ServerPosition.Settings.Enabled = false end
         if Fly.Settings then Fly.Settings.Enabled = false end
         if Bhop.Settings then Bhop.Settings.Enabled = false end
@@ -215,7 +205,6 @@ task.delay(math.random(1, 3), function()
         if FastStop.Settings then FastStop.Settings.Enabled = false end
         if AutoStrafer.Settings then AutoStrafer.Settings.Enabled = false end
         if Noclip.Settings then Noclip.Settings.Enabled = false end
-
         if Fly.Internal then Fly.Internal.Active = false end
         if Bhop.Internal then
             Bhop.Internal.KeyHeld = false
@@ -225,7 +214,6 @@ task.delay(math.random(1, 3), function()
         if Speed.Internal then Speed.Internal.Active = false end
         if Noclip.Internal then Noclip.Internal.Active = false end
         if FastStop.Internal then FastStop.Internal.LastActive = false end
-
         pcall(function() CancelLock() end)
         pcall(function() if Aimbot.FOVCircle then Aimbot.FOVCircle:Remove() end end)
         pcall(function()
@@ -237,7 +225,6 @@ task.delay(math.random(1, 3), function()
         pcall(function() StopServerPosition() end)
         pcall(function() StopDesync() end)
         pcall(function() Fly_ClearInstances() end)
-
         pcall(function()
             local char = LocalPlayer.Character
             if char then
@@ -251,13 +238,11 @@ task.delay(math.random(1, 3), function()
                 end
             end
         end)
-
         pcall(function() AS_ReleaseAll() end)
         pcall(function() RemoveAVHook() end)
         pcall(function() RemoveMHTProxy() end)
         pcall(function() CleanupAntiAim() end)
         pcall(function() game:GetService("RunService"):UnbindFromRenderStep(AA_BIND_NAME) end)
-
         pcall(function()
             if H.World and H.World.Functions and H.World.Functions.Restore then
                 H.World.Functions.Restore()
@@ -268,7 +253,6 @@ task.delay(math.random(1, 3), function()
                 H.Exploits.Functions.StopAll()
             end
         end)
-
         pcall(function() if H.ErrorText then H.ErrorText:Remove() end end)
         pcall(function()
             if H.ActiveLogs then
@@ -314,25 +298,17 @@ task.delay(math.random(1, 3), function()
     local wallCheckModes = { "Fast", "Perfect" }
 
     local silentAimModes = {
-        "Camera",
-        "Mouse",
-        "Raycast",
-        "FindPartOnRay",
-        "FindPartOnRayWithWhitelist",
-        "FindPartOnRayWithIgnoreList",
-        "Mouse.Hit/Target",
+        "Camera", "Mouse", "Raycast",
+        "FindPartOnRay", "FindPartOnRayWithWhitelist",
+        "FindPartOnRayWithIgnoreList", "Mouse.Hit/Target",
     }
 
     local wallbangModes = {
-        "RemotePatch",
-        "RemotePatchFull",
-        "RayIgnore",
-        "RayNewHook",
-        "MuzzleTeleport",
-        "MouseHit",
-        "ScreenPointToRay",
-        "CameraTP",
+        "RemotePatch", "RemotePatchFull", "RayIgnore", "RayNewHook",
+        "MuzzleTeleport", "MouseHit", "ScreenPointToRay", "CameraTP",
     }
+
+    local mpStyles = { "Grid", "Silhouette" }
 
     local AS = (Aimbot and Aimbot.Settings) or {}
     local function aSet(key, val) if Aimbot.Settings then Aimbot.Settings[key] = val end end
@@ -412,7 +388,6 @@ task.delay(math.random(1, 3), function()
 
     --// ==== Multi-Point ====
     local secMP = H._UI.AimbotTab:CreateSection({ Name = "Multi-Point" })
-
     local MP = AS.MultiPoint or {}
     secMP:AddToggle({
         Name = "Enabled (aim at closest VISIBLE mesh point)",
@@ -422,23 +397,50 @@ task.delay(math.random(1, 3), function()
     secMP:AddSlider({
         Name = "Density (rays per axis)",
         Value = MP.Density or 3,
-        Min = 2, Max = 6,
+        Min = 2, Max = 8,
         Callback = function(v) aSetMP("Density", math.floor(v)) end,
+    })
+    secMP:AddSlider({
+        Name = "Jitter Sub-rays (per missed cell)",
+        Value = MP.JitterTries or 3,
+        Min = 0, Max = 6,
+        Callback = function(v) aSetMP("JitterTries", math.floor(v)) end,
+    })
+    secMP:AddToggle({
+        Name = "Adaptive density by on-screen size",
+        Value = MP.AdaptiveDensity ~= false,
+        Callback = function(v) aSetMP("AdaptiveDensity", v) end,
+    })
+    secMP:AddSlider({
+        Name = "Max rays per part",
+        Value = MP.MaxRaysPerPart or 64,
+        Min = 16, Max = 200,
+        Callback = function(v) aSetMP("MaxRaysPerPart", math.floor(v)) end,
     })
 
     --// ==== Multi-Point Visuals ====
     local secMPV = H._UI.AimbotTab:CreateSection({ Name = "Multi-Point Visuals" })
-
     local MPV = AS.MultiPointVisuals or {}
     secMPV:AddToggle({
         Name = "Show Sampled Points",
         Value = MPV.Enabled or false,
         Callback = function(v) aSetMPV("Enabled", v) end,
     })
+    secMPV:AddDropdown({
+        Name = "Style",
+        Value = MPV.Style or "Grid",
+        List = mpStyles,
+        Callback = function(v) aSetMPV("Style", v) end,
+    })
     secMPV:AddToggle({
         Name = "Show All Body Parts",
         Value = MPV.ShowAllParts ~= false,
         Callback = function(v) aSetMPV("ShowAllParts", v) end,
+    })
+    secMPV:AddToggle({
+        Name = "Show Misses",
+        Value = MPV.ShowMisses ~= false,
+        Callback = function(v) aSetMPV("ShowMisses", v) end,
     })
     secMPV:AddSlider({
         Name = "Point Radius",
@@ -451,10 +453,15 @@ task.delay(math.random(1, 3), function()
         Value = MPV.PointFilled ~= false,
         Callback = function(v) aSetMPV("PointFilled", v) end,
     })
+    secMPV:AddSlider({
+        Name = "Max Rendered Points",
+        Value = MPV.MaxPoints or 512,
+        Min = 64, Max = 1024,
+        Callback = function(v) aSetMPV("MaxPoints", math.floor(v)) end,
+    })
 
     --// ==== Aim Line (separate feature) ====
     local secLine = H._UI.AimbotTab:CreateSection({ Name = "Aim Line" })
-
     local AL = AS.AimLineVisuals or {}
     secLine:AddToggle({
         Name = "Show Line to Aim Target",
@@ -500,58 +507,44 @@ task.delay(math.random(1, 3), function()
     local secD = H._UI.AimbotTab:CreateSection({ Name = "Silent Aim", Side = "Right" })
     secD:AddToggle({ Name = "Enabled", Value = AS.SilentAim ~= false,
         Callback = function(v) aSet("SilentAim", v) end })
-
     local modeStatusLabel = nil
     local function refreshModeLabel()
         if not modeStatusLabel then return end
         local txt = "Mode: " .. tostring(AS.SilentAimMode or "Camera")
         pcall(function() modeStatusLabel:SetLabel(txt) end)
     end
-
     secD:AddDropdown({ Name = "Mode", Value = AS.SilentAimMode or "Camera",
         List = silentAimModes,
         Callback = function(v)
             aSet("SilentAimMode", v)
             if Aimbot.Internal then Aimbot.Internal.LastManageKey = nil end
-
             local isAVMode = (v == "Raycast"
                               or v == "Raycast v2"
                               or v == "FindPartOnRay"
                               or v == "FindPartOnRayWithWhitelist"
                               or v == "FindPartOnRayWithIgnoreList")
-            if not isAVMode and Aimbot.RemoveAVHook then
-                pcall(Aimbot.RemoveAVHook)
-            end
-            if v ~= "Mouse.Hit/Target" and Aimbot.RemoveMHTProxy then
-                pcall(Aimbot.RemoveMHTProxy)
-            end
-
+            if not isAVMode and Aimbot.RemoveAVHook then pcall(Aimbot.RemoveAVHook) end
+            if v ~= "Mouse.Hit/Target" and Aimbot.RemoveMHTProxy then pcall(Aimbot.RemoveMHTProxy) end
             refreshModeLabel()
         end })
-
     secD:AddToggle({ Name = "Use Backtrack", Value = AS.UseBacktrack or false,
         Callback = function(v)
             aSet("UseBacktrack", v)
             if v then
-                local ok = H.Exploits
-                    and H.Exploits.Settings
-                    and H.Exploits.Settings.BacktrackEnabled
+                local ok = H.Exploits and H.Exploits.Settings and H.Exploits.Settings.BacktrackEnabled
                 if not ok then
                     warn("[AirHub] Use Backtrack: H.Exploits не загружен или Backtrack не включён в Exploits tab.")
                 end
             end
         end })
-
     secD:AddToggle({ Name = "Aim At Ghost (experimental)", Value = AS.BacktrackAimAtGhost or false,
         Callback = function(v) aSet("BacktrackAimAtGhost", v) end })
-
     do
         local okLabel = pcall(function()
             modeStatusLabel = secD:AddLabel({ Name = "Mode Status", Text = "Mode: " .. tostring(AS.SilentAimMode or "Camera") })
         end)
         if not okLabel then modeStatusLabel = nil end
     end
-
     task.spawn(function()
         while not H.ShuttingDown do
             refreshModeLabel()
@@ -561,27 +554,20 @@ task.delay(math.random(1, 3), function()
 
     --// ==== Wallbang ====
     local secWB = H._UI.AimbotTab:CreateSection({ Name = "Wallbang", Side = "Right" })
-
     local function aSetWB(key, val)
         if Aimbot.Settings then Aimbot.Settings[key] = val end
     end
-
-    secWB:AddToggle({ Name = "Enabled",
-        Value = AS.WallbangEnabled or false,
+    secWB:AddToggle({ Name = "Enabled", Value = AS.WallbangEnabled or false,
         Callback = function(v) aSetWB("WallbangEnabled", v) end })
-
-    secWB:AddDropdown({ Name = "Method",
-        Value = AS.WallbangMethod or "RemotePatch",
+    secWB:AddDropdown({ Name = "Method", Value = AS.WallbangMethod or "RemotePatch",
         List = wallbangModes,
         Callback = function(v) aSetWB("WallbangMethod", v) end })
-
     secWB:AddTextbox({ Name = "Hold Time (s) — 0.05-0.5",
         Value = tostring(AS.WallbangHoldTime or 0.1),
         Callback = function(v)
             local n = tonumber(v)
             if n then aSetWB("WallbangHoldTime", math.clamp(n, 0.05, 0.5)) end
         end })
-
     secWB:AddTextbox({ Name = "Max Distance (studs)",
         Value = tostring(AS.WallbangDistance or 500),
         Callback = function(v)
@@ -591,33 +577,21 @@ task.delay(math.random(1, 3), function()
 
     --// ==== TP Aim ====
     local secTP = H._UI.AimbotTab:CreateSection({ Name = "TP Aim", Side = "Right" })
-
     local function aSetTP(key, val)
         if Aimbot.Settings then Aimbot.Settings[key] = val end
     end
-
-    secTP:AddToggle({ Name = "Enabled",
-        Value = AS.TPAimEnabled or false,
+    secTP:AddToggle({ Name = "Enabled", Value = AS.TPAimEnabled or false,
         Callback = function(v) aSetTP("TPAimEnabled", v) end })
-
-    secTP:AddDropdown({ Name = "Method",
-        Value = AS.TPAimMethod or "MagicBullet",
+    secTP:AddDropdown({ Name = "Method", Value = AS.TPAimMethod or "MagicBullet",
         List = { "MagicBullet", "InfiniteTP" },
         Callback = function(v) aSetTP("TPAimMethod", v) end })
-
-    secTP:AddTextbox({ Name = "InfiniteTP Key (KeyCode)",
-        Value = AS.TPAimKey or "E",
-        Callback = function(v)
-            if v and v ~= "" then aSetTP("TPAimKey", v) end
-        end })
-
-    secTP:AddTextbox({ Name = "TP Distance (studs)",
-        Value = tostring(AS.TPAimDistance or 5),
+    secTP:AddTextbox({ Name = "InfiniteTP Key (KeyCode)", Value = AS.TPAimKey or "E",
+        Callback = function(v) if v and v ~= "" then aSetTP("TPAimKey", v) end end })
+    secTP:AddTextbox({ Name = "TP Distance (studs)", Value = tostring(AS.TPAimDistance or 5),
         Callback = function(v)
             local n = tonumber(v)
             if n and n > 0 then aSetTP("TPAimDistance", n) end
         end })
-
     secTP:AddToggle({ Name = "Return on kill (MagicBullet)",
         Value = AS.TPAimReturnOnKill ~= false,
         Callback = function(v) aSetTP("TPAimReturnOnKill", v) end })
