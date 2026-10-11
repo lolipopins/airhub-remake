@@ -425,8 +425,6 @@ end
 --// Каждый пресет = { idle, walk, run, jump, fall, climb }.
 --// Значения = массивы ID (одна анимация или несколько для idle-вариаций).
 --//
---// Если у какой-то анимации пропал эффект — ID мог быть удалён/приватен,
---// замени на актуальный из каталога.
 AB.AnimationPresets = {
     ["None"] = {},
 
@@ -568,7 +566,6 @@ end
 local function ResolvePresetTable()
     local presetName = AB.Settings.Preset
     if presetName == "Custom" then
-        -- читаем из Settings.CustomIds
         local ci = AB.Settings.CustomIds or {}
         local out = {}
         local function fill(slot, key)
@@ -637,7 +634,6 @@ local function ApplyReplaceMode(animator, hum)
     local presetName = AB.Settings.Preset
     local presetSrc
     if presetName == "Custom" then
-        -- отпечаток Custom, чтобы перезагружать при изменении ID
         local ci = AB.Settings.CustomIds or {}
         presetSrc = table.concat({
             ci.Idle or "", ci.Walk or "", ci.Run or "",
@@ -647,7 +643,6 @@ local function ApplyReplaceMode(animator, hum)
         presetSrc = "builtin:" .. tostring(presetName)
     end
 
-    -- (Re)load пресета если сменился
     if AB.Internal.LoadedPreset ~= presetName
        or AB.Internal.LastPresetSrc ~= presetSrc then
         local presetTable = ResolvePresetTable()
@@ -663,26 +658,21 @@ local function ApplyReplaceMode(animator, hum)
         AB.Internal.LastSlot      = nil
     end
 
-    -- Убить чужие треки, которые игра постоянно перезапускает
     StopGameTracks(animator)
 
-    -- Выбрать активный слот по состоянию humanoid
     local slot = GetActiveSlot(hum)
     local tracksForSlot = AB.Internal.LoadedTracks[slot]
     if not tracksForSlot or #tracksForSlot == 0 then
-        -- fallback: idle
         tracksForSlot = AB.Internal.LoadedTracks.idle
         slot = "idle"
     end
     if not tracksForSlot or #tracksForSlot == 0 then return end
 
-    -- Выбрать трек (для idle — случайный из вариаций)
     local activeTrack
     if slot == "idle" and #tracksForSlot > 1 then
         if AB.Internal.LastSlot ~= "idle" or math.random() < 0.02 then
             activeTrack = tracksForSlot[math.random(1, #tracksForSlot)]
         else
-            -- оставляем текущий
             for _, t in ipairs(tracksForSlot) do
                 if t.IsPlaying then activeTrack = t break end
             end
@@ -692,7 +682,6 @@ local function ApplyReplaceMode(animator, hum)
         activeTrack = tracksForSlot[1]
     end
 
-    -- Остановить остальные
     for s, slotTracks in pairs(AB.Internal.LoadedTracks) do
         for _, t in ipairs(slotTracks) do
             if t ~= activeTrack and t.IsPlaying then
@@ -701,7 +690,6 @@ local function ApplyReplaceMode(animator, hum)
         end
     end
 
-    -- Запустить активный если не играет
     if not activeTrack.IsPlaying then
         pcall(function() activeTrack:Play(0.1) end)
     end
@@ -776,14 +764,12 @@ local function ApplyAnimationBreaker(dt)
 
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if hrp ~= AB.Internal.LastHRP then
-        -- респавн / смена персонажа
         AB.Internal.LastHRP         = hrp
         AB.Internal.NetworkOwnerSet = false
         StopAllOurTracks()
         AB.Internal.LoadedPreset    = nil
         AB.Internal.LastPresetSrc   = nil
         AB.Internal.LastSlot        = nil
-        -- переподключить хук к новому Animator
         AttachAnimHook(animator)
     end
 
@@ -796,7 +782,6 @@ local function ApplyAnimationBreaker(dt)
     local mode = AB.Settings.Mode or "None"
 
     if mode == "None" then
-        -- если что-то осталось от прошлого режима — снять
         if AB.Internal.LoadedPreset then
             StopAllOurTracks()
             AB.Internal.LoadedPreset  = nil
@@ -807,7 +792,6 @@ local function ApplyAnimationBreaker(dt)
     end
 
     if mode == "Replace" then
-        -- на всякий случай держим хук живым
         if not AB.Internal.AnimConnection then AttachAnimHook(animator) end
         ApplyReplaceMode(animator, hum)
 
@@ -864,22 +848,16 @@ local function StopAnimationBreaker()
     AB.Internal.LastHRP         = nil
 end
 
---// Принудительная перезагрузка пресета (кнопка Reload в UI)
 local function ReloadAnimationPreset()
     StopAllOurTracks()
     AB.Internal.LoadedPreset  = nil
     AB.Internal.LastPresetSrc = nil
     AB.Internal.LastSlot      = nil
-    if AB.Settings.Enabled and AB.Settings.Mode == "Replace" then
-        -- следующий Heartbeat подхватит
-    end
 end
 
---// Публичный API для UI/конфигов
 AB.Functions.ApplyPreset = function(name)
     if AB.AnimationPresets[name] == nil and name ~= "Custom" then return false end
     AB.Settings.Preset = name
-    -- если сейчас не Replace — переключим на Replace (это основное назначение пресетов)
     if AB.Settings.Enabled then
         AB.Settings.Mode = "Replace"
         ReloadAnimationPreset()
@@ -895,7 +873,6 @@ AB.Functions.ListPresets = function()
     return out
 end
 
---// Постоянный Heartbeat (ранний выход, если выключено)
 RunService.Heartbeat:Connect(function(dt)
     if H.ShuttingDown then return end
     if not AB.Settings.Enabled then return end
@@ -903,7 +880,7 @@ RunService.Heartbeat:Connect(function(dt)
 end)
 
 --// ---------------------------------------------------------------------------
---// Anti-Aim body (без изменений)
+--// Anti-Aim body
 --// ---------------------------------------------------------------------------
 local function CleanupAntiAim()
     if AntiAim.Internal.BodyGyro then
@@ -1108,7 +1085,6 @@ AntiAim.Functions = {
             RefreshOnShot = false,
             RandomRotate = false,
         }
-        --// Animation Breaker reset
         AB.Settings = {
             Enabled        = false,
             Mode           = "None",
