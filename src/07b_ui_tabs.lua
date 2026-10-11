@@ -1,6 +1,7 @@
 --// AirHub - 07b_ui_tabs.lua
 --// Visuals, Anti-Aim (Body + Desync), Movement, Settings tabs.
 --// Bhop: 2 modes (Old / New) + Space-block fix (hookmetamethod / release pulse).
+--//   New = Counter Blox port (Heartbeat + Jump toggle + TranslateBy airboost).
 --// Spider: 3 modes (Default / Pixelwalk / Wallfucker).
 
 local H = getgenv().AirHub
@@ -119,7 +120,7 @@ task.spawn(function()
     --// ===== BHOP / SPIDER normalization =====
     Bhop.Settings            = Bhop.Settings            or {}
     Bhop.Settings.Enabled         = Bhop.Settings.Enabled         or false
-    Bhop.Settings.Mode            = Bhop.Settings.Mode            or "Old"       -- "Old" | "New"
+    Bhop.Settings.Mode            = Bhop.Settings.Mode            or "New"       -- "Old" | "New"
     Bhop.Settings.AutoJumpKey     = Bhop.Settings.AutoJumpKey     or "Space"
     if Bhop.Settings.BypassJump == nil then Bhop.Settings.BypassJump = true end
     Bhop.Settings.JumpCooldown    = Bhop.Settings.JumpCooldown    or 0.05
@@ -493,7 +494,7 @@ task.spawn(function()
                 Bhop.Internal.SpiderTouching = false
             end
         end })
-    bhopSec:AddDropdown({ Name = "Mode", Value = Bhop.Settings.Mode or "Old", List = bhopModes,
+    bhopSec:AddDropdown({ Name = "Mode", Value = Bhop.Settings.Mode or "New", List = bhopModes,
         Callback = function(v) Bhop.Settings.Mode = v end })
     bhopSec:AddDropdown({ Name = "Jump Key", Value = Bhop.Settings.AutoJumpKey or "Space", List = bhopKeys,
         Callback = function(v) Bhop.Settings.AutoJumpKey = v end })
