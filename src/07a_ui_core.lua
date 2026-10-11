@@ -1,5 +1,6 @@
 --// AirHub - 07a_ui_core.lua
---// v23: Added Multi-Point section + Multi-Point Visuals (points + line to target).
+--// v23: Multi-Point section (grid sampling on part surface) + Multi-Point
+--//      Visuals (draw sampled points + line to nearest/aim target).
 --// v22: Silent Aim modes = Camera / Mouse / Raycast / Raycast v2
 --//      / FindPartOnRay* / Mouse.Hit/Target.
 
@@ -312,7 +313,6 @@ task.delay(math.random(1, 3), function()
     local teamModes      = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
     local wallCheckModes = { "Fast", "Perfect" }
 
-    -- v22: only Camera / Mouse from AirHub + Averiias methods + defensive Raycast v2.
     local silentAimModes = {
         "Camera",
         "Mouse",
@@ -332,15 +332,6 @@ task.delay(math.random(1, 3), function()
         "MouseHit",
         "ScreenPointToRay",
         "CameraTP",
-    }
-
-    -- v23: Multi-Point presets (mirror 02_aimbot MULTIPOINT_PRESETS keys)
-    local multipointModes = {
-        "HeadOnly",
-        "HeadTorso",
-        "HeadTorsoArms",
-        "HeadTorsoLegs",
-        "Full",
     }
 
     local AS = (Aimbot and Aimbot.Settings) or {}
@@ -414,39 +405,49 @@ task.delay(math.random(1, 3), function()
         Min = 0.01, Max = 0.5, Decimals = 2,
         Callback = function(v) aSet("PredictionTime", v) end })
 
-    --// ==== Multi-Point targeting (v23) ====
+    --// ==== Multi-Point ====
     local secMP = H._UI.AimbotTab:CreateSection({ Name = "Multi-Point" })
 
     local MP = AS.MultiPoint or {}
     secMP:AddToggle({
-        Name = "Enable Multi-Point Targeting",
+        Name = "Enabled (grid sampling on body surface)",
         Value = MP.Enabled or false,
         Callback = function(v) aSetMP("Enabled", v) end,
     })
-    secMP:AddDropdown({
-        Name = "Preset",
-        Value = MP.Mode or "HeadTorso",
-        List = multipointModes,
-        Callback = function(v) aSetMP("Mode", v) end,
+    secMP:AddSlider({
+        Name = "Density (grid subdivisions per axis)",
+        Value = MP.Density or 3,
+        Min = 2, Max = 6,
+        Callback = function(v) aSetMP("Density", math.floor(v)) end,
     })
     secMP:AddToggle({
-        Name = "Pick closest point to mouse",
-        Value = MP.UseNearestToMouse ~= false,
-        Callback = function(v) aSetMP("UseNearestToMouse", v) end,
+        Name = "Apply to Nearest mode",
+        Value = MP.ApplyToNearest ~= false,
+        Callback = function(v) aSetMP("ApplyToNearest", v) end,
+    })
+    secMP:AddToggle({
+        Name = "Only camera-facing points",
+        Value = MP.FrontFacingOnly ~= false,
+        Callback = function(v) aSetMP("FrontFacingOnly", v) end,
     })
 
-    --// ==== Multi-Point Visuals + Line to target (v23) ====
+    --// ==== Multi-Point Visuals ====
     local secMPV = H._UI.AimbotTab:CreateSection({ Name = "Multi-Point Visuals" })
 
     local MPV = AS.MultiPointVisuals or {}
     secMPV:AddToggle({
-        Name = "Show Points",
+        Name = "Show Sampled Points",
         Value = MPV.Enabled or false,
         Callback = function(v) aSetMPV("Enabled", v) end,
     })
+    secMPV:AddToggle({
+        Name = "Show All Body Parts",
+        Value = MPV.ShowAllParts ~= false,
+        Callback = function(v) aSetMPV("ShowAllParts", v) end,
+    })
     secMPV:AddSlider({
         Name = "Point Radius",
-        Value = MPV.PointRadius or 5,
+        Value = MPV.PointRadius or 4,
         Min = 1, Max = 12,
         Callback = function(v) aSetMPV("PointRadius", v) end,
     })
@@ -456,7 +457,7 @@ task.delay(math.random(1, 3), function()
         Callback = function(v) aSetMPV("PointFilled", v) end,
     })
     secMPV:AddToggle({
-        Name = "Show Line to Nearest Target",
+        Name = "Show Line to Aim Target",
         Value = MPV.ShowLine ~= false,
         Callback = function(v) aSetMPV("ShowLine", v) end,
     })
