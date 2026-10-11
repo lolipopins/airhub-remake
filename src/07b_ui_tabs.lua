@@ -2,6 +2,8 @@
 --// Visuals, Anti-Aim (Body + Desync), Movement, Settings tabs.
 --// Bhop: 2 modes (Old / New) + Space-block fix (hookmetamethod / release pulse).
 --//   New = Counter Blox port (Heartbeat + Jump toggle + TranslateBy airboost).
+--//   SpaceReleasePulse default = false (hookmetamethod достаточно;
+--//   pulse эхо-файрит InputEnded и валит KeyHeld после первого прыжка).
 --// Spider: 3 modes (Default / Pixelwalk / Wallfucker).
 
 local H = getgenv().AirHub
@@ -127,7 +129,10 @@ task.spawn(function()
     if Bhop.Settings.AirBoost == nil   then Bhop.Settings.AirBoost   = true end
     Bhop.Settings.AirBoostDivisor = Bhop.Settings.AirBoostDivisor or 5.9
     if Bhop.Settings.BlockSpaceFromGame == nil then Bhop.Settings.BlockSpaceFromGame = true end
-    if Bhop.Settings.SpaceReleasePulse  == nil then Bhop.Settings.SpaceReleasePulse  = true end
+    --// ВАЖНО: SpaceReleasePulse = false по умолчанию.
+    --// Включение pulse через UI шлёт VirtualInputManager:SendKeyEvent(false, Space),
+    --// который эхо-файрит InputEnded и валит KeyHeld. hookmetamethod сам блокирует Space.
+    if Bhop.Settings.SpaceReleasePulse  == nil then Bhop.Settings.SpaceReleasePulse  = false end
 
     Bhop.Settings.Spider            = Bhop.Settings.Spider or {}
     Bhop.Settings.Spider.Enabled    = Bhop.Settings.Spider.Enabled or false
@@ -492,6 +497,7 @@ task.spawn(function()
                 Bhop.Internal.KeyHeld = false
                 Bhop.Internal.Active = false
                 Bhop.Internal.SpiderTouching = false
+                Bhop.Internal.PendingPulses = 0
             end
         end })
     bhopSec:AddDropdown({ Name = "Mode", Value = Bhop.Settings.Mode or "New", List = bhopModes,
@@ -500,7 +506,7 @@ task.spawn(function()
         Callback = function(v) Bhop.Settings.AutoJumpKey = v end })
     bhopSec:AddToggle({ Name = "Block Space from Game (hook)", Value = Bhop.Settings.BlockSpaceFromGame ~= false,
         Callback = function(v) Bhop.Settings.BlockSpaceFromGame = v end })
-    bhopSec:AddToggle({ Name = "Space Release Pulse (fallback)", Value = Bhop.Settings.SpaceReleasePulse ~= false,
+    bhopSec:AddToggle({ Name = "Space Release Pulse (fallback, leave OFF)", Value = Bhop.Settings.SpaceReleasePulse == true,
         Callback = function(v) Bhop.Settings.SpaceReleasePulse = v end })
     bhopSec:AddToggle({ Name = "Bypass Jump Restrictions", Value = Bhop.Settings.BypassJump ~= false,
         Callback = function(v) Bhop.Settings.BypassJump = v end })
