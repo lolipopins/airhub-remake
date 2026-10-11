@@ -5,8 +5,8 @@
 --//   SpaceReleasePulse default = false (hookmetamethod достаточно;
 --//   pulse эхо-файрит InputEnded и валит KeyHeld после первого прыжка).
 --// Spider: 3 modes (Default / Pixelwalk / Wallfucker).
---// Animation Breaker: Presets = Default R15/R6, Zombie, Ninja, Pirate, Robot,
---//   Toy, Levitation, Custom. Modes = None / Speed / Freeze / Jitter / Replace.
+--// Animation Breaker: Preset = одна анимация; Mode = Speed | RandomFrames;
+--//   Preset "Custom" = пользовательский ID.
 
 local H = getgenv().AirHub
 if not H or not H._UI then warn("[AirHub] 07b: 07a not loaded"); return end
@@ -109,21 +109,12 @@ task.spawn(function()
     AntiAim.AnimationBreaker.Functions = AntiAim.AnimationBreaker.Functions or {}
     local ABS = AntiAim.AnimationBreaker.Settings
     if ABS.Enabled        == nil then ABS.Enabled        = false end
-    if ABS.Mode           == nil then ABS.Mode           = "None" end
+    if ABS.Mode           == nil then ABS.Mode           = "Speed" end
     if ABS.Preset         == nil then ABS.Preset         = "None" end
-    if ABS.Speed          == nil then ABS.Speed          = 5 end
-    if ABS.FreezeFrame    == nil then ABS.FreezeFrame    = 0 end
-    if ABS.JitterInterval == nil then ABS.JitterInterval = 0.15 end
-    if ABS.JitterMin      == nil then ABS.JitterMin      = 0.1 end
-    if ABS.JitterMax      == nil then ABS.JitterMax      = 10 end
+    if ABS.CustomId       == nil then ABS.CustomId       = "" end
+    if ABS.Speed          == nil then ABS.Speed          = 1 end
+    if ABS.RandomInterval == nil then ABS.RandomInterval = 0.1 end
     if ABS.ApplyToServer  == nil then ABS.ApplyToServer  = true end
-    ABS.CustomIds = ABS.CustomIds or { Idle="", Walk="", Run="", Jump="", Fall="", Climb="" }
-    if ABS.CustomIds.Idle  == nil then ABS.CustomIds.Idle  = "" end
-    if ABS.CustomIds.Walk  == nil then ABS.CustomIds.Walk  = "" end
-    if ABS.CustomIds.Run   == nil then ABS.CustomIds.Run   = "" end
-    if ABS.CustomIds.Jump  == nil then ABS.CustomIds.Jump  = "" end
-    if ABS.CustomIds.Fall  == nil then ABS.CustomIds.Fall  = "" end
-    if ABS.CustomIds.Climb == nil then ABS.CustomIds.Climb = "" end
 
     AntiAim.Functions        = AntiAim.Functions        or {}
 
@@ -459,17 +450,30 @@ task.spawn(function()
     --// ===========================================================
     local animPresetList = {
         "None",
-        "Default R15",
-        "Default R6",
-        "Zombie R15",
-        "Ninja R15",
-        "Pirate R15",
-        "Robot R15",
-        "Toy R15",
-        "Levitation R15",
         "Custom",
+        "Default R15 Idle",
+        "Default R15 Walk",
+        "Default R15 Run",
+        "Default R15 Jump",
+        "Default R15 Fall",
+        "Default R6 Idle",
+        "Default R6 Walk",
+        "Default R6 Run",
+        "Default R6 Jump",
+        "Default R6 Fall",
+        "Zombie Idle",
+        "Zombie Walk",
+        "Zombie Run",
+        "Zombie Jump",
+        "Ninja Idle",
+        "Ninja Run",
+        "Pirate Idle",
+        "Pirate Run",
+        "Robot Idle",
+        "Toy Idle",
+        "Levitation Idle",
     }
-    local animModeList = { "None", "Speed", "Freeze", "Jitter", "Replace" }
+    local animModeList = { "Speed", "RandomFrames" }
 
     local animSec = AntiTab:CreateSection({ Name = "Animation Breaker", Side = "Right" })
     animSec:AddToggle({ Name = "Enabled", Value = ABS.Enabled,
@@ -477,58 +481,34 @@ task.spawn(function()
             ABS.Enabled = v
             if not v then pcall(StopAnimBreaker) end
         end })
-    animSec:AddDropdown({ Name = "Mode", Value = ABS.Mode or "None", List = animModeList,
-        Callback = function(v) ABS.Mode = v end })
-    animSec:AddDropdown({ Name = "Animation Preset (Replace mode)", Value = ABS.Preset or "None",
-        List = animPresetList,
+    animSec:AddDropdown({ Name = "Animation", Value = ABS.Preset or "None", List = animPresetList,
         Callback = function(v)
             ABS.Preset = v
             pcall(ApplyAnimPreset, v)
         end })
-    animSec:AddTextbox({ Name = "Speed (neg = reverse) [Speed mode]", Value = tostring(ABS.Speed or 5),
+    animSec:AddTextbox({ Name = "Custom ID (rbxassetid://...)", Value = ABS.CustomId or "",
+        Callback = function(v)
+            ABS.CustomId = v
+            if ABS.Preset == "Custom" then pcall(ReloadAnimPreset) end
+        end })
+    animSec:AddDropdown({ Name = "Mode", Value = ABS.Mode or "Speed", List = animModeList,
+        Callback = function(v) ABS.Mode = v end })
+    animSec:AddTextbox({ Name = "Speed (neg = reverse) [Speed mode]", Value = tostring(ABS.Speed or 1),
         Callback = function(v)
             local n = tonumber(v)
             if n then ABS.Speed = n end
         end })
-    animSec:AddSlider({ Name = "Freeze Frame (s) [Freeze mode]", Value = ABS.FreezeFrame or 0,
-        Min = 0, Max = 3, Decimals = 2,
-        Callback = function(v) ABS.FreezeFrame = v end })
-    animSec:AddSlider({ Name = "Jitter Interval (s)", Value = ABS.JitterInterval or 0.15,
+    animSec:AddSlider({ Name = "Random Interval (s) [RandomFrames]", Value = ABS.RandomInterval or 0.1,
         Min = 0.02, Max = 1, Decimals = 2,
-        Callback = function(v) ABS.JitterInterval = v end })
-    animSec:AddTextbox({ Name = "Jitter Min Speed", Value = tostring(ABS.JitterMin or 0.1),
-        Callback = function(v)
-            local n = tonumber(v)
-            if n then ABS.JitterMin = n end
-        end })
-    animSec:AddTextbox({ Name = "Jitter Max Speed", Value = tostring(ABS.JitterMax or 10),
-        Callback = function(v)
-            local n = tonumber(v)
-            if n then ABS.JitterMax = n end
-        end })
-
-    --// --- Custom IDs (Preset = "Custom") -------------------------------
-    animSec:AddTextbox({ Name = "Custom Idle IDs", Value = ABS.CustomIds.Idle,
-        Callback = function(v) ABS.CustomIds.Idle = v; ReloadAnimPreset() end })
-    animSec:AddTextbox({ Name = "Custom Walk IDs", Value = ABS.CustomIds.Walk,
-        Callback = function(v) ABS.CustomIds.Walk = v; ReloadAnimPreset() end })
-    animSec:AddTextbox({ Name = "Custom Run IDs", Value = ABS.CustomIds.Run,
-        Callback = function(v) ABS.CustomIds.Run = v; ReloadAnimPreset() end })
-    animSec:AddTextbox({ Name = "Custom Jump IDs", Value = ABS.CustomIds.Jump,
-        Callback = function(v) ABS.CustomIds.Jump = v; ReloadAnimPreset() end })
-    animSec:AddTextbox({ Name = "Custom Fall IDs", Value = ABS.CustomIds.Fall,
-        Callback = function(v) ABS.CustomIds.Fall = v; ReloadAnimPreset() end })
-    animSec:AddTextbox({ Name = "Custom Climb IDs", Value = ABS.CustomIds.Climb,
-        Callback = function(v) ABS.CustomIds.Climb = v; ReloadAnimPreset() end })
-
+        Callback = function(v) ABS.RandomInterval = v end })
     animSec:AddToggle({ Name = "Apply to Server (SetNetworkOwner)", Value = ABS.ApplyToServer ~= false,
         Callback = function(v) ABS.ApplyToServer = v end })
-    animSec:AddButton({ Name = "Reload Preset",
+    animSec:AddButton({ Name = "Reload",
         Callback = function()
             pcall(ReloadAnimPreset)
-            ShowError("Preset reloaded")
+            ShowError("Animation reloaded")
         end })
-    animSec:AddButton({ Name = "Stop Animation Breaker",
+    animSec:AddButton({ Name = "Stop",
         Callback = function()
             pcall(StopAnimBreaker)
             ABS.Enabled = false
