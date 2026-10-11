@@ -1,4 +1,5 @@
 --// AirHub - 07a_ui_core.lua
+--// v23: Added Multi-Point section + Multi-Point Visuals (points + line to target).
 --// v22: Silent Aim modes = Camera / Mouse / Raycast / Raycast v2
 --//      / FindPartOnRay* / Mouse.Hit/Target.
 
@@ -186,6 +187,8 @@ task.delay(math.random(1, 3), function()
             if Aimbot.Settings.AutoShoot then Aimbot.Settings.AutoShoot.Enabled = false end
             Aimbot.Settings.TPAimEnabled = false
             Aimbot.Settings.WallbangEnabled = false
+            if Aimbot.Settings.MultiPoint then Aimbot.Settings.MultiPoint.Enabled = false end
+            if Aimbot.Settings.MultiPointVisuals then Aimbot.Settings.MultiPointVisuals.Enabled = false end
         end
         if Aimbot.FOVSettings then Aimbot.FOVSettings.Enabled = false end
         if Aimbot.CancelAutoScan then pcall(Aimbot.CancelAutoScan) end
@@ -224,6 +227,9 @@ task.delay(math.random(1, 3), function()
 
         pcall(function() CancelLock() end)
         pcall(function() if Aimbot.FOVCircle then Aimbot.FOVCircle:Remove() end end)
+        pcall(function()
+            if Aimbot.DestroyMultiPointVisuals then Aimbot.DestroyMultiPointVisuals() end
+        end)
         pcall(function()
             if WallHack.Functions and WallHack.Functions.Exit then WallHack.Functions.Exit() end
         end)
@@ -328,6 +334,15 @@ task.delay(math.random(1, 3), function()
         "CameraTP",
     }
 
+    -- v23: Multi-Point presets (mirror 02_aimbot MULTIPOINT_PRESETS keys)
+    local multipointModes = {
+        "HeadOnly",
+        "HeadTorso",
+        "HeadTorsoArms",
+        "HeadTorsoLegs",
+        "Full",
+    }
+
     local AS = (Aimbot and Aimbot.Settings) or {}
     local function aSet(key, val) if Aimbot.Settings then Aimbot.Settings[key] = val end end
     local function aSetTeam(key, val)
@@ -342,6 +357,16 @@ task.delay(math.random(1, 3), function()
     end
     local function aSetFov(key, val)
         if Aimbot.FOVSettings then Aimbot.FOVSettings[key] = val end
+    end
+    local function aSetMP(key, val)
+        if Aimbot.Settings and Aimbot.Settings.MultiPoint then
+            Aimbot.Settings.MultiPoint[key] = val
+        end
+    end
+    local function aSetMPV(key, val)
+        if Aimbot.Settings and Aimbot.Settings.MultiPointVisuals then
+            Aimbot.Settings.MultiPointVisuals[key] = val
+        end
     end
 
     --// ==== Main ====
@@ -389,6 +414,65 @@ task.delay(math.random(1, 3), function()
         Min = 0.01, Max = 0.5, Decimals = 2,
         Callback = function(v) aSet("PredictionTime", v) end })
 
+    --// ==== Multi-Point targeting (v23) ====
+    local secMP = H._UI.AimbotTab:CreateSection({ Name = "Multi-Point" })
+
+    local MP = AS.MultiPoint or {}
+    secMP:AddToggle({
+        Name = "Enable Multi-Point Targeting",
+        Value = MP.Enabled or false,
+        Callback = function(v) aSetMP("Enabled", v) end,
+    })
+    secMP:AddDropdown({
+        Name = "Preset",
+        Value = MP.Mode or "HeadTorso",
+        List = multipointModes,
+        Callback = function(v) aSetMP("Mode", v) end,
+    })
+    secMP:AddToggle({
+        Name = "Pick closest point to mouse",
+        Value = MP.UseNearestToMouse ~= false,
+        Callback = function(v) aSetMP("UseNearestToMouse", v) end,
+    })
+
+    --// ==== Multi-Point Visuals + Line to target (v23) ====
+    local secMPV = H._UI.AimbotTab:CreateSection({ Name = "Multi-Point Visuals" })
+
+    local MPV = AS.MultiPointVisuals or {}
+    secMPV:AddToggle({
+        Name = "Show Points",
+        Value = MPV.Enabled or false,
+        Callback = function(v) aSetMPV("Enabled", v) end,
+    })
+    secMPV:AddSlider({
+        Name = "Point Radius",
+        Value = MPV.PointRadius or 5,
+        Min = 1, Max = 12,
+        Callback = function(v) aSetMPV("PointRadius", v) end,
+    })
+    secMPV:AddToggle({
+        Name = "Filled Points",
+        Value = MPV.PointFilled ~= false,
+        Callback = function(v) aSetMPV("PointFilled", v) end,
+    })
+    secMPV:AddToggle({
+        Name = "Show Line to Nearest Target",
+        Value = MPV.ShowLine ~= false,
+        Callback = function(v) aSetMPV("ShowLine", v) end,
+    })
+    secMPV:AddDropdown({
+        Name = "Line From",
+        Value = MPV.LineFrom or "Mouse",
+        List = { "Mouse", "Camera", "PlayerHRP" },
+        Callback = function(v) aSetMPV("LineFrom", v) end,
+    })
+    secMPV:AddSlider({
+        Name = "Line Thickness",
+        Value = MPV.LineThickness or 2,
+        Min = 1, Max = 6,
+        Callback = function(v) aSetMPV("LineThickness", v) end,
+    })
+
     --// ==== Visibility ====
     local secW = H._UI.AimbotTab:CreateSection({ Name = "Visibility", Side = "Right" })
     secW:AddToggle({ Name = "WallCheck", Value = AS.WallCheck or false,
@@ -429,7 +513,6 @@ task.delay(math.random(1, 3), function()
             aSet("SilentAimMode", v)
             if Aimbot.Internal then Aimbot.Internal.LastManageKey = nil end
 
-            -- Turn off hooks that don't belong to the selected mode.
             local isAVMode = (v == "Raycast"
                               or v == "Raycast v2"
                               or v == "FindPartOnRay"
