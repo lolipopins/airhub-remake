@@ -1,13 +1,15 @@
 --// AirHub - 06a_movement_fly_bhop.lua
 --// Fly + Bhop (Old / New) + Spider (Default / Pixelwalk / Wallfucker).
 --//
---// Bhop "New" mode = прямой порт Counter Blox bhop:
---//   - UserInputService.InputBegan / InputEnded трекают Space
---//   - RunService.Heartbeat крутит hum.Jump = not hum.Jump
---//   - Air Boost: character:TranslateBy(hum.MoveDirection / 5.9)
---//                при HumanoidState == Freefall и MoveDirection.Magnitude > 0
+--// Bhop "New" = точный порт Counter Blox HvH (ImGui) bhop:
+--//   InputBegan(Space)  -> KeyHeld = true
+--//   InputEnded(Space)  -> KeyHeld = false
+--//   RunService.Heartbeat каждый кадр пока KeyHeld:
+--//     Humanoid.Jump = not Humanoid.Jump
+--//     if GetState()==Freefall and MoveDirection.Magnitude>0:
+--//         Character:TranslateBy(MoveDirection / AirBoostDivisor)
 --//
---// Space-block fix (hookmetamethod + release pulse) сохранён как опция.
+--// Space-bind fix (hookmetamethod + release pulse) — опционально.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 06a: core not loaded"); return end
@@ -341,7 +343,7 @@ H.Bhop = {
         BypassJump  = true,
         JumpCooldown= 0.05,
 
-        --// Counter Blox port:
+        --// Counter Blox port params:
         AirBoost        = true,
         AirBoostDivisor = 5.9,
 
@@ -380,7 +382,7 @@ H.Bhop = {
         SpiderTouching = false, WallNormal = nil,
         Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
         HookInstalled = false,
-        Humanoid = nil,          --// Counter Blox: cached humanoid
+        Humanoid = nil,
     },
 }
 local Bhop = H.Bhop
@@ -439,7 +441,7 @@ local function Bhop_SpaceReleasePulse()
 end
 
 --// ---------------------------------------------------------------------------
---// Input — Space как триггер bhop (Counter Blox style: InputBegan/Ended)
+--// Input — Space как триггер bhop (Counter Blox style)
 --// ---------------------------------------------------------------------------
 Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     if gpe then return end
@@ -680,14 +682,16 @@ local function Spider_Wallfucker(char, hrp)
 end
 
 --// ===========================================================================
---// BHOP main loop — RunService.Heartbeat (Counter Blox style)
+--// BHOP main tick — RunService.Heartbeat (Counter Blox style)
+--// Всё на Heartbeat: InputBegan/Ended только меняют KeyHeld-флаг.
 --// ===========================================================================
-local function Bhop_Update()
+local function Bhop_Tick()
     if H.ShuttingDown then return end
 
     local S = Bhop.Settings
     local I = Bhop.Internal
 
+    --// Disabled -> сброс
     if not S.Enabled then
         I.Active = false
         I.SpiderTouching = false
@@ -697,6 +701,7 @@ local function Bhop_Update()
         return
     end
 
+    --// Hook устанавливаем на лету, если ещё не встал
     if not I.HookInstalled and S.BlockSpaceFromGame then
         Bhop_InstallSpaceHook()
     end
@@ -726,7 +731,7 @@ local function Bhop_Update()
 
     if not I.KeyHeld then return end
 
-    --// Fallback: пока Space зажат — пульсируем key-up
+    --// Space-release pulse (fallback)
     local trigger = SafeKeyCode(S.AutoJumpKey)
     if trigger == Enum.KeyCode.Space then
         Bhop_SpaceReleasePulse()
@@ -735,19 +740,23 @@ local function Bhop_Update()
     local bmode = S.Mode or "New"
 
     if bmode == "New" then
-        --// === Counter Blox bhop (точный порт) ===
-        hum.Jump = not hum.Jump
+        --// === Counter Blox bhop port ===
+        --// 1) toggle jump each frame
+        pcall(function() hum.Jump = not hum.Jump end)
 
+        --// 2) air boost while freefalling + moving
         if S.AirBoost
            and hum:GetState() == Enum.HumanoidStateType.Freefall
            and hum.MoveDirection.Magnitude > 0 then
             local divisor = S.AirBoostDivisor or 5.9
             if divisor > 0 then
-                char:TranslateBy(hum.MoveDirection / divisor)
+                pcall(function()
+                    char:TranslateBy(hum.MoveDirection / divisor)
+                end)
             end
         end
     else
-        --// Old mode: cooldown + bypass
+        --// === Old mode: cooldown + bypass ===
         local now = tick()
         if now - (I.LastJumpTime or 0) >= (S.JumpCooldown or 0.05) then
             local bypass = S.BypassJump
@@ -763,7 +772,7 @@ local function Bhop_Update()
 end
 
 Track(RunService.Heartbeat:Connect(function()
-    xpcall(Bhop_Update, HandleError)
+    xpcall(Bhop_Tick, HandleError)
 end))
 
 Bhop.Functions = {
