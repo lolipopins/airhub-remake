@@ -1,10 +1,10 @@
 --// AirHub - 02_aimbot.lua
---// v28: Multi-Point rebuilt:
---//   * Screen-space grid sampling with jitter -> hits on real mesh only
---//   * Silhouette style option (chams-like outline sampling)
---//   * Viewport-clipped bbox, adaptive ray budget
---//   * Nearest LockPart reuses the same sampler across all parts
---//   * FOV circle & Aim Line now track the real cursor (no -36 offset)
+--// v29: Multi-Point v2:
+--//   * Samples ALL visible BaseParts of the character (R6 + R15 + accessories)
+--//   * Refinement pass on silhouette cells → dots actually sit on the mesh
+--//   * Miss cells hidden by default (no more dots floating around the player)
+--//   * WallCheck Method: "Raycast" (default) | "CameraObscuring" (native API)
+--// v28: FOV circle / aim line track real cursor
 --// v27: Logging/Sounds init at top; H.Sound aliased to H.Sounds.
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
@@ -17,23 +17,12 @@ if H.Aimbot then
 end
 
 if not H.Logging then
-    H.Logging = {
-        Enabled  = true,
-        ShowHit  = true,
-        ShowMiss = true,
-        Duration = 1,
-        FontSize = 18,
-    }
+    H.Logging = { Enabled = true, ShowHit = true, ShowMiss = true, Duration = 1, FontSize = 18 }
 end
-
 if not H.Sounds then
     H.Sounds = {
-        HitsoundEnabled  = false,
-        HitsoundID       = 83717596220569,
-        HitsoundVolume   = 1,
-        KillsoundEnabled = false,
-        KillsoundID      = 83717596220569,
-        KillsoundVolume  = 1,
+        HitsoundEnabled  = false, HitsoundID = 83717596220569, HitsoundVolume = 1,
+        KillsoundEnabled = false, KillsoundID = 83717596220569, KillsoundVolume = 1,
     }
 end
 H.Sound = H.Sounds
@@ -55,15 +44,11 @@ if type(AddLog) ~= "function" then
     AddLog = function(text, color)
         pcall(function()
             local t = Drawing.new("Text")
-            t.Text    = tostring(text)
-            t.Size    = H.Logging.FontSize or 18
-            t.Color   = color or Color3.fromRGB(255, 255, 255)
-            t.Outline = true
-            t.Center  = false
-            t.Position= Vector2.new(20, 20 + #H.ActiveLogs * 22)
-            t.Visible = true
-            table.insert(H.ActiveLogs, { text = t, born = tick(),
-                duration = H.Logging.Duration or 1 })
+            t.Text = tostring(text); t.Size = H.Logging.FontSize or 18
+            t.Color = color or Color3.fromRGB(255,255,255)
+            t.Outline = true; t.Center = false
+            t.Position = Vector2.new(20, 20 + #H.ActiveLogs * 22); t.Visible = true
+            table.insert(H.ActiveLogs, { text = t, born = tick(), duration = H.Logging.Duration or 1 })
             task.spawn(function()
                 task.wait(H.Logging.Duration or 1)
                 pcall(function() t:Remove() end)
@@ -107,6 +92,8 @@ H.Aimbot = {
         WallCheck = false,
         FallbackToVisible = false,
         WallCheckMode = "Perfect",
+        --// v29: "Raycast" | "CameraObscuring"
+        WallCheckMethod = "Raycast",
         DelayShot = true,
         AimSmoothingSpeed = 6.0,
         TriggerKey = "MouseButton2",
@@ -117,75 +104,63 @@ H.Aimbot = {
         SilentAimMode = "Camera",
         IgnoreFOV = false,
         CheckFromPlayerOnTP = true,
-        PredictionEnabled = false,
-        PredictionX = 0,
-        PredictionY = 0,
-        PredictionTime = 0.15,
-        TargetNPCs    = false,
-        NPCNameFilter = "",
+        PredictionEnabled = false, PredictionX = 0, PredictionY = 0, PredictionTime = 0.15,
+        TargetNPCs = false, NPCNameFilter = "",
         AimbotHz = 120,
         IgnoreGameProcessed = true,
         Debug = true,
 
-        --// ===== v28: Multi-Point =====
-        --// Screen-space ray sampling of the actual mesh. Every returned
-        --// candidate lies on the visible surface of the target — no more
-        --// aiming at "air" around rounded heads / mesh limbs.
+        --// ===== v29: Multi-Point =====
         MultiPoint = {
             Enabled         = false,
-            Density         = 3,      -- rays per axis (2..8)
-            JitterTries     = 3,      -- extra sub-rays per missed cell (0..6)
-            AdaptiveDensity = true,   -- raise density on-screen for big parts
-            MaxRaysPerPart  = 64,     -- hard cap (perf guard)
-            --// legacy aliases kept for old configs
+            Density         = 4,      -- grid cells per axis (2..8)
+            JitterTries     = 4,      -- sub-rays per missed cell (0..8)
+            AdaptiveDensity = true,
+            MaxRaysPerPart  = 96,
+            RefineEdges     = true,   -- extra pass around silhouette boundary
+            RefinePasses    = 1,
+            IncludeAllParts = true,   -- use GetCharacterBaseParts (R6+R15+accessories)
             ApplyToNearest  = true,
             FrontFacingOnly = true,
         },
 
-        --// ===== v28: Multi-Point Visuals (points only) =====
+        --// ===== v29: Multi-Point Visuals (points only) =====
         MultiPointVisuals = {
-            Enabled       = false,
-            PointRadius   = 4,
-            PointFilled   = true,
-            ShowAllParts  = true,
-            ShowMisses    = true,      -- draw miss cells in red
-            MaxPoints     = 512,       -- hard cap
-            --// "Grid" | "Silhouette"  (Silhouette = chams-style edge only)
-            Style         = "Grid",
-            HitColor      = Color3.fromRGB( 80, 255,  80),
-            EdgeColor     = Color3.fromRGB( 80, 200, 255),  -- silhouette edge
-            MissColor     = Color3.fromRGB(255, 100, 100),
+            Enabled      = false,
+            PointRadius  = 4,
+            PointFilled  = true,
+            ShowAllParts = true,
+            --// v29: don't draw miss dots by default — only real mesh hits
+            OnlyMeshHits = true,
+            ShowMisses   = false,
+            MaxPoints    = 512,
+            --// "Grid" | "Silhouette" | "MeshOnly"
+            Style        = "Grid",
+            HitColor     = Color3.fromRGB( 80, 255,  80),
+            EdgeColor    = Color3.fromRGB( 80, 200, 255),
+            MissColor    = Color3.fromRGB(255, 100, 100),
         },
 
-        --// ===== v28: Aim Line (separate feature) =====
+        --// ===== v29: Aim Line =====
         AimLineVisuals = {
-            Enabled  = false,
-            Color    = Color3.fromRGB(255, 200, 70),
+            Enabled = false,
+            Color = Color3.fromRGB(255, 200, 70),
             Thickness = 2,
-            LineFrom = "Mouse",   -- "Mouse" | "Camera" | "PlayerHRP"
+            LineFrom = "Mouse",
         },
 
         AutoShoot = {
-            Enabled = false,
-            ShootKey = "MouseButton1",
-            FireRate = 0.05,
-            OnlyWhenAiming = true,
-            AutoStop = { Enabled = false, Time = 0.1 },
+            Enabled = false, ShootKey = "MouseButton1", FireRate = 0.05,
+            OnlyWhenAiming = true, AutoStop = { Enabled = false, Time = 0.1 },
         },
 
-        WallbangEnabled  = false,
-        WallbangMethod   = "RemotePatch",
-        WallbangDistance = 500,
-        WallbangHoldTime = 0.1,
+        WallbangEnabled  = false, WallbangMethod = "RemotePatch",
+        WallbangDistance = 500, WallbangHoldTime = 0.1,
 
-        TPAimEnabled     = false,
-        TPAimMethod      = "MagicBullet",
-        TPAimKey         = "E",
-        TPAimDistance    = 5,
-        TPAimReturnOnKill = true,
+        TPAimEnabled = false, TPAimMethod = "MagicBullet", TPAimKey = "E",
+        TPAimDistance = 5, TPAimReturnOnKill = true,
 
-        UseBacktrack     = false,
-        BacktrackAimAtGhost = false,
+        UseBacktrack = false, BacktrackAimAtGhost = false,
 
         HookWatchdogInterval = 2.0,
         ModeCacheTTL         = 60.0,
@@ -195,53 +170,35 @@ H.Aimbot = {
     Locked      = nil,
     LockPartInstance = nil,
     Internal    = {
-        TargetAccum  = 0,
-        FovAccum     = 0,
-        LastManageKey = nil,
-        LockedGhost  = nil,
-        WatchdogAccum = 0,
-        ModeCache    = {},
-        CachedAimPos = nil,
-        LastSamplePoints = {},
-        HookHandlers = {
-            AVNamecall    = nil, AVNamecallOrig = nil,
-            MHT_Proxy     = nil, MHT_Original   = nil,
-        },
+        TargetAccum = 0, FovAccum = 0,
+        LastManageKey = nil, LockedGhost = nil, WatchdogAccum = 0,
+        ModeCache = {}, CachedAimPos = nil, LastSamplePoints = {},
+        HookHandlers = { AVNamecall = nil, AVNamecallOrig = nil, MHT_Proxy = nil, MHT_Original = nil },
     },
-
     TPAimInternal = {
-        Active        = false,
-        SavedCFrame   = nil,
-        SavedVelocity = nil,
-        KeyHeld       = false,
-        TargetChar    = nil,
+        Active = false, SavedCFrame = nil, SavedVelocity = nil, KeyHeld = false, TargetChar = nil,
     },
 }
 local Aimbot = H.Aimbot
 
-local function DebugPrint(...)
-    if Aimbot.Settings.Debug then warn("[AirHub][Shot]", ...) end
-end
-local function DebugHookPrint(...)
-    if Aimbot.Settings.Debug then warn("[AirHub][Hook]", ...) end
-end
+local function DebugPrint(...) if Aimbot.Settings.Debug then warn("[AirHub][Shot]", ...) end end
+local function DebugHookPrint(...) if Aimbot.Settings.Debug then warn("[AirHub][Hook]", ...) end end
 
 local WB = { HoldUntil = 0 }
 
-local Running       = false
-local Typing        = false
-local LastShotTime  = 0
-local lastDelta     = tick()
+local Running      = false
+local Typing       = false
+local LastShotTime = 0
+local lastDelta    = tick()
 
-local VISIBLE_PARTS = {
-    "Head", "HumanoidRootPart", "UpperTorso", "LowerTorso",
-    "Torso", "Left Arm", "Right Arm",
-}
-
+local VISIBLE_PARTS = { "Head", "HumanoidRootPart", "UpperTorso", "LowerTorso", "Torso", "Left Arm", "Right Arm" }
 local NEAREST_PARTS = {
     "Head", "UpperTorso", "LowerTorso", "Torso",
-    "Left Arm", "Right Arm",
-    "Left Leg", "Right Leg",
+    "Left Arm", "Right Arm", "Left Leg", "Right Leg",
+    "LeftUpperArm", "LeftLowerArm", "LeftHand",
+    "RightUpperArm", "RightLowerArm", "RightHand",
+    "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+    "RightUpperLeg", "RightLowerLeg", "RightFoot",
 }
 
 local function ShouldBypassWallCheck()
@@ -253,11 +210,7 @@ local function IsBacktrackEnabled()
     if not H.Exploits then return false end
     if not H.Exploits.Settings or not H.Exploits.Settings.BacktrackEnabled then return false end
     if not H.Exploits.Functions then return false end
-    if not H.Exploits.Functions.GetBacktrackCFrame
-       and not H.Exploits.Functions.GetBacktrackCFrameSmart then
-        return false
-    end
-    return true
+    return (H.Exploits.Functions.GetBacktrackCFrame or H.Exploits.Functions.GetBacktrackCFrameSmart) ~= nil
 end
 
 local function IsAlive(inst)
@@ -270,9 +223,7 @@ local function ResolveOwnerCharacter(character)
     if not character then return nil end
     if character:GetAttribute("AirHub_Ghost") then
         local pv = character:FindFirstChild("Player")
-        if pv and pv.Value and pv.Value.Character then
-            return pv.Value.Character
-        end
+        if pv and pv.Value and pv.Value.Character then return pv.Value.Character end
         return nil
     end
     return character
@@ -289,24 +240,18 @@ local function ResolveOwnerPlayer(character)
 end
 
 local function GetBacktrackGhostTargets()
-    if not Aimbot.Settings.UseBacktrack then return {} end
-    if not Aimbot.Settings.BacktrackAimAtGhost then return {} end
+    if not Aimbot.Settings.UseBacktrack or not Aimbot.Settings.BacktrackAimAtGhost then return {} end
     if not IsBacktrackEnabled() then return {} end
     if not H.Exploits.Internal or not H.Exploits.Internal.BacktrackGhosts then return {} end
-
     local out = {}
     for owner, ghost in pairs(H.Exploits.Internal.BacktrackGhosts) do
         if ghost and ghost.Parent and ghost:GetAttribute("AirHub_Ghost") then
             local hum = ghost:FindFirstChildOfClass("Humanoid")
             if hum and hum.Health > 0 then
-                local ownerRealChar = owner.Character
-                local ownerHum = ownerRealChar and ownerRealChar:FindFirstChildOfClass("Humanoid")
-                if ownerHum and ownerHum.Health > 0 then
-                    table.insert(out, {
-                        character = ghost,
-                        player = owner,
-                        isGhost = true,
-                    })
+                local oc = owner.Character
+                local oh = oc and oc:FindFirstChildOfClass("Humanoid")
+                if oh and oh.Health > 0 then
+                    table.insert(out, { character = ghost, player = owner, isGhost = true })
                 end
             end
         end
@@ -315,50 +260,31 @@ local function GetBacktrackGhostTargets()
 end
 
 local function GetActualPartName(lockPart)
-    if lockPart == "Torso" then
-        return { "Torso", "UpperTorso", "LowerTorso" }
-    end
+    if lockPart == "Torso" then return { "Torso", "UpperTorso", "LowerTorso" } end
     return { lockPart }
 end
 
---// ===========================================================================
---// v28: Mouse position — pixel-exact cursor in VIEWPORT coordinates.
---// No more -36 fudge; that offset pushed the FOV circle / aim-line above the
---// actual cursor on modern Roblox clients.
---// ===========================================================================
+--// Pixel-exact cursor in viewport space (no -36 offset)
 local function GetMousePos()
     return UserInputService:GetMouseLocation()
 end
 
 local function PredictPartPosition(part)
-    if not part then return Vector3.new(0, 0, 0) end
-    if not IsAlive(part) then return Vector3.new(0, 0, 0) end
+    if not part then return Vector3.new(0,0,0) end
+    if not IsAlive(part) then return Vector3.new(0,0,0) end
+    if part.Parent:GetAttribute("AirHub_Ghost") then return part.Position end
 
-    if part.Parent:GetAttribute("AirHub_Ghost") then
-        return part.Position
-    end
-
-    if Aimbot.Settings.UseBacktrack
-       and Aimbot.Settings.BacktrackAimAtGhost
-       and H.Exploits
-       and H.Exploits.Settings
-       and H.Exploits.Settings.BacktrackEnabled
+    if Aimbot.Settings.UseBacktrack and Aimbot.Settings.BacktrackAimAtGhost
+       and H.Exploits and H.Exploits.Settings and H.Exploits.Settings.BacktrackEnabled
        and H.Exploits.Functions then
         local pl = Players:GetPlayerFromCharacter(part.Parent)
         if pl then
-            local hitboxGuess = math.max(part.Size.X, part.Size.Y, part.Size.Z) * 0.5
-            local btCF = nil
+            local hb = math.max(part.Size.X, part.Size.Y, part.Size.Z) * 0.5
+            local btCF
             if H.Exploits.Functions.GetBacktrackCFrameSmart then
-                btCF = H.Exploits.Functions.GetBacktrackCFrameSmart(
-                    pl,
-                    H.Exploits.Settings.BacktrackTime,
-                    hitboxGuess
-                )
+                btCF = H.Exploits.Functions.GetBacktrackCFrameSmart(pl, H.Exploits.Settings.BacktrackTime, hb)
             elseif H.Exploits.Functions.GetBacktrackCFrame then
-                btCF = H.Exploits.Functions.GetBacktrackCFrame(
-                    pl,
-                    H.Exploits.Settings.BacktrackTime
-                )
+                btCF = H.Exploits.Functions.GetBacktrackCFrame(pl, H.Exploits.Settings.BacktrackTime)
             end
             if btCF then return btCF.Position end
         end
@@ -367,14 +293,34 @@ local function PredictPartPosition(part)
     if not Aimbot.Settings.PredictionEnabled then return part.Position end
     local vel = part.AssemblyLinearVelocity or part.Velocity
     if not vel then return part.Position end
-    local baseTime = Aimbot.Settings.PredictionTime or 0.15
+    local bt = Aimbot.Settings.PredictionTime or 0.15
     local px = (Aimbot.Settings.PredictionX or 0) / 100
     local py = (Aimbot.Settings.PredictionY or 0) / 100
-    return part.Position + Vector3.new(
-        vel.X * px * baseTime,
-        vel.Y * py * baseTime,
-        vel.Z * px * baseTime
-    )
+    return part.Position + Vector3.new(vel.X*px*bt, vel.Y*py*bt, vel.Z*px*bt)
+end
+
+--// ===========================================================================
+--// v29: GetCharacterBaseParts
+--// Walks ALL descendants of a character Model and returns every visible
+--// BasePart (R6 limbs, R15 limbs, accessory handles, hats, tools).
+--// Filters out HumanoidRootPart and fully transparent parts.
+--// ===========================================================================
+local function GetCharacterBaseParts(char)
+    if not char then return {} end
+    local out = {}
+    for _, obj in ipairs(char:GetDescendants()) do
+        if obj:IsA("BasePart") and obj.Name ~= "HumanoidRootPart" then
+            local skip = false
+            pcall(function()
+                if obj.Transparency >= 0.99 then skip = true end
+                if obj.LocalTransparencyModifier and obj.LocalTransparencyModifier >= 0.99 then
+                    skip = true
+                end
+            end)
+            if not skip then out[#out + 1] = obj end
+        end
+    end
+    return out
 end
 
 local function BuildRayParams(targetCharacter)
@@ -436,8 +382,7 @@ local function NPCNameMatches(name)
 end
 
 local function GetNPCCharacters()
-    local out = {}
-    local seen = {}
+    local out, seen = {}, {}
     local localChar = LocalPlayer.Character
     local function tryAdd(obj)
         if not obj or seen[obj] then return end
@@ -477,43 +422,54 @@ local function GetLockedCharacter()
     return nil
 end
 
+--// ===========================================================================
+--// v29: IsPointVisibleEx — wall check that respects the selected method.
+--// "Raycast"          → workspace:Raycast from GetCheckOrigin()
+-- "CameraObscuring"  → Camera:GetPartsObscuringTarget({pt}, ignoreList)
+-- ===========================================================================
+local function IsPointVisibleEx(pt, targetChar)
+    local cam = workspace.CurrentCamera
+    if not cam then return false end
+
+    if Aimbot.Settings.WallCheckMethod == "CameraObscuring" then
+        local ignore = {}
+        local localChar = LocalPlayer.Character
+        if localChar then ignore[#ignore + 1] = localChar end
+        if targetChar then ignore[#ignore + 1] = targetChar end
+        local ok, obscuring = pcall(function()
+            return cam:GetPartsObscuringTarget({ pt }, ignore)
+        end)
+        if ok and type(obscuring) == "table" then
+            return #obscuring == 0
+        end
+        -- fallback to raycast if the API failed
+    end
+
+    -- Raycast fallback / default
+    local origin = GetCheckOrigin()
+    if (pt - origin).Magnitude < 0.001 then return true end
+    local params = BuildRayParams(targetChar or LocalPlayer.Character)
+    return workspace:Raycast(origin, pt - origin, params) == nil
+end
+
+-- Back-compat wrapper
 local function IsPointVisible(origin, pt, params)
     if (pt - origin).Magnitude < 0.001 then return true end
     return workspace:Raycast(origin, pt - origin, params) == nil
 end
 
 --// ===========================================================================
---// v28: Screen-space mesh sampler — "chams-like" coverage.
---//
---// The old v27 sampler projected 8 bbox corners, built a screen AABB, and cast
---// one ray per cell. That fails for mesh parts whose visible surface is
---// narrower than the bbox (rounded heads, thin limbs, rigged R15 hands).
---//
---// New approach:
---//   1. Project every oriented-bbox corner to viewport, clip to viewport.
---//   2. Pad the screen AABB.
---//   3. Grid of density x density cells.
---//   4. Per cell: cast the primary ray; on miss, retry with (JitterTries)
---//      sub-rays inside the cell. This makes round / narrow surfaces well
---//      covered instead of "holes" between bbox corners.
---//   5. Adaptive: cells with miss but with a hit neighbour get extra tries
---//      (helps catch silhouette edges).
---//   6. Every accepted sample is a real raycast hit on the target char:
---//      world = hit.Position — guaranteed ON the visible mesh.
---//
---// Sample = { screen = Vector2, hit = bool, world = Vector3?, part = BasePart?,
---//            edge = bool }   -- edge=true if any 4-neighbour missed
+--// v29: Screen-space mesh sampler with refinement.
 --// ===========================================================================
 local JITTER_PATTERNS = {
     {  0.00,  0.00 },
-    { -0.35, -0.35 }, {  0.35, -0.35 },
-    { -0.35,  0.35 }, {  0.35,  0.35 },
-    { -0.35,  0.00 }, {  0.35,  0.00 },
-    {  0.00, -0.35 }, {  0.00,  0.35 },
+    { -0.35, -0.35 }, {  0.35, -0.35 }, { -0.35,  0.35 }, {  0.35,  0.35 },
+    { -0.35,  0.00 }, {  0.35,  0.00 }, {  0.00, -0.35 }, {  0.00,  0.35 },
+    { -0.15, -0.15 }, {  0.15, -0.15 }, { -0.15,  0.15 }, {  0.15,  0.15 },
 }
 
 local function SampleVisiblePointsOnPart(part, density, opts)
-    local result = { samples = {}, char = nil, bbox = nil }
+    local result = { samples = {}, char = nil, bbox = nil, part = part }
     if not part or not part:IsA("BasePart") then return result end
     local char = part.Parent
     if not char then return result end
@@ -526,14 +482,10 @@ local function SampleVisiblePointsOnPart(part, density, opts)
     local hx, hy, hz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
 
     local corners = {
-        cf * CFrame.new( hx,  hy,  hz),
-        cf * CFrame.new(-hx,  hy,  hz),
-        cf * CFrame.new( hx, -hy,  hz),
-        cf * CFrame.new(-hx, -hy,  hz),
-        cf * CFrame.new( hx,  hy, -hz),
-        cf * CFrame.new(-hx,  hy, -hz),
-        cf * CFrame.new( hx, -hy, -hz),
-        cf * CFrame.new(-hx, -hy, -hz),
+        cf * CFrame.new( hx,  hy,  hz), cf * CFrame.new(-hx,  hy,  hz),
+        cf * CFrame.new( hx, -hy,  hz), cf * CFrame.new(-hx, -hy,  hz),
+        cf * CFrame.new( hx,  hy, -hz), cf * CFrame.new(-hx,  hy, -hz),
+        cf * CFrame.new( hx, -hy, -hz), cf * CFrame.new(-hx, -hy, -hz),
     }
 
     local minX, minY =  math.huge,  math.huge
@@ -552,44 +504,34 @@ local function SampleVisiblePointsOnPart(part, density, opts)
     end
     if not anyOnScreen then return result end
 
-    --// Clip to viewport, tiny margin so rays don't fall outside the buffer
-    minX = math.max(0, minX)
-    minY = math.max(0, minY)
-    maxX = math.min(vp.X, maxX)
-    maxY = math.min(vp.Y, maxY)
+    minX = math.max(0, minX); minY = math.max(0, minY)
+    maxX = math.min(vp.X, maxX); maxY = math.min(vp.Y, maxY)
     if (maxX - minX) < 1 or (maxY - minY) < 1 then return result end
 
-    --// Padding: mesh may stick out of its bbox slightly (deformed skins)
     local padX = math.max(4, (maxX - minX) * 0.08)
     local padY = math.max(4, (maxY - minY) * 0.08)
-    minX = math.max(0, minX - padX)
-    minY = math.max(0, minY - padY)
-    maxX = math.min(vp.X, maxX + padX)
-    maxY = math.min(vp.Y, maxY + padY)
+    minX = math.max(0, minX - padX); minY = math.max(0, minY - padY)
+    maxX = math.min(vp.X, maxX + padX); maxY = math.min(vp.Y, maxY + padY)
 
     result.bbox = { minX = minX, minY = minY, maxX = maxX, maxY = maxY }
 
-    --// Adaptive density by on-screen size
     local mp = Aimbot.Settings.MultiPoint
-    local n = math.max(2, math.min(8, math.floor(tonumber(density) or (mp and mp.Density) or 3)))
+    local n = math.max(2, math.min(8, math.floor(tonumber(density) or (mp and mp.Density) or 4)))
     if mp and mp.AdaptiveDensity then
-        local sW = maxX - minX
-        local sH = maxY - minY
-        local diag = math.sqrt(sW * sW + sH * sH)
-        if diag > 180 then n = math.min(8, n + 2)
-        elseif diag > 100 then n = math.min(8, n + 1)
-        elseif diag < 30  then n = math.max(2, n - 1) end
+        local sW, sH = maxX - minX, maxY - minY
+        local diag = math.sqrt(sW*sW + sH*sH)
+        if diag > 200 then n = math.min(8, n + 2)
+        elseif diag > 110 then n = math.min(8, n + 1)
+        elseif diag < 35 then n = math.max(2, n - 1) end
     end
 
-    local steps = n - 1
-    local cellW = (maxX - minX) / math.max(1, n)
-    local cellH = (maxY - minY) / math.max(1, n)
-    local jitterTries = math.max(0, math.min(6,
-        math.floor((mp and mp.JitterTries) or 3)))
-    local maxRays = math.max(n * n, math.floor((mp and mp.MaxRaysPerPart) or 64))
-    local params = BuildMeshRayParams()
+    local steps   = n - 1
+    local cellW   = (maxX - minX) / math.max(1, n)
+    local cellH   = (maxY - minY) / math.max(1, n)
+    local jitterTries = math.max(0, math.min(8, math.floor((mp and mp.JitterTries) or 4)))
+    local maxRays = math.max(n * n, math.floor((mp and mp.MaxRaysPerPart) or 96))
+    local params  = BuildMeshRayParams()
 
-    --// raycast cache within this call to avoid extra work between grid/jitter
     local rayCount = 0
     local function castAt(sx, sy)
         if rayCount >= maxRays then return nil end
@@ -602,7 +544,7 @@ local function SampleVisiblePointsOnPart(part, density, opts)
         return res
     end
 
-    --// Grid pass: fill a matrix of samples so we can compute edges later
+    --// ==== Pass 1: primary grid ====
     local grid = {}
     for ix = 0, steps do
         grid[ix] = {}
@@ -610,43 +552,34 @@ local function SampleVisiblePointsOnPart(part, density, opts)
             local cx = minX + cellW * (ix + 0.5)
             local cy = minY + cellH * (iy + 0.5)
             local res = castAt(cx, cy)
-            local sample = {
+            grid[ix][iy] = {
                 screen = Vector2.new(cx, cy),
-                hit    = false,
-                world  = nil,
-                part   = nil,
-                edge   = false,
+                hit = res ~= nil,
+                world = res and res.Position or nil,
+                part = res and res.Instance or nil,
+                edge = false,
             }
-            if res then
-                sample.hit   = true
-                sample.world = res.Position
-                sample.part  = res.Instance
-            end
-            grid[ix][iy] = sample
         end
     end
 
-    --// Jitter pass: for missed cells, try sub-rays to reach mesh edges
+    --// ==== Pass 2: jitter on missed cells ====
     if jitterTries > 0 then
         for ix = 0, steps do
             for iy = 0, steps do
                 local s = grid[ix][iy]
                 if not s.hit then
-                    --// Neighbour-aware budget: extra tries if a neighbour hits
                     local neighborHit = false
                     for dx = -1, 1 do
                         for dy = -1, 1 do
                             if not (dx == 0 and dy == 0) then
                                 local nx, ny = ix + dx, iy + dy
                                 if grid[nx] and grid[nx][ny] and grid[nx][ny].hit then
-                                    neighborHit = true
-                                    break
+                                    neighborHit = true; break
                                 end
                             end
                         end
                         if neighborHit then break end
                     end
-
                     local tries = jitterTries + (neighborHit and 2 or 0)
                     for t = 2, math.min(tries + 1, #JITTER_PATTERNS) do
                         local pat = JITTER_PATTERNS[t]
@@ -654,10 +587,9 @@ local function SampleVisiblePointsOnPart(part, density, opts)
                         local jy = s.screen.Y + pat[2] * cellH
                         local res = castAt(jx, jy)
                         if res then
-                            s.hit    = true
-                            s.world  = res.Position
-                            s.part   = res.Instance
-                            --// Move the sample's screen coord to the successful ray
+                            s.hit   = true
+                            s.world = res.Position
+                            s.part  = res.Instance
                             s.screen = Vector2.new(jx, jy)
                             break
                         end
@@ -667,27 +599,71 @@ local function SampleVisiblePointsOnPart(part, density, opts)
         end
     end
 
-    --// Compute edges (silhouette cells: hit with at least one missing 4-neighbour)
+    --// ==== Pass 3: refinement on silhouette boundary ====
+    if mp and mp.RefineEdges then
+        local refinePasses = math.max(1, math.min(3, math.floor(mp.RefinePasses or 1)))
+        local refined = {}
+        for ix = 0, steps do
+            for iy = 0, steps do
+                local s = grid[ix][iy]
+                if s.hit then
+                    --// is this a boundary cell? (any 4-neighbor is a miss)
+                    local boundary = false
+                    local function miss(nx, ny)
+                        if nx < 0 or ny < 0 or nx > steps or ny > steps then return true end
+                        return (not grid[nx][ny]) or (not grid[nx][ny].hit)
+                    end
+                    if miss(ix-1, iy) or miss(ix+1, iy) or miss(ix, iy-1) or miss(ix, iy+1) then
+                        boundary = true
+                    end
+                    if boundary then
+                        --// subdivide this cell 3x3 and look for additional hit points
+                        for sx = 0, 2 do
+                            for sy = 0, 2 do
+                                local subX = minX + cellW * (ix + (sx + 0.5) / 3)
+                                local subY = minY + cellH * (iy + (sy + 0.5) / 3)
+                                -- skip the cell center (already sampled)
+                                if not (sx == 1 and sy == 1) then
+                                    local res = castAt(subX, subY)
+                                    if res then
+                                        refined[#refined + 1] = {
+                                            screen = Vector2.new(subX, subY),
+                                            hit = true,
+                                            world = res.Position,
+                                            part = res.Instance,
+                                            edge = true,
+                                        }
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        --// merge refined samples into the grid pass (tag them edge)
+        for _, s in ipairs(refined) do
+            table.insert(result.samples, s)
+        end
+    end
+
+    --// ==== Compute edge flags for grid cells ====
     for ix = 0, steps do
         for iy = 0, steps do
             local s = grid[ix][iy]
             if s.hit then
-                local e = false
                 local function miss(nx, ny)
                     if nx < 0 or ny < 0 or nx > steps or ny > steps then return true end
                     local t = grid[nx][ny]
                     return (not t) or (not t.hit)
                 end
-                if miss(ix - 1, iy) or miss(ix + 1, iy)
-                   or miss(ix, iy - 1) or miss(ix, iy + 1) then
-                    e = true
+                if miss(ix-1, iy) or miss(ix+1, iy) or miss(ix, iy-1) or miss(ix, iy+1) then
+                    s.edge = true
                 end
-                s.edge = e
             end
         end
     end
 
-    --// Flatten to output array (all cells, so the visual layer can pick)
     for ix = 0, steps do
         for iy = 0, steps do
             result.samples[#result.samples + 1] = grid[ix][iy]
@@ -698,10 +674,7 @@ local function SampleVisiblePointsOnPart(part, density, opts)
 end
 
 --// ===========================================================================
---// v28: GetVisiblePointOnPart
---// Multi-Point OFF -> legacy bbox check.
---// Multi-Point ON  -> pick nearest hit on THIS part's mesh (fallback: any
---//                    hit on the same character, in case parts overlap).
+--// GetVisiblePointOnPart
 --// ===========================================================================
 local function GetVisiblePointOnPart(origin, part, density)
     if not part or not part:IsA("BasePart") or not IsAlive(part) then return nil end
@@ -711,15 +684,16 @@ local function GetVisiblePointOnPart(origin, part, density)
 
     if not useGrid then
         local aimPos = PredictPartPosition(part)
-        if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
-            return aimPos
-        end
-        local params = BuildRayParams(part.Parent)
-        local size = part.Size
-        local hx, hy, hz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
-        local cf = CFrame.new(aimPos)
+        if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then return aimPos end
+
+        local targetChar = part.Parent
+        local params = BuildRayParams(targetChar)
         local isPerfect = (Aimbot.Settings.WallCheckMode == "Perfect")
+
         if isPerfect then
+            local size = part.Size
+            local hx, hy, hz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
+            local cf = CFrame.new(aimPos)
             local pts = {
                 aimPos,
                 (cf * CFrame.new( hx,  hy,  hz)).Position,
@@ -732,20 +706,20 @@ local function GetVisiblePointOnPart(origin, part, density)
                 (cf * CFrame.new(-hx, -hy, -hz)).Position,
             }
             for _, pt in ipairs(pts) do
-                if not IsPointVisible(origin, pt, params) then return nil end
+                if not IsPointVisibleEx(pt, targetChar) then return nil end
             end
             return aimPos
         end
-        if IsPointVisible(origin, aimPos, params) then return aimPos end
+
+        if IsPointVisibleEx(aimPos, targetChar) then return aimPos end
         return nil
     end
 
     --// Multi-Point ON
-    local densityToUse = density or mp.Density or 3
+    local densityToUse = density or mp.Density or 4
     local sampling = SampleVisiblePointsOnPart(part, densityToUse)
     local mousePos = GetMousePos()
 
-    --// 1) Prefer a hit on the exact requested part
     local bestPt, bestDist = nil, math.huge
     for _, s in ipairs(sampling.samples) do
         if s.hit and s.part == part then
@@ -755,7 +729,6 @@ local function GetVisiblePointOnPart(origin, part, density)
     end
     if bestPt then return bestPt end
 
-    --// 2) Fallback: any hit on the same character
     for _, s in ipairs(sampling.samples) do
         if s.hit then
             local d = (mousePos - s.screen).Magnitude
@@ -764,13 +737,15 @@ local function GetVisiblePointOnPart(origin, part, density)
     end
     if bestPt then return bestPt end
 
-    --// 3) No mesh hit at all
     if not Aimbot.Settings.WallCheck or ShouldBypassWallCheck() then
         return PredictPartPosition(part)
     end
     return nil
 end
 
+--// ===========================================================================
+--// v29: FindNearestPartToMouse — walks ALL BaseParts of the char.
+--// ===========================================================================
 local function FindNearestPartToMouse(char, origin)
     if not char then return nil, nil end
     local mp = Aimbot.Settings.MultiPoint
@@ -779,9 +754,9 @@ local function FindNearestPartToMouse(char, origin)
     local mousePos = GetMousePos()
     local bestPart, bestPoint, bestDist = nil, nil, math.huge
 
-    for _, name in ipairs(NEAREST_PARTS) do
-        local part = char:FindFirstChild(name)
-        if part and part:IsA("BasePart") and IsAlive(part) then
+    local parts = GetCharacterBaseParts(char)
+    for _, part in ipairs(parts) do
+        if IsAlive(part) then
             local pt = GetVisiblePointOnPart(origin, part, density)
             if pt then
                 local screen, on = workspace.CurrentCamera:WorldToViewportPoint(pt)
@@ -809,11 +784,10 @@ local function FindVisiblePart(char, origin, preferredParts)
             end
         end
     end
-    for _, name in ipairs(VISIBLE_PARTS) do
-        local part = char:FindFirstChild(name)
-        if part and part:IsA("BasePart") and GetVisiblePointOnPart(origin, part) then
-            return part
-        end
+    --// fall back to any visible part (R6 + R15 + accessories)
+    local parts = GetCharacterBaseParts(char)
+    for _, part in ipairs(parts) do
+        if GetVisiblePointOnPart(origin, part) then return part end
     end
     return nil
 end
@@ -833,15 +807,13 @@ local function IsTargetValid(character, player)
     if Aimbot.Settings.AliveCheck and (not hum or hum.Health <= 0) then return false end
 
     if isGhost and player then
-        local ownerChar = player.Character
-        if not ownerChar then return false end
-        local ownerHum = ownerChar:FindFirstChildOfClass("Humanoid")
-        if not ownerHum or ownerHum.Health <= 0 then return false end
+        local oc = player.Character
+        if not oc then return false end
+        local oh = oc:FindFirstChildOfClass("Humanoid")
+        if not oh or oh.Health <= 0 then return false end
     end
 
-    if not player then
-        return Aimbot.Settings.TargetNPCs == true
-    end
+    if not player then return Aimbot.Settings.TargetNPCs == true end
 
     local tc = Aimbot.Settings.TeamCheck
     if not tc.Enabled then return true end
@@ -874,7 +846,9 @@ local function LockedTargetStillInFOV()
     if not Aimbot.FOVSettings.Enabled then return true end
     local part = Aimbot.LockPartInstance
     if not part or not IsAlive(part) then return true end
-    local point = PredictPartPosition(part)
+    --// v29: use the cached aim point if we have one (mesh-accurate), else bbox center
+    local point = Aimbot.Internal.CachedAimPos
+    if typeof(point) ~= "Vector3" then point = PredictPartPosition(part) end
     local vec, on = workspace.CurrentCamera:WorldToViewportPoint(point)
     if not on then return false end
     local d = (GetMousePos() - Vector2.new(vec.X, vec.Y)).Magnitude
@@ -908,7 +882,6 @@ local function GetClosestPlayer()
             end
         end
         if part then Aimbot.LockPartInstance = part else CancelLock() return end
-
         if not LockedTargetStillInFOV() then CancelLock() return end
         return
     end
@@ -924,12 +897,8 @@ local function GetClosestPlayer()
             table.insert(candidates, { character = npc, player = nil })
         end
     end
-    for _, ghostInfo in ipairs(GetBacktrackGhostTargets()) do
-        table.insert(candidates, {
-            character = ghostInfo.character,
-            player = ghostInfo.player,
-            isGhost = true,
-        })
+    for _, g in ipairs(GetBacktrackGhostTargets()) do
+        table.insert(candidates, { character = g.character, player = g.player, isGhost = true })
     end
 
     local ignoreFOV  = Aimbot.Settings.IgnoreFOV
@@ -939,16 +908,13 @@ local function GetClosestPlayer()
     local bestGhostChar = nil
     local mousePos = GetMousePos()
     local origin = GetCheckOrigin()
-
-    --// Sparse density for target selection
     local preDensity = 2
 
     for _, cand in ipairs(candidates) do
         if IsTargetValid(cand.character, cand.player) then
             local charTarget = cand.character
             local lockPart = Aimbot.Settings.LockPart
-            local targetPart  = nil
-            local targetPoint = nil
+            local targetPart, targetPoint = nil, nil
 
             if lockPart == "Nearest" then
                 targetPart, targetPoint = FindNearestPartToMouse(charTarget, origin)
@@ -959,8 +925,7 @@ local function GetClosestPlayer()
                 else
                     for _, name in ipairs(preferred) do
                         local p = charTarget:FindFirstChild(name)
-                        if p and p:IsA("BasePart")
-                           and GetVisiblePointOnPart(origin, p, preDensity) then
+                        if p and p:IsA("BasePart") and GetVisiblePointOnPart(origin, p, preDensity) then
                             targetPart = p; break
                         end
                     end
@@ -972,11 +937,8 @@ local function GetClosestPlayer()
                     or PredictPartPosition(targetPart)
                 local vec, on = workspace.CurrentCamera:WorldToViewportPoint(point)
                 local dist
-                if ignoreFOV then
-                    dist = (point - origin).Magnitude
-                else
-                    dist = on and (mousePos - Vector2.new(vec.X, vec.Y)).Magnitude or math.huge
-                end
+                if ignoreFOV then dist = (point - origin).Magnitude
+                else dist = on and (mousePos - Vector2.new(vec.X, vec.Y)).Magnitude or math.huge end
                 if dist < bestDist and (ignoreFOV or dist < required) then
                     bestDist      = dist
                     bestTarget    = cand.player or charTarget
@@ -999,73 +961,51 @@ end
 --// ===========================================================================
 --// Drawing pools
 --// ===========================================================================
-local MPV = {
-    Points = {},
-    Line   = nil,
-}
+local MPV = { Points = {}, Line = nil }
 
 local function EnsureMPVPoint(i)
     local d = MPV.Points[i]
     if not d then
         d = Drawing.new("Circle")
-        d.NumSides     = 12
-        d.Thickness    = 1
-        d.Transparency = 1
-        d.ZIndex       = 3
-        MPV.Points[i]  = d
+        d.NumSides = 12; d.Thickness = 1; d.Transparency = 1; d.ZIndex = 3
+        MPV.Points[i] = d
     end
     return d
 end
-
 local function EnsureMPVLine()
     if not MPV.Line then
         MPV.Line = Drawing.new("Line")
-        MPV.Line.Transparency = 1
-        MPV.Line.ZIndex       = 3
+        MPV.Line.Transparency = 1; MPV.Line.ZIndex = 3
     end
     return MPV.Line
 end
+local function HideAllMPVPoints()
+    for _, d in ipairs(MPV.Points) do pcall(function() d.Visible = false end) end
+end
 
+--// v29: Visualized parts = ALL BaseParts of char if ShowAllParts, else locked part
 local function GetVisualizedParts(char)
     local cfg = Aimbot.Settings.MultiPointVisuals
     if cfg.ShowAllParts then
-        local out = {}
-        for _, name in ipairs(NEAREST_PARTS) do
-            local p = char:FindFirstChild(name)
-            if p and p:IsA("BasePart") and IsAlive(p) then
-                out[#out + 1] = p
-            end
-        end
-        return out
+        return GetCharacterBaseParts(char)
     end
     local lp = Aimbot.LockPartInstance
     if lp and IsAlive(lp) then return { lp } end
     return {}
 end
 
---// ===========================================================================
---// v28: Multi-Point Visuals — chams-like grid / silhouette sampling.
---// ===========================================================================
 local function DrawMultiPointVisuals()
     local cfg = Aimbot.Settings.MultiPointVisuals
-    if not cfg or not cfg.Enabled then
-        for _, d in ipairs(MPV.Points) do
-            pcall(function() d.Visible = false end)
-        end
-        return
-    end
+    if not cfg or not cfg.Enabled then HideAllMPVPoints() return end
 
     local char = GetLockedCharacter()
-    if not char then
-        for _, d in ipairs(MPV.Points) do
-            pcall(function() d.Visible = false end)
-        end
-        return
-    end
+    if not char then HideAllMPVPoints() return end
 
     local mp = Aimbot.Settings.MultiPoint
-    local density = (mp and mp.Density) or 3
+    local density = (mp and mp.Density) or 4
     local style = cfg.Style or "Grid"
+    local onlyMeshHits = cfg.OnlyMeshHits ~= false
+    local showMisses = cfg.ShowMisses == true and not onlyMeshHits
     local maxPoints = math.max(32, math.floor(cfg.MaxPoints or 512))
 
     local parts = GetVisualizedParts(char)
@@ -1077,35 +1017,31 @@ local function DrawMultiPointVisuals()
         local sampling = SampleVisiblePointsOnPart(part, density)
         for _, s in ipairs(sampling.samples) do
             if shown >= maxPoints then break end
-            local render = false
+
+            local render, color
             if s.hit then
                 if style == "Silhouette" then
-                    render = s.edge == true
-                else
+                    if s.edge then render = true; color = cfg.EdgeColor end
+                elseif style == "MeshOnly" then
+                    render = true; color = cfg.HitColor
+                else -- Grid
                     render = true
+                    color = s.edge and (cfg.EdgeColor or cfg.HitColor) or cfg.HitColor
                 end
             else
-                render = (cfg.ShowMisses ~= false) and (style ~= "Silhouette")
+                if showMisses then render = true; color = cfg.MissColor end
             end
+
             if render then
                 shown = shown + 1
                 local d = EnsureMPVPoint(shown)
                 d.Position = s.screen
                 d.Radius   = cfg.PointRadius or 4
-                if s.hit then
-                    d.Color = (style == "Silhouette" and s.edge)
-                        and (cfg.EdgeColor or Color3.fromRGB( 80, 200, 255))
-                        or  (cfg.HitColor  or Color3.fromRGB( 80, 255,  80))
-                else
-                    d.Color = cfg.MissColor or Color3.fromRGB(255, 100, 100)
-                end
+                d.Color    = color
                 d.Filled   = cfg.PointFilled ~= false
                 d.Visible  = true
                 storedPts[#storedPts + 1] = {
-                    screen = s.screen,
-                    hit    = s.hit,
-                    edge   = s.edge,
-                    part   = s.part,
+                    screen = s.screen, hit = s.hit, edge = s.edge, part = s.part,
                 }
             end
         end
@@ -1118,78 +1054,60 @@ local function DrawMultiPointVisuals()
     Aimbot.Internal.LastSamplePoints = storedPts
 end
 
---// ===========================================================================
---// v28: Aim Line — separate feature, tracks cursor / camera / player HRP.
---// ===========================================================================
 local function DrawAimLine()
     local cfg = Aimbot.Settings.AimLineVisuals
     if not cfg or not cfg.Enabled then
         if MPV.Line then pcall(function() MPV.Line.Visible = false end) end
         return
     end
-
     local aimPoint = Aimbot.Internal.CachedAimPos
     if typeof(aimPoint) ~= "Vector3" then
         local lp = Aimbot.LockPartInstance
-        if lp and IsAlive(lp) then
-            aimPoint = PredictPartPosition(lp)
-        end
+        if lp and IsAlive(lp) then aimPoint = PredictPartPosition(lp) end
     end
     if typeof(aimPoint) ~= "Vector3" then
         if MPV.Line then pcall(function() MPV.Line.Visible = false end) end
         return
     end
-
     local cam = workspace.CurrentCamera
-    if not cam then
-        if MPV.Line then pcall(function() MPV.Line.Visible = false end) end
-        return
-    end
+    if not cam then return end
 
-    local fromV2 = nil
-    local lineFrom = cfg.LineFrom or "Mouse"
-    if lineFrom == "PlayerHRP" then
+    local fromV2
+    local lf = cfg.LineFrom or "Mouse"
+    if lf == "PlayerHRP" then
         local lc = LocalPlayer.Character
         local hrp = lc and lc:FindFirstChild("HumanoidRootPart")
         if hrp then
             local s, on = cam:WorldToViewportPoint(hrp.Position)
             if on then fromV2 = Vector2.new(s.X, s.Y) end
         end
-    elseif lineFrom == "Camera" then
+    elseif lf == "Camera" then
         local s, on = cam:WorldToViewportPoint(cam.CFrame.Position)
         if on then fromV2 = Vector2.new(s.X, s.Y) end
     else
         fromV2 = GetMousePos()
     end
-
     if not fromV2 then
         if MPV.Line then pcall(function() MPV.Line.Visible = false end) end
         return
     end
-
     local toV2, toOn = cam:WorldToViewportPoint(aimPoint)
     if not toOn then
         if MPV.Line then pcall(function() MPV.Line.Visible = false end) end
         return
     end
-
     local line = EnsureMPVLine()
-    line.From      = fromV2
-    line.To        = Vector2.new(toV2.X, toV2.Y)
+    line.From = fromV2
+    line.To   = Vector2.new(toV2.X, toV2.Y)
     line.Color     = cfg.Color or Color3.fromRGB(255, 200, 70)
     line.Thickness = cfg.Thickness or 2
     line.Visible   = true
 end
 
 local function DestroyMultiPointVisuals()
-    for _, d in ipairs(MPV.Points) do
-        pcall(function() d:Remove() end)
-    end
+    for _, d in ipairs(MPV.Points) do pcall(function() d:Remove() end) end
     MPV.Points = {}
-    if MPV.Line then
-        pcall(function() MPV.Line:Remove() end)
-        MPV.Line = nil
-    end
+    if MPV.Line then pcall(function() MPV.Line:Remove() end); MPV.Line = nil end
     Aimbot.Internal.LastSamplePoints = {}
 end
 
@@ -1204,9 +1122,7 @@ local function LogShot(targetChar, targetName, startHealth, hitPartName, wasVisi
         if pv and pv.Value and pv.Value.Character then
             realChar = pv.Value.Character
             targetName = pv.Value.Name
-        else
-            return
-        end
+        else return end
     end
     local hum = realChar:FindFirstChildOfClass("Humanoid")
     if not hum then return end
@@ -1223,7 +1139,6 @@ local function LogShot(targetChar, targetName, startHealth, hitPartName, wasVisi
     if not H.Logging or not H.Logging.Enabled then return end
     if hit and not H.Logging.ShowHit then return end
     if not hit and not H.Logging.ShowMiss then return end
-
     local displayName = targetName or realChar.Name
     local msg, color
     if hit then
@@ -1231,13 +1146,11 @@ local function LogShot(targetChar, targetName, startHealth, hitPartName, wasVisi
             msg = "Killed " .. displayName .. " (" .. hitPartName .. ")"
             color = Color3.fromRGB(255, 255, 0)
         else
-            msg = "Hit " .. displayName .. " (" .. hitPartName .. " - "
-                .. math.floor(startHealth - endHealth) .. " dmg)"
+            msg = "Hit " .. displayName .. " (" .. hitPartName .. " - " .. math.floor(startHealth - endHealth) .. " dmg)"
             color = Color3.fromRGB(0, 255, 0)
         end
     else
-        msg = wasVisible and ("Missed " .. displayName)
-                        or ("Missed (wall) " .. displayName)
+        msg = wasVisible and ("Missed " .. displayName) or ("Missed (wall) " .. displayName)
         color = Color3.fromRGB(255, 80, 80)
     end
     AddLog(msg, color)
@@ -1248,10 +1161,7 @@ local function RefreshOldPositionIfNeeded()
     if not Hg or not Hg.AntiAim then return end
     local d = Hg.AntiAim.Desync
     if not d or not d.Settings or not d.Internal then return end
-    if not d.Settings.Enabled then return end
-    if d.Settings.Mode ~= "OldPosition" then return end
-    if not d.Settings.RefreshOnShot then return end
-
+    if not d.Settings.Enabled or d.Settings.Mode ~= "OldPosition" or not d.Settings.RefreshOnShot then return end
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
@@ -1274,35 +1184,23 @@ local function DisableDesyncDuringShot()
     local D = Hg.AntiAim.Desync
     local S = D.Settings
     if not S then return nil end
-
-    local saved = {
-        WasEnabled    = S.Enabled,
-        Mode          = S.Mode,
-        RefreshOnShot = S.RefreshOnShot,
-    }
-
+    local saved = { WasEnabled = S.Enabled, Mode = S.Mode, RefreshOnShot = S.RefreshOnShot }
     if S.Enabled then
         S.Enabled = false
-        if Hg.AntiAim.StopDesync then
-            pcall(Hg.AntiAim.StopDesync)
-        end
+        if Hg.AntiAim.StopDesync then pcall(Hg.AntiAim.StopDesync) end
     end
-
     local restored = false
     return function()
         if restored then return end
         restored = true
         local Hg2 = getgenv().AirHub
         if not Hg2 or not Hg2.AntiAim or not Hg2.AntiAim.Desync then return end
-        local D2 = Hg2.AntiAim.Desync
-        local S2 = D2.Settings
+        local S2 = Hg2.AntiAim.Desync.Settings
         if not S2 then return end
         S2.Enabled = saved.WasEnabled
-        if saved.Mode          ~= nil then S2.Mode          = saved.Mode          end
+        if saved.Mode ~= nil then S2.Mode = saved.Mode end
         if saved.RefreshOnShot ~= nil then S2.RefreshOnShot = saved.RefreshOnShot end
-        if saved.WasEnabled and Hg2.AntiAim.StartDesync then
-            pcall(Hg2.AntiAim.StartDesync)
-        end
+        if saved.WasEnabled and Hg2.AntiAim.StartDesync then pcall(Hg2.AntiAim.StartDesync) end
     end
 end
 
@@ -1327,17 +1225,12 @@ local function WaitForShotPoint(targetPart)
     return nil, false
 end
 
---// VIM expects absolute screen coords (top-left of the monitor incl. topbar),
---// while WorldToViewportPoint returns viewport coords. Add back the topbar
---// height ONLY for the VIM input, not for Drawing / cursor logic.
 local TOPBAR_PX = 36
-
 local function WorldToMouseVIM(worldPos)
-    local screenPos, onScreen = workspace.CurrentCamera:WorldToViewportPoint(worldPos)
+    local sp, onScreen = workspace.CurrentCamera:WorldToViewportPoint(worldPos)
     if not onScreen then return nil end
-    return math.floor(screenPos.X), math.floor(screenPos.Y + TOPBAR_PX)
+    return math.floor(sp.X), math.floor(sp.Y + TOPBAR_PX)
 end
-
 local function MoveMouseAbs(x, y)
     if type(mousemoveabs) == "function" then
         local ok, res = pcall(mousemoveabs, x, y)
@@ -1345,44 +1238,33 @@ local function MoveMouseAbs(x, y)
     end
     if type(mousemoverel) == "function" then
         local cur = UserInputService:GetMouseLocation()
-        local dx = x - math.floor(cur.X)
-        local dy = y - math.floor(cur.Y)
-        local ok, res = pcall(mousemoverel, dx, dy)
+        local ok, res = pcall(mousemoverel, x - math.floor(cur.X), y - math.floor(cur.Y))
         if ok and res ~= false then return true end
     end
-    local vimOk = pcall(function()
-        VirtualInputManager:SendMouseMoveEvent(x, y, game)
-    end)
-    return vimOk
+    return pcall(function() VirtualInputManager:SendMouseMoveEvent(x, y, game) end)
 end
 
---// ---------------------------------------------------------------------------
---// PatchShotArgs
---// ---------------------------------------------------------------------------
+--// ===========================================================================
+--// PatchShotArgs (wallbang)
+--// ===========================================================================
 local function PatchValueRecursive(v, camPos, aimPos, dirUnit, correctCF, depth)
     if depth > 4 then return v, 0 end
     local t = typeof(v)
     if t == "Vector3" then
         local vm = v.Magnitude
-        if math.abs(vm - 1) < 0.4 then
-            return dirUnit, 1
-        elseif vm > 5 then
-            return aimPos, 1
-        end
+        if math.abs(vm - 1) < 0.4 then return dirUnit, 1
+        elseif vm > 5 then return aimPos, 1 end
         return v, 0
-    elseif t == "CFrame" then
-        return correctCF, 1
+    elseif t == "CFrame" then return correctCF, 1
     elseif t == "Ray" then
         local ok, r = pcall(Ray.new, camPos, dirUnit)
         if ok and r then return r, 1 end
         return v, 0
     elseif t == "table" then
-        local newT = {}
-        local n = 0
+        local newT, n = {}, 0
         for k, subv in pairs(v) do
             local sv, sn = PatchValueRecursive(subv, camPos, aimPos, dirUnit, correctCF, depth + 1)
-            newT[k] = sv
-            n = n + sn
+            newT[k] = sv; n = n + sn
         end
         return newT, n
     end
@@ -1393,7 +1275,6 @@ local function PatchShotArgs(args, camPos, aimPos)
     local cam = workspace.CurrentCamera
     local camPos2 = camPos or (cam and cam.CFrame.Position)
     if not camPos2 then return 0 end
-
     local toTarget = aimPos - camPos2
     if toTarget.Magnitude < 0.001 then return 0 end
     local dirUnit = toTarget.Unit
@@ -1405,7 +1286,6 @@ local function PatchShotArgs(args, camPos, aimPos)
             table.insert(v3Indices, { idx = i, mag = args[i].Magnitude })
         end
     end
-
     local dirIdx, posIdx
     if #v3Indices >= 2 then
         table.sort(v3Indices, function(a, b) return a.mag < b.mag end)
@@ -1414,85 +1294,57 @@ local function PatchShotArgs(args, camPos, aimPos)
         if v3Indices[#v3Indices].mag < 5 then posIdx = nil end
         if math.abs(v3Indices[1].mag - 1) > 0.4 then
             if posIdx then dirIdx = nil
-            else dirIdx = nil posIdx = nil end
+            else dirIdx = nil; posIdx = nil end
         end
     end
-
-    local totalPatched = 0
+    local total = 0
     for i = 1, args.n do
-        local v = args[i]
-        local t = typeof(v)
+        local v, t = args[i], typeof(args[i])
         if t == "Vector3" then
-            if i == dirIdx then
-                args[i] = dirUnit
-                totalPatched = totalPatched + 1
-            elseif i == posIdx then
-                args[i] = aimPos
-                totalPatched = totalPatched + 1
+            if i == dirIdx then args[i] = dirUnit; total = total + 1
+            elseif i == posIdx then args[i] = aimPos; total = total + 1
             else
                 local vm = v.Magnitude
-                if math.abs(vm - 1) < 0.4 then
-                    args[i] = dirUnit
-                    totalPatched = totalPatched + 1
-                elseif vm > 5 then
-                    args[i] = aimPos
-                    totalPatched = totalPatched + 1
-                end
+                if math.abs(vm - 1) < 0.4 then args[i] = dirUnit; total = total + 1
+                elseif vm > 5 then args[i] = aimPos; total = total + 1 end
             end
-        elseif t == "CFrame" then
-            args[i] = correctCF
-            totalPatched = totalPatched + 1
+        elseif t == "CFrame" then args[i] = correctCF; total = total + 1
         elseif t == "Ray" then
             local ok, r = pcall(Ray.new, camPos2, dirUnit)
-            if ok and r then
-                args[i] = r
-                totalPatched = totalPatched + 1
-            end
+            if ok and r then args[i] = r; total = total + 1 end
         elseif t == "table" then
-            local newT, n = PatchValueRecursive(v, camPos2, aimPos, dirUnit, correctCF, 1)
-            args[i] = newT
-            totalPatched = totalPatched + n
+            local nt, n = PatchValueRecursive(v, camPos2, aimPos, dirUnit, correctCF, 1)
+            args[i] = nt; total = total + n
         end
     end
-    return totalPatched
+    return total
 end
 
---// ---------------------------------------------------------------------------
+--// ===========================================================================
 --// Mode availability
---// ---------------------------------------------------------------------------
+--// ===========================================================================
 local function CacheGet(key)
     local c = Aimbot.Internal.ModeCache[key]
     if not c then return nil end
     if tick() - c.t > (Aimbot.Settings.ModeCacheTTL or 60) then
-        Aimbot.Internal.ModeCache[key] = nil
-        return nil
+        Aimbot.Internal.ModeCache[key] = nil; return nil
     end
     return c.available, c.reason
 end
 local function CacheSet(key, available, reason)
-    Aimbot.Internal.ModeCache[key] = {
-        available = available,
-        reason    = reason,
-        t         = tick(),
-    }
+    Aimbot.Internal.ModeCache[key] = { available = available, reason = reason, t = tick() }
 end
 local function ComputeModeAvailability(mode)
     if mode == "Camera" then return true
-    elseif mode == "Mouse" then
-        if not VirtualInputManager then return false, "no VIM" end
-        return true
-    elseif mode == "Raycast"
-        or mode == "FindPartOnRay"
-        or mode == "FindPartOnRayWithWhitelist"
-        or mode == "FindPartOnRayWithIgnoreList" then
+    elseif mode == "Mouse" then if not VirtualInputManager then return false, "no VIM" end; return true
+    elseif mode == "Raycast" or mode == "FindPartOnRay"
+        or mode == "FindPartOnRayWithWhitelist" or mode == "FindPartOnRayWithIgnoreList" then
         if not EXEC.hookmetamethod or not EXEC.getnamecallmethod then
             return false, "no hookmetamethod"
         end
         return true
     elseif mode == "Mouse.Hit/Target" then
-        if type(LocalPlayer.GetMouse) ~= "function" then
-            return false, "GetMouse missing"
-        end
+        if type(LocalPlayer.GetMouse) ~= "function" then return false, "GetMouse missing" end
         return true
     end
     return false, "unknown mode"
@@ -1510,20 +1362,11 @@ local function IsModeHooked(mode)
     return Aimbot.Settings.Enabled and Aimbot.Settings.SilentAim
        and Aimbot.Settings.SilentAimMode == mode
 end
-local function ShouldRedirect(mode)
-    return IsModeHooked(mode) and Running
-end
+local function ShouldRedirect(mode) return IsModeHooked(mode) and Running end
 
---// ---------------------------------------------------------------------------
---// Autowork
---// ---------------------------------------------------------------------------
 local ALL_METHODS = {
-    "Camera", "Mouse",
-    "Raycast",
-    "FindPartOnRay",
-    "FindPartOnRayWithWhitelist",
-    "FindPartOnRayWithIgnoreList",
-    "Mouse.Hit/Target",
+    "Camera", "Mouse", "Raycast", "FindPartOnRay",
+    "FindPartOnRayWithWhitelist", "FindPartOnRayWithIgnoreList", "Mouse.Hit/Target",
 }
 local function GetWorkingMethods()
     local list = {}
@@ -1549,13 +1392,10 @@ local function CycleAutowork(direction)
     return newMode, list
 end
 
---// ---------------------------------------------------------------------------
---// TP AIM & WALLBANG
---// ---------------------------------------------------------------------------
-local function GetHRP()
-    local char = LocalPlayer.Character
-    return char and char:FindFirstChild("HumanoidRootPart")
-end
+--// ===========================================================================
+--// TP AIM / WALLBANG / SILENT SHOT
+--// ===========================================================================
+local function GetHRP() local c = LocalPlayer.Character; return c and c:FindFirstChild("HumanoidRootPart") end
 local function SaveCurrentCFrame()
     local hrp = GetHRP()
     if hrp then
@@ -1569,9 +1409,7 @@ local function RestoreCurrentCFrame()
     local hrp = GetHRP()
     if hrp and Aimbot.TPAimInternal.SavedCFrame then
         hrp.CFrame = Aimbot.TPAimInternal.SavedCFrame
-        if Aimbot.TPAimInternal.SavedVelocity then
-            hrp.Velocity = Aimbot.TPAimInternal.SavedVelocity
-        end
+        if Aimbot.TPAimInternal.SavedVelocity then hrp.Velocity = Aimbot.TPAimInternal.SavedVelocity end
         Aimbot.TPAimInternal.SavedCFrame = nil
         Aimbot.TPAimInternal.SavedVelocity = nil
         return true
@@ -1581,58 +1419,47 @@ end
 local function TeleportToTarget(targetPart)
     local hrp = GetHRP()
     if not hrp or not targetPart then return false end
-    local targetCF = targetPart.CFrame
-    local distance = Aimbot.Settings.TPAimDistance or 5
-    local offsetCF = targetCF * CFrame.new(0, 0, distance)
-    hrp.CFrame = offsetCF
+    hrp.CFrame = targetPart.CFrame * CFrame.new(0, 0, Aimbot.Settings.TPAimDistance or 5)
     local cam = workspace.CurrentCamera
     if cam and targetPart.Parent then
-        local aimPos = PredictPartPosition(targetPart)
-        local camPos = cam.CFrame.Position
-        if (aimPos - camPos).Magnitude > 0.001 then
-            cam.CFrame = CFrame.lookAt(camPos, aimPos)
+        local ap = PredictPartPosition(targetPart)
+        if (ap - cam.CFrame.Position).Magnitude > 0.001 then
+            cam.CFrame = CFrame.lookAt(cam.CFrame.Position, ap)
         end
     end
     return true
 end
 local function FireClick(btn)
-    local mousePos = UserInputService:GetMouseLocation()
-    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, true,  game, 1)
+    local mp = UserInputService:GetMouseLocation()
+    VirtualInputManager:SendMouseButtonEvent(mp.X, mp.Y, btn, true,  game, 1)
     task.wait(0.001)
-    VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, btn, false, game, 1)
+    VirtualInputManager:SendMouseButtonEvent(mp.X, mp.Y, btn, false, game, 1)
 end
 local function FireClickNoDesync(btn, restoreDelay)
     local restore = DisableDesyncDuringShot()
     FireClick(btn)
     if restore then task.delay(restoreDelay or 0.25, restore) end
 end
-local function ScheduleHookRemoval(restoreFn, holdTime)
-    task.delay((holdTime or Aimbot.Settings.WallbangHoldTime or 0.1) + 0.05, function()
-        pcall(restoreFn)
-    end)
+local function ScheduleHookRemoval(fn, holdTime)
+    task.delay((holdTime or Aimbot.Settings.WallbangHoldTime or 0.1) + 0.05, function() pcall(fn) end)
 end
 
 local function PerformWallbang_RemotePatch(targetPart, btn)
     local hookf, getMethod, newc, checkC =
         EXEC.hookmetamethod, EXEC.getnamecallmethod, EXEC.newcclosure, EXEC.checkcaller
     if not hookf or not getMethod or not newc then return false end
-    local aimPos   = GetVisiblePointOnPart(GetCheckOrigin(), targetPart)
-                     or PredictPartPosition(targetPart)
+    local aimPos = GetVisiblePointOnPart(GetCheckOrigin(), targetPart) or PredictPartPosition(targetPart)
     local holdTime = Aimbot.Settings.WallbangHoldTime or 0.1
     WB.HoldUntil = tick() + holdTime
     local original
     original = hookf(game, "__namecall", newc(function(self, ...)
         local method = getMethod()
-        if method == "FireServer"
-           and not (checkC and checkC())
-           and tick() < WB.HoldUntil then
+        if method == "FireServer" and not (checkC and checkC()) and tick() < WB.HoldUntil then
             local args = table.pack(...)
             local cam = workspace.CurrentCamera
             local cPos = cam and cam.CFrame.Position or GetCheckOrigin()
             local patched = PatchShotArgs(args, cPos, aimPos)
-            if patched > 0 then
-                return original(self, table.unpack(args, 1, args.n))
-            end
+            if patched > 0 then return original(self, table.unpack(args, 1, args.n)) end
         end
         return original(self, ...)
     end))
@@ -1640,7 +1467,6 @@ local function PerformWallbang_RemotePatch(targetPart, btn)
     ScheduleHookRemoval(function() hookf(game, "__namecall", original) end, holdTime)
     return true
 end
-
 local function PerformWallbang_RayIgnore(targetPart, btn)
     local hookf, getMethod, newc, checkC =
         EXEC.hookmetamethod, EXEC.getnamecallmethod, EXEC.newcclosure, EXEC.checkcaller
@@ -1650,21 +1476,16 @@ local function PerformWallbang_RayIgnore(targetPart, btn)
     local original
     original = hookf(game, "__namecall", newc(function(self, ...)
         local method = getMethod()
-        if method == "Raycast"
-           and not (checkC and checkC())
-           and tick() < WB.HoldUntil then
+        if method == "Raycast" and not (checkC and checkC()) and tick() < WB.HoldUntil then
             local args = { ... }
             local params = args[3]
             if typeof(params) == "Instance" and params:IsA("RaycastParams") then
-                local extended = {}
-                local current = params.FilterDescendantsInstances
-                if type(current) == "table" then
-                    for _, v in ipairs(current) do extended[#extended + 1] = v end
-                end
-                extended[#extended + 1] = workspace
+                local ext = {}
+                for _, v in ipairs(params.FilterDescendantsInstances) do ext[#ext + 1] = v end
+                ext[#ext + 1] = workspace
                 pcall(function()
                     params.FilterType = Enum.RaycastFilterType.Exclude
-                    params.FilterDescendantsInstances = extended
+                    params.FilterDescendantsInstances = ext
                 end)
             end
             return original(self, table.unpack(args, 1, #args))
@@ -1675,7 +1496,6 @@ local function PerformWallbang_RayIgnore(targetPart, btn)
     ScheduleHookRemoval(function() hookf(game, "__namecall", original) end, holdTime)
     return true
 end
-
 local function PerformWallbang(targetPart, btn)
     if not Aimbot.Settings.WallbangEnabled then return false end
     if not targetPart or not IsAlive(targetPart) then return false end
@@ -1685,11 +1505,8 @@ local function PerformWallbang(targetPart, btn)
     local hum = char:FindFirstChildOfClass("Humanoid")
     local startHealth = hum and hum.Health or 0
     local ok = false
-    if method == "RemotePatch" then
-        ok = PerformWallbang_RemotePatch(targetPart, btn)
-    elseif method == "RayIgnore" then
-        ok = PerformWallbang_RayIgnore(targetPart, btn)
-    end
+    if method == "RemotePatch" then ok = PerformWallbang_RemotePatch(targetPart, btn)
+    elseif method == "RayIgnore" then ok = PerformWallbang_RayIgnore(targetPart, btn) end
     if ok then
         task.delay(0.2, function()
             local h2 = char:FindFirstChildOfClass("Humanoid")
@@ -1698,24 +1515,17 @@ local function PerformWallbang(targetPart, btn)
     end
     return ok
 end
-
 local function PerformMagicBullet(targetPart, btn)
     if not Aimbot.Settings.TPAimEnabled or Aimbot.Settings.TPAimMethod ~= "MagicBullet" then return end
     if not targetPart then return end
     SaveCurrentCFrame()
     local Hg = getgenv().AirHub
-    local desyncWasEnabled = false
-    local desyncSavedMode  = nil
-    local desyncSavedRefresh = nil
+    local dwE, dM, dR = false, nil, nil
     if Hg and Hg.AntiAim and Hg.AntiAim.Desync and Hg.AntiAim.Desync.Settings then
         local S = Hg.AntiAim.Desync.Settings
-        desyncWasEnabled   = S.Enabled
-        desyncSavedMode    = S.Mode
-        desyncSavedRefresh = S.RefreshOnShot
-        if not desyncWasEnabled then
-            S.Enabled = true
-            S.Mode = "OldPosition"
-            S.RefreshOnShot = true
+        dwE, dM, dR = S.Enabled, S.Mode, S.RefreshOnShot
+        if not dwE then
+            S.Enabled = true; S.Mode = "OldPosition"; S.RefreshOnShot = true
             if Hg.AntiAim.StartDesync then Hg.AntiAim.StartDesync() end
         end
     end
@@ -1724,11 +1534,11 @@ local function PerformMagicBullet(targetPart, btn)
     FireClick(btn)
     task.wait(0.02)
     RestoreCurrentCFrame()
-    if Hg and Hg.AntiAim and Hg.AntiAim.Desync and Hg.AntiAim.Desync.Settings and not desyncWasEnabled then
+    if Hg and Hg.AntiAim and Hg.AntiAim.Desync and Hg.AntiAim.Desync.Settings and not dwE then
         local S = Hg.AntiAim.Desync.Settings
         S.Enabled = false
-        if desyncSavedMode    ~= nil then S.Mode = desyncSavedMode end
-        if desyncSavedRefresh ~= nil then S.RefreshOnShot = desyncSavedRefresh end
+        if dM ~= nil then S.Mode = dM end
+        if dR ~= nil then S.RefreshOnShot = dR end
         if Hg.AntiAim.StopDesync then Hg.AntiAim.StopDesync() end
     end
     task.delay(0.15, function()
@@ -1739,11 +1549,9 @@ local function PerformMagicBullet(targetPart, btn)
         end
     end)
 end
-
 local function PerformInfiniteTP(targetPart, btn)
     if not Aimbot.Settings.TPAimEnabled or Aimbot.Settings.TPAimMethod ~= "InfiniteTP" then return end
-    if not targetPart then return end
-    if Aimbot.TPAimInternal.Active then return end
+    if not targetPart or Aimbot.TPAimInternal.Active then return end
     Aimbot.TPAimInternal.Active = true
     Aimbot.TPAimInternal.TargetChar = targetPart.Parent
     SaveCurrentCFrame()
@@ -1765,14 +1573,9 @@ local function PerformInfiniteTP(targetPart, btn)
     end)
 end
 
---// ---------------------------------------------------------------------------
---// PerformSilentShot
---// ---------------------------------------------------------------------------
 local AV_MODE_SET = {
-    ["Raycast"]                     = true,
-    ["FindPartOnRay"]               = true,
-    ["FindPartOnRayWithWhitelist"]  = true,
-    ["FindPartOnRayWithIgnoreList"] = true,
+    ["Raycast"] = true, ["FindPartOnRay"] = true,
+    ["FindPartOnRayWithWhitelist"] = true, ["FindPartOnRayWithIgnoreList"] = true,
 }
 
 local function PerformSilentShot(targetPart, btn, wasVisible)
@@ -1780,10 +1583,8 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if not targetPart or not IsAlive(targetPart) then return end
     local targetChar = targetPart.Parent
     if not targetChar then return end
-
     local isGhost = targetChar:GetAttribute("AirHub_Ghost") == true
-    local targetPlayer
-    local realCharForHealth = targetChar
+    local targetPlayer, realCharForHealth = nil, targetChar
     if isGhost then
         local pv = targetChar:FindFirstChild("Player")
         if pv and pv.Value then
@@ -1803,17 +1604,11 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         tostring(mode), tostring(displayName), tostring(targetPart.Name), btn or -1))
 
     if Aimbot.Settings.TPAimEnabled then
-        if Aimbot.Settings.TPAimMethod == "MagicBullet" then
-            PerformMagicBullet(targetPart, btn)
-        else
-            PerformInfiniteTP(targetPart, btn)
-        end
+        if Aimbot.Settings.TPAimMethod == "MagicBullet" then PerformMagicBullet(targetPart, btn)
+        else PerformInfiniteTP(targetPart, btn) end
         return
     end
-    if Aimbot.Settings.WallbangEnabled then
-        PerformWallbang(targetPart, btn)
-        return
-    end
+    if Aimbot.Settings.WallbangEnabled then PerformWallbang(targetPart, btn); return end
 
     RefreshOldPositionIfNeeded()
     local restoreDesync = DisableDesyncDuringShot()
@@ -1830,27 +1625,22 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     if mode == "Mouse" then
         local visiblePoint = checkPoint
         if not visiblePoint then
-            local origin = workspace.CurrentCamera.CFrame.Position
-            visiblePoint = GetVisiblePointOnPart(origin, targetPart)
+            visiblePoint = GetVisiblePointOnPart(workspace.CurrentCamera.CFrame.Position, targetPart)
         end
         if not visiblePoint then
             if restoreDesync then restoreDesync() end
             return
         end
-        local targetX, targetY = WorldToMouseVIM(visiblePoint)
-        if not targetX then
-            if restoreDesync then restoreDesync() end
-            return
-        end
-        local curMouse = UserInputService:GetMouseLocation()
-        local oldX = math.floor(curMouse.X)
-        local oldY = math.floor(curMouse.Y)
+        local tx, ty = WorldToMouseVIM(visiblePoint)
+        if not tx then if restoreDesync then restoreDesync() end; return end
+        local cur = UserInputService:GetMouseLocation()
+        local ox, oy = math.floor(cur.X), math.floor(cur.Y)
         local ok = pcall(function()
-            MoveMouseAbs(targetX, targetY)
+            MoveMouseAbs(tx, ty)
             task.wait()
-            VirtualInputManager:SendMouseButtonEvent(targetX, targetY, btn, true,  game, 1)
-            VirtualInputManager:SendMouseButtonEvent(targetX, targetY, btn, false, game, 1)
-            MoveMouseAbs(oldX, oldY)
+            VirtualInputManager:SendMouseButtonEvent(tx, ty, btn, true,  game, 1)
+            VirtualInputManager:SendMouseButtonEvent(tx, ty, btn, false, game, 1)
+            MoveMouseAbs(ox, oy)
         end)
         if not ok then HandleError("Mouse silent shot failed") end
         DebugPrint("shot fired (Mouse)")
@@ -1869,12 +1659,10 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
         return
     end
 
+    --// Camera mode
     local origin = workspace.CurrentCamera.CFrame.Position
     local visiblePoint = checkPoint or GetVisiblePointOnPart(origin, targetPart)
-    if not visiblePoint then
-        if restoreDesync then restoreDesync() end
-        return
-    end
+    if not visiblePoint then if restoreDesync then restoreDesync() end; return end
     local oldCF = workspace.CurrentCamera.CFrame
     workspace.CurrentCamera.CFrame = CFrame.new(oldCF.Position, visiblePoint)
     local ok = pcall(function() FireClickNoDesync(btn, 0.25) end)
@@ -1886,22 +1674,19 @@ local function PerformSilentShot(targetPart, btn, wasVisible)
     end)
 end
 
---// ---------------------------------------------------------------------------
+--// ===========================================================================
 --// AV namecall hook
---// ---------------------------------------------------------------------------
-local AV_Active   = false
-local AV_Original = nil
+--// ===========================================================================
+local AV_Active, AV_Original = false, nil
 
 local function AV_HandleNamecall(self, ...)
     if H.ShuttingDown then return AV_Original(self, ...) end
-
     local method
     if EXEC.getnamecallmethod then
         local ok, m = pcall(EXEC.getnamecallmethod)
         if ok then method = m end
     end
-    if method ~= "Raycast"
-       and method ~= "FindPartOnRay"
+    if method ~= "Raycast" and method ~= "FindPartOnRay"
        and method ~= "FindPartOnRayWithWhitelist"
        and method ~= "FindPartOnRayWithIgnoreList" then
         return AV_Original(self, ...)
@@ -1917,7 +1702,6 @@ local function AV_HandleNamecall(self, ...)
     end
     local aimPos = Aimbot.Internal.CachedAimPos
     if typeof(aimPos) ~= "Vector3" then return AV_Original(self, ...) end
-
     local n = select('#', ...)
 
     if method == "Raycast" then
@@ -1928,16 +1712,12 @@ local function AV_HandleNamecall(self, ...)
         end
         local delta = aimPos - origin
         local mag = delta.Magnitude
-        if mag ~= mag or mag < 0.001 or mag == math.huge then
-            return AV_Original(self, ...)
-        end
-        local origMag = direction.Magnitude
-        if origMag ~= origMag or origMag < 0.001 or origMag == math.huge then origMag = 1000 end
-        local newDir = delta.Unit * origMag
-        if n == 2 then
-            return AV_Original(self, origin, newDir)
-        elseif n == 3 then
-            return AV_Original(self, origin, newDir, (select(3, ...)))
+        if mag ~= mag or mag < 0.001 or mag == math.huge then return AV_Original(self, ...) end
+        local oM = direction.Magnitude
+        if oM ~= oM or oM < 0.001 or oM == math.huge then oM = 1000 end
+        local newDir = delta.Unit * oM
+        if n == 2 then return AV_Original(self, origin, newDir)
+        elseif n == 3 then return AV_Original(self, origin, newDir, (select(3, ...)))
         else
             local args = { origin, newDir }
             for i = 3, n do args[i] = select(i, ...) end
@@ -1947,24 +1727,19 @@ local function AV_HandleNamecall(self, ...)
         if n < 1 then return AV_Original(self, ...) end
         local ray = ...
         if typeof(ray) ~= "Ray" then return AV_Original(self, ...) end
-        local origin    = ray.Origin
-        local direction = ray.Direction
+        local origin, direction = ray.Origin, ray.Direction
         if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3" then
             return AV_Original(self, ...)
         end
         local delta = aimPos - origin
         local mag = delta.Magnitude
-        if mag ~= mag or mag < 0.001 or mag == math.huge then
-            return AV_Original(self, ...)
-        end
-        local origMag = direction.Magnitude
-        if origMag ~= origMag or origMag < 0.001 or origMag == math.huge then origMag = 1000 end
-        local okNew, newRay = pcall(Ray.new, origin, delta.Unit * origMag)
-        if not okNew or typeof(newRay) ~= "Ray" then return AV_Original(self, ...) end
-        if n == 1 then
-            return AV_Original(self, newRay)
-        elseif n == 2 then
-            return AV_Original(self, newRay, (select(2, ...)))
+        if mag ~= mag or mag < 0.001 or mag == math.huge then return AV_Original(self, ...) end
+        local oM = direction.Magnitude
+        if oM ~= oM or oM < 0.001 or oM == math.huge then oM = 1000 end
+        local okN, newRay = pcall(Ray.new, origin, delta.Unit * oM)
+        if not okN or typeof(newRay) ~= "Ray" then return AV_Original(self, ...) end
+        if n == 1 then return AV_Original(self, newRay)
+        elseif n == 2 then return AV_Original(self, newRay, (select(2, ...)))
         else
             local args = { newRay }
             for i = 2, n do args[i] = select(i, ...) end
@@ -1983,14 +1758,12 @@ local function SetupAVHook()
         if ok and type(wrapped) == "function" then handler = wrapped end
     end
     local ok, orig = pcall(hookf, game, "__namecall", handler)
-    if not ok or not orig then
-        DebugHookPrint("hookmetamethod failed"); return
-    end
+    if not ok or not orig then DebugHookPrint("hookmetamethod failed"); return end
     AV_Original = orig
     AV_Active = true
     Aimbot.Internal.HookHandlers.AVNamecall     = handler
     Aimbot.Internal.HookHandlers.AVNamecallOrig = orig
-    DebugHookPrint("AV namecall hook installed (v28)")
+    DebugHookPrint("AV namecall hook installed (v29)")
 end
 local function RemoveAVHook()
     if not AV_Active then return end
@@ -2003,12 +1776,10 @@ local function RemoveAVHook()
     Aimbot.Internal.HookHandlers.AVNamecall = nil
 end
 
---// ---------------------------------------------------------------------------
+--// ===========================================================================
 --// Mouse.Hit / Mouse.Target proxy
---// ---------------------------------------------------------------------------
-local MHT_Active   = false
-local MHT_Original = nil
-local MHT_Proxy    = nil
+--// ===========================================================================
+local MHT_Active, MHT_Original, MHT_Proxy = false, nil, nil
 
 local function MHT_BuildProxy(realMouse)
     return setmetatable({}, {
@@ -2022,9 +1793,7 @@ local function MHT_BuildProxy(realMouse)
                     elseif k == "UnitRay" then
                         local camPos = workspace.CurrentCamera.CFrame.Position
                         local dir = aimPos - camPos
-                        if dir.Magnitude > 0.0001 then
-                            return Ray.new(camPos, dir.Unit)
-                        end
+                        if dir.Magnitude > 0.0001 then return Ray.new(camPos, dir.Unit) end
                     elseif k == "TargetSurface" then return Vector3.new(0, 1, 0) end
                 end
             end
@@ -2036,22 +1805,19 @@ end
 
 local function SetupMHTProxy()
     if MHT_Active then return end
-    local prevRestore = getgenv().__AirHubMHTRestore
-    if prevRestore then
-        MHT_Original = prevRestore
+    local prev = getgenv().__AirHubMHTRestore
+    if prev then
+        MHT_Original = prev
     else
-        local current = LocalPlayer.GetMouse
-        if type(current) ~= "function" then return end
-        MHT_Original = current
-        getgenv().__AirHubMHTRestore = current
+        local cur = LocalPlayer.GetMouse
+        if type(cur) ~= "function" then return end
+        MHT_Original = cur
+        getgenv().__AirHubMHTRestore = cur
     end
     MHT_Proxy = function(self)
-        local realMouse = MHT_Original(self)
-        return MHT_BuildProxy(realMouse)
+        return MHT_BuildProxy(MHT_Original(self))
     end
-    if EXEC.newcclosure then
-        pcall(function() MHT_Proxy = EXEC.newcclosure(MHT_Proxy) end)
-    end
+    if EXEC.newcclosure then pcall(function() MHT_Proxy = EXEC.newcclosure(MHT_Proxy) end) end
     local ok = pcall(function() LocalPlayer.GetMouse = MHT_Proxy end)
     if ok then
         MHT_Active = true
@@ -2063,18 +1829,12 @@ end
 local function RemoveMHTProxy()
     if not MHT_Active then return end
     local restore = getgenv().__AirHubMHTRestore
-    if restore then
-        pcall(function() LocalPlayer.GetMouse = restore end)
-        getgenv().__AirHubMHTRestore = nil
-    end
+    if restore then pcall(function() LocalPlayer.GetMouse = restore end); getgenv().__AirHubMHTRestore = nil end
     MHT_Active = false
     MHT_Proxy = nil
     Aimbot.Internal.HookHandlers.MHT_Proxy = nil
 end
 
---// ---------------------------------------------------------------------------
---// Watchdog
---// ---------------------------------------------------------------------------
 local function VerifyAndFixHooks()
     if H.ShuttingDown then return end
     local Hh = Aimbot.Internal.HookHandlers
@@ -2086,7 +1846,7 @@ local function VerifyAndFixHooks()
     if MHT_Active and Hh.MHT_Proxy then
         local ok, cur = pcall(function() return LocalPlayer.GetMouse end)
         if ok and cur ~= Hh.MHT_Proxy then
-            warn("[AirHub] Hook watchdog: MHT proxy was overwritten — reinstalling")
+            warn("[AirHub] Hook watchdog: MHT proxy overwritten — reinstalling")
             MHT_Active = false
             SetupMHTProxy()
         end
@@ -2104,9 +1864,9 @@ local function ManageHooks()
     if wantMHT then SetupMHTProxy() else RemoveMHTProxy() end
 end
 
---// ---------------------------------------------------------------------------
+--// ===========================================================================
 --// Render loop
---// ---------------------------------------------------------------------------
+--// ===========================================================================
 local function LoadAimbot()
     Track(RunService.RenderStepped:Connect(function()
         if H.ShuttingDown then return end
@@ -2118,7 +1878,7 @@ local function LoadAimbot()
         if type(Aimbot.Internal.TargetAccum) ~= "number" then Aimbot.Internal.TargetAccum = 0 end
 
         Aimbot.Internal.FovAccum = Aimbot.Internal.FovAccum + dt
-        if Aimbot.Internal.FovAccum >= (1 / 60) then
+        if Aimbot.Internal.FovAccum >= (1/60) then
             Aimbot.Internal.FovAccum = 0
             if Aimbot.Settings.Enabled and Aimbot.FOVSettings.Enabled and not Aimbot.Settings.IgnoreFOV then
                 Aimbot.FOVCircle.Radius = Aimbot.FOVSettings.Amount
@@ -2126,8 +1886,7 @@ local function LoadAimbot()
                 Aimbot.FOVCircle.Filled = false
                 Aimbot.FOVCircle.Transparency = 0.5
                 Aimbot.FOVCircle.Visible = Aimbot.FOVSettings.Visible
-                --// v28: exact cursor position (no -36 offset)
-                Aimbot.FOVCircle.Position = GetMousePos()
+                Aimbot.FOVCircle.Position = GetMousePos()  -- exact cursor
             else
                 Aimbot.FOVCircle.Visible = false
             end
@@ -2144,7 +1903,6 @@ local function LoadAimbot()
         Aimbot.Internal.TargetAccum = Aimbot.Internal.TargetAccum + dt
         if Aimbot.Internal.TargetAccum >= interval then
             Aimbot.Internal.TargetAccum = 0
-
             if Aimbot.Settings.Enabled and Running then
                 GetClosestPlayer()
                 Aimbot.FOVCircle.Color = Color3.fromRGB(255, 255, 255)
@@ -2156,22 +1914,19 @@ local function LoadAimbot()
                         Aimbot.FOVCircle.Color = Color3.fromRGB(255, 200, 70)
                         Aimbot.Internal.CachedAimPos = visiblePoint
                         if not Aimbot.Settings.SilentAim then
-                            local targetPos = visiblePoint
                             if Aimbot.Settings.AimMethod == "Instant" then
                                 workspace.CurrentCamera.CFrame =
-                                    CFrame.new(workspace.CurrentCamera.CFrame.Position, targetPos)
+                                    CFrame.new(workspace.CurrentCamera.CFrame.Position, visiblePoint)
                             else
-                                local targetCF = CFrame.new(workspace.CurrentCamera.CFrame.Position, targetPos)
-                                local smoothFactor = 1 - math.exp(-Aimbot.Settings.AimSmoothingSpeed * interval)
+                                local targetCF = CFrame.new(workspace.CurrentCamera.CFrame.Position, visiblePoint)
+                                local sm = 1 - math.exp(-Aimbot.Settings.AimSmoothingSpeed * interval)
                                 workspace.CurrentCamera.CFrame =
-                                    workspace.CurrentCamera.CFrame:Lerp(targetCF, smoothFactor)
+                                    workspace.CurrentCamera.CFrame:Lerp(targetCF, sm)
                             end
                         end
                     else
                         local raw = PredictPartPosition(targetPart)
-                        if typeof(raw) == "Vector3" then
-                            Aimbot.Internal.CachedAimPos = raw
-                        end
+                        if typeof(raw) == "Vector3" then Aimbot.Internal.CachedAimPos = raw end
                     end
                 else
                     Aimbot.Internal.CachedAimPos = nil
@@ -2183,67 +1938,58 @@ local function LoadAimbot()
 
         pcall(DrawMultiPointVisuals)
         pcall(DrawAimLine)
-
         ManageHooks()
     end))
 
     Track(UserInputService.InputBegan:Connect(function(inp, gpe)
         if Typing then return end
         if not Aimbot.Settings.IgnoreGameProcessed and gpe then return end
-        local triggerKey = Aimbot.Settings.TriggerKey
-        local keyPressed = false
+        local tk = Aimbot.Settings.TriggerKey
+        local kp = false
         if inp.UserInputType == Enum.UserInputType.Keyboard then
-            local kc = Util.SafeKeyCode(triggerKey)
-            if kc and inp.KeyCode == kc then keyPressed = true end
+            local kc = Util.SafeKeyCode(tk)
+            if kc and inp.KeyCode == kc then kp = true end
         else
-            local uit = Util.SafeUserInputType(triggerKey)
-            if uit and inp.UserInputType == uit then keyPressed = true end
+            local uit = Util.SafeUserInputType(tk)
+            if uit and inp.UserInputType == uit then kp = true end
         end
-        if keyPressed then
+        if kp then
             if Aimbot.Settings.Toggle then
                 Running = not Running
                 if not Running then CancelLock() end
-            else
-                Running = true
-            end
+            else Running = true end
             Aimbot.Internal.TargetAccum = 999
         end
     end))
-
     Track(UserInputService.InputEnded:Connect(function(inp)
         if Typing or Aimbot.Settings.Toggle then return end
-        local triggerKey = Aimbot.Settings.TriggerKey
-        local keyReleased = false
+        local tk = Aimbot.Settings.TriggerKey
+        local kr = false
         if inp.UserInputType == Enum.UserInputType.Keyboard then
-            local kc = Util.SafeKeyCode(triggerKey)
-            if kc and inp.KeyCode == kc then keyReleased = true end
+            local kc = Util.SafeKeyCode(tk)
+            if kc and inp.KeyCode == kc then kr = true end
         else
-            local uit = Util.SafeUserInputType(triggerKey)
-            if uit and inp.UserInputType == uit then keyReleased = true end
+            local uit = Util.SafeUserInputType(tk)
+            if uit and inp.UserInputType == uit then kr = true end
         end
-        if keyReleased then
-            Running = false
-            CancelLock()
-        end
+        if kr then Running = false; CancelLock() end
     end))
-
     Track(UserInputService.InputBegan:Connect(function(inp, gpe)
         if gpe or Typing then return end
-        if not Aimbot.Settings.Enabled then return end
-        if not Running or not Aimbot.Locked then return end
-        local btn = nil
+        if not Aimbot.Settings.Enabled or not Running or not Aimbot.Locked then return end
+        local btn
         if inp.UserInputType == Enum.UserInputType.MouseButton1 then btn = 0
         elseif inp.UserInputType == Enum.UserInputType.MouseButton2 then btn = 1 end
         if btn == nil then return end
         if btn == 1 and Aimbot.Settings.TriggerKey == "MouseButton2" then return end
         if Aimbot.Settings.AutoShoot.Enabled then return end
-        local targetPart = Aimbot.LockPartInstance
-        if targetPart and IsAlive(targetPart) then
+        local tp = Aimbot.LockPartInstance
+        if tp and IsAlive(tp) then
             if Aimbot.Settings.SilentAim then
-                PerformSilentShot(targetPart, btn, nil)
+                PerformSilentShot(tp, btn, nil)
             else
                 if Aimbot.Settings.WallCheck and not ShouldBypassWallCheck() then
-                    local vp = WaitForShotPoint(targetPart)
+                    local vp = WaitForShotPoint(tp)
                     if not vp then return end
                 end
                 RefreshOldPositionIfNeeded()
@@ -2260,35 +2006,34 @@ local function LoadAimbot()
                 if not Aimbot.Locked or not Aimbot.LockPartInstance then return end
                 local nowt = tick()
                 if nowt - LastShotTime < Aimbot.Settings.AutoShoot.FireRate then return end
-                local targetPart = Aimbot.LockPartInstance
-                if not targetPart or not IsAlive(targetPart) then CancelLock() return end
-                local targetChar = targetPart.Parent
-                if not targetChar then return end
-                local hum = targetChar:FindFirstChildOfClass("Humanoid")
+                local tp = Aimbot.LockPartInstance
+                if not tp or not IsAlive(tp) then CancelLock() return end
+                local tc = tp.Parent
+                if not tc then return end
+                local hum = tc:FindFirstChildOfClass("Humanoid")
                 if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then CancelLock() return end
-                local visiblePoint, nowVisible = WaitForShotPoint(targetPart)
-                if Aimbot.Settings.WallCheck and not visiblePoint
-                   and not ShouldBypassWallCheck() then
+                local vp, nv = WaitForShotPoint(tp)
+                if Aimbot.Settings.WallCheck and not vp and not ShouldBypassWallCheck() then
                     CancelLock(); return
                 end
                 if Aimbot.Settings.AutoShoot.AutoStop.Enabled then
-                    local char = LocalPlayer.Character
-                    if char then
-                        local humObj = char:FindFirstChildOfClass("Humanoid")
-                        if humObj then
-                            local savedSpeed = humObj.WalkSpeed
-                            humObj.WalkSpeed = 0
+                    local c = LocalPlayer.Character
+                    if c then
+                        local h = c:FindFirstChildOfClass("Humanoid")
+                        if h then
+                            local s = h.WalkSpeed
+                            h.WalkSpeed = 0
                             task.wait(Aimbot.Settings.AutoShoot.AutoStop.Time)
-                            humObj.WalkSpeed = savedSpeed
+                            h.WalkSpeed = s
                         end
                     end
                 end
-                local shootBtn = Aimbot.Settings.AutoShoot.ShootKey == "MouseButton1" and 0 or 1
+                local sb = Aimbot.Settings.AutoShoot.ShootKey == "MouseButton1" and 0 or 1
                 if Aimbot.Settings.SilentAim then
-                    PerformSilentShot(targetPart, shootBtn, nowVisible)
+                    PerformSilentShot(tp, sb, nv)
                 else
                     RefreshOldPositionIfNeeded()
-                    FireClickNoDesync(shootBtn, 0.25)
+                    FireClickNoDesync(sb, 0.25)
                 end
                 LastShotTime = nowt
             end, HandleError)
@@ -2301,10 +2046,8 @@ Track(UserInputService.TextBoxFocusReleased:Connect(function() Typing = false en
 
 Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     if Typing then return end
-    if not Aimbot.Settings.TPAimEnabled then return end
-    if Aimbot.Settings.TPAimMethod ~= "InfiniteTP" then return end
-    local key = Aimbot.Settings.TPAimKey or "E"
-    local kc = Util.SafeKeyCode(key)
+    if not Aimbot.Settings.TPAimEnabled or Aimbot.Settings.TPAimMethod ~= "InfiniteTP" then return end
+    local kc = Util.SafeKeyCode(Aimbot.Settings.TPAimKey or "E")
     if kc and inp.KeyCode == kc then
         Aimbot.TPAimInternal.KeyHeld = true
         if Aimbot.LockPartInstance and IsAlive(Aimbot.LockPartInstance) then
@@ -2313,20 +2056,14 @@ Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     end
 end))
 Track(UserInputService.InputEnded:Connect(function(inp)
-    if not Aimbot.Settings.TPAimEnabled then return end
-    if Aimbot.Settings.TPAimMethod ~= "InfiniteTP" then return end
-    local key = Aimbot.Settings.TPAimKey or "E"
-    local kc = Util.SafeKeyCode(key)
-    if kc and inp.KeyCode == kc then
-        Aimbot.TPAimInternal.KeyHeld = false
-    end
+    if not Aimbot.Settings.TPAimEnabled or Aimbot.Settings.TPAimMethod ~= "InfiniteTP" then return end
+    local kc = Util.SafeKeyCode(Aimbot.Settings.TPAimKey or "E")
+    if kc and inp.KeyCode == kc then Aimbot.TPAimInternal.KeyHeld = false end
 end))
 
 LoadAimbot()
 
---// ---------------------------------------------------------------------------
---// Public exports
---// ---------------------------------------------------------------------------
+--// Exports
 Aimbot.CancelLock            = CancelLock
 Aimbot.RemoveAVHook          = RemoveAVHook
 Aimbot.RemoveMHTProxy        = RemoveMHTProxy
@@ -2352,38 +2089,33 @@ Aimbot.GetBacktrackGhostTargets = GetBacktrackGhostTargets
 Aimbot.ResolveOwnerCharacter = ResolveOwnerCharacter
 Aimbot.ResolveOwnerPlayer    = ResolveOwnerPlayer
 Aimbot.DebugPrint            = DebugPrint
+Aimbot.PerformWallbang       = PerformWallbang
+Aimbot.PerformMagicBullet    = PerformMagicBullet
+Aimbot.PerformInfiniteTP     = PerformInfiniteTP
+Aimbot.DisableDesyncDuringShot = DisableDesyncDuringShot
+Aimbot.FireClickNoDesync     = FireClickNoDesync
 
-Aimbot.PerformWallbang          = PerformWallbang
-Aimbot.PerformMagicBullet       = PerformMagicBullet
-Aimbot.PerformInfiniteTP        = PerformInfiniteTP
-Aimbot.DisableDesyncDuringShot  = DisableDesyncDuringShot
-Aimbot.FireClickNoDesync        = FireClickNoDesync
-
---// v28: Multi-Point / Visuals / Aim Line exports
+--// v29 exports
+Aimbot.GetCharacterBaseParts   = GetCharacterBaseParts
+Aimbot.IsPointVisibleEx        = IsPointVisibleEx
 Aimbot.SampleVisiblePointsOnPart = SampleVisiblePointsOnPart
-Aimbot.FindNearestPartToMouse    = FindNearestPartToMouse
-Aimbot.DrawMultiPointVisuals     = DrawMultiPointVisuals
-Aimbot.DrawAimLine               = DrawAimLine
-Aimbot.DestroyMultiPointVisuals  = DestroyMultiPointVisuals
+Aimbot.FindNearestPartToMouse  = FindNearestPartToMouse
+Aimbot.DrawMultiPointVisuals   = DrawMultiPointVisuals
+Aimbot.DrawAimLine             = DrawAimLine
+Aimbot.DestroyMultiPointVisuals = DestroyMultiPointVisuals
 
---// ---------------------------------------------------------------------------
---// DIAGNOSTICS
---// ---------------------------------------------------------------------------
+--// Diagnostics
 local function Check(cond, label, detail)
-    local mark = cond and "[OK]  " or "[FAIL]"
-    local line = mark .. " " .. label
-    if detail then line = line .. " — " .. tostring(detail) end
-    warn(line)
+    warn((cond and "[OK]   " or "[FAIL] ") .. label .. (detail and (" — " .. tostring(detail)) or ""))
     return cond and 1 or 0
 end
 local function Diagnose()
-    local passed, failed = 0, 0
-    local function T(cond, label, detail)
-        if Check(cond, label, detail) == 1 then passed = passed + 1
-        else failed = failed + 1 end
+    local p, f = 0, 0
+    local function T(c, l, d)
+        if Check(c, l, d) == 1 then p = p + 1 else f = f + 1 end
     end
     warn("==========================================================")
-    warn("          AirHub Aimbot - DIAGNOSTICS (v28)")
+    warn("          AirHub Aimbot - DIAGNOSTICS (v29)")
     warn("==========================================================")
     T(H ~= nil, "H (AirHub) exists")
     T(Util ~= nil, "Util module present")
@@ -2391,60 +2123,61 @@ local function Diagnose()
     T(RunService ~= nil, "RunService")
     T(UserInputService ~= nil, "UserInputService")
     T(VirtualInputManager ~= nil, "VirtualInputManager")
-    T(ReplicatedStorage ~= nil, "ReplicatedStorage")
     T(LocalPlayer ~= nil, "LocalPlayer")
     T(workspace.CurrentCamera ~= nil, "CurrentCamera")
-    local drawingOK = pcall(function() local d = Drawing.new("Circle"); d:Remove() end)
-    T(drawingOK, "Drawing.new available")
-    local execs = { "hookmetamethod", "hookfunction", "newcclosure", "checkcaller",
-                    "getrawmetatable", "getnamecallmethod", "mousemoverel", "mousemoveabs" }
-    for _, name in ipairs(execs) do T(getExec(name) ~= nil, "executor: " .. name) end
-
-    do
-        local testOK, testErr = pcall(function()
-            local p = Instance.new("Part")
-            p.Shape = Enum.PartType.Ball
-            p.Size = Vector3.new(2, 2, 2)
-            p.Anchored = true
-            p.CanCollide = false
-            p.Parent = workspace
-            local r = SampleVisiblePointsOnPart(p, 3)
-            p:Destroy()
-            assert(type(r) == "table" and type(r.samples) == "table",
-                "SampleVisiblePointsOnPart returned bad structure")
-            assert(#r.samples > 0, "SampleVisiblePointsOnPart returned no samples")
-        end)
-        T(testOK, "Multi-Point: SampleVisiblePointsOnPart works", testErr)
+    T(pcall(function() local d = Drawing.new("Circle"); d:Remove() end), "Drawing.new available")
+    for _, n in ipairs({"hookmetamethod","newcclosure","checkcaller","getnamecallmethod"}) do
+        T(getExec(n) ~= nil, "executor: " .. n)
     end
-
+    T(pcall(function() local c = workspace.CurrentCamera
+        local _ = c:GetPartsObscuringTarget({Vector3.new(0,0,0)}, {})
+    end), "Camera:GetPartsObscuringTarget works")
+    T(pcall(function()
+        local p1 = Instance.new("Part")
+        p1.Shape = Enum.PartType.Ball
+        p1.Size = Vector3.new(2,2,2)
+        p1.Anchored = true
+        p1.Parent = workspace
+        local r = SampleVisiblePointsOnPart(p1, 3)
+        p1:Destroy()
+        assert(type(r.samples) == "table" and #r.samples > 0)
+    end), "SampleVisiblePointsOnPart works")
+    T(pcall(function()
+        local c = Instance.new("Model")
+        local p1 = Instance.new("Part")
+        p1.Name = "Head"
+        p1.Parent = c
+        local hrp = Instance.new("Part")
+        hrp.Name = "HumanoidRootPart"
+        hrp.Parent = c
+        local parts = GetCharacterBaseParts(c)
+        c:Destroy()
+        assert(#parts == 1 and parts[1].Name == "Head")
+    end), "GetCharacterBaseParts filters HumanoidRootPart")
     InvalidateModeCache()
-    local modes = { "Camera", "Mouse", "Raycast", "FindPartOnRay",
-                    "FindPartOnRayWithWhitelist", "FindPartOnRayWithIgnoreList",
-                    "Mouse.Hit/Target" }
-    for _, m in ipairs(modes) do
-        local ok, reason = Aimbot.IsModeAvailable(m)
-        T(ok, "hook: " .. m, reason)
+    for _, m in ipairs({"Camera","Mouse","Raycast","FindPartOnRay",
+                        "FindPartOnRayWithWhitelist","FindPartOnRayWithIgnoreList",
+                        "Mouse.Hit/Target"}) do
+        local ok, r = Aimbot.IsModeAvailable(m)
+        T(ok, "hook: " .. m, r)
     end
-    local exports = { "CancelLock", "GetVisiblePointOnPart", "PredictPartPosition",
-                      "IsModeAvailable", "ShouldBypassWallCheck",
-                      "IsBacktrackEnabled", "IsModeHooked", "ShouldRedirect",
-                      "GetBacktrackGhostTargets", "ResolveOwnerCharacter", "ResolveOwnerPlayer",
-                      "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
-                      "DisableDesyncDuringShot", "FireClickNoDesync",
-                      "PatchShotArgs", "PatchValueRecursive",
-                      "VerifyAndFixHooks", "InvalidateModeCache",
-                      "GetWorkingMethods", "CycleAutowork", "DebugPrint",
-                      "RemoveAVHook", "RemoveMHTProxy",
-                      "SampleVisiblePointsOnPart", "FindNearestPartToMouse",
-                      "DrawMultiPointVisuals", "DrawAimLine",
-                      "DestroyMultiPointVisuals" }
-    for _, name in ipairs(exports) do
-        T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
+    for _, n in ipairs({"CancelLock","GetVisiblePointOnPart","PredictPartPosition",
+                        "IsModeAvailable","ShouldBypassWallCheck","IsBacktrackEnabled",
+                        "IsModeHooked","ShouldRedirect","GetBacktrackGhostTargets",
+                        "ResolveOwnerCharacter","ResolveOwnerPlayer",
+                        "PerformWallbang","PerformMagicBullet","PerformInfiniteTP",
+                        "DisableDesyncDuringShot","FireClickNoDesync",
+                        "PatchShotArgs","PatchValueRecursive","VerifyAndFixHooks",
+                        "InvalidateModeCache","GetWorkingMethods","CycleAutowork","DebugPrint",
+                        "RemoveAVHook","RemoveMHTProxy","GetCharacterBaseParts",
+                        "IsPointVisibleEx","SampleVisiblePointsOnPart","FindNearestPartToMouse",
+                        "DrawMultiPointVisuals","DrawAimLine","DestroyMultiPointVisuals"}) do
+        T(type(Aimbot[n]) == "function", "export: Aimbot." .. n)
     end
     warn("==========================================================")
-    warn(string.format("  RESULT: %d passed, %d failed", passed, failed))
+    warn(string.format("  RESULT: %d passed, %d failed", p, f))
     warn("==========================================================")
-    return passed, failed
+    return p, f
 end
 Aimbot.Diagnose = Diagnose
 task.delay(1, function()
