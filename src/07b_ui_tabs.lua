@@ -1,10 +1,11 @@
 --// AirHub - 07b_ui_tabs.lua
---// Visuals, Anti-Aim (Body + Desync), Movement, Settings tabs.
+--// Visuals, Anti-Aim (Body + Desync + Animation Breaker), Movement, Settings tabs.
 --// Bhop: 2 modes (Old / New) + Space-block fix (hookmetamethod / release pulse).
 --//   New = Counter Blox port (Heartbeat + Jump toggle + TranslateBy airboost).
 --//   SpaceReleasePulse default = false (hookmetamethod достаточно;
 --//   pulse эхо-файрит InputEnded и валит KeyHeld после первого прыжка).
 --// Spider: 3 modes (Default / Pixelwalk / Wallfucker).
+--// Animation Breaker: 5 modes (None / Speed / Freeze / Jitter / Custom) + 11 presets.
 
 local H = getgenv().AirHub
 if not H or not H._UI then warn("[AirHub] 07b: 07a not loaded"); return end
@@ -74,6 +75,9 @@ task.spawn(function()
     local Fly_ClearInstances   = orNoop(Fly.ClearInstances,          "Fly.ClearInstances")
     local StopDesync           = orNoop(AntiAim.StopDesync,          "AntiAim.StopDesync")
     local StartDesync          = orNoop(AntiAim.StartDesync,         "AntiAim.StartDesync")
+    local StartAnimBreaker     = orNoop(AntiAim.StartAnimationBreaker, "AntiAim.StartAnimationBreaker")
+    local StopAnimBreaker      = orNoop(AntiAim.StopAnimationBreaker,  "AntiAim.StopAnimationBreaker")
+    local ApplyAnimPreset      = orNoop(AntiAim.ApplyAnimationPreset,  "AntiAim.ApplyAnimationPreset")
 
     --// ===== VISUALS / WALLHACK normalization =====
     WallHack.Settings        = WallHack.Settings        or {}
@@ -96,6 +100,24 @@ task.spawn(function()
     AntiAim.Desync           = AntiAim.Desync           or { Settings = { Enabled = false, Mode = "Default", Method = "CFrame", X = 5, Y = 5, Z = 5, Random = false, UpdateInterval = 0.05, OldPosDelayEnabled = true, OldPosDelay = 0.5, VoidDepth = -1000, InPlayerOffset = 2, RefreshOnShot = false, RandomRotate = false }, Internal = {} }
     AntiAim.Desync.Settings  = AntiAim.Desync.Settings  or { Enabled = false, Method = "CFrame" }
     AntiAim.Desync.Settings.Method = AntiAim.Desync.Settings.Method or "CFrame"
+
+    --// ===== ANIMATION BREAKER normalization =====
+    AntiAim.AnimationBreaker          = AntiAim.AnimationBreaker          or {}
+    AntiAim.AnimationBreaker.Settings = AntiAim.AnimationBreaker.Settings or {}
+    AntiAim.AnimationBreaker.Internal = AntiAim.AnimationBreaker.Internal or {}
+    AntiAim.AnimationBreaker.Functions= AntiAim.AnimationBreaker.Functions or {}
+    local ABS = AntiAim.AnimationBreaker.Settings
+    if ABS.Enabled        == nil then ABS.Enabled        = false end
+    if ABS.Preset         == nil then ABS.Preset         = "None" end
+    if ABS.Mode           == nil then ABS.Mode           = "None" end
+    if ABS.Speed          == nil then ABS.Speed          = 5 end
+    if ABS.FreezeFrame    == nil then ABS.FreezeFrame    = 0 end
+    if ABS.JitterInterval == nil then ABS.JitterInterval = 0.15 end
+    if ABS.JitterMin      == nil then ABS.JitterMin      = 0.1 end
+    if ABS.JitterMax      == nil then ABS.JitterMax      = 10 end
+    if ABS.ApplyToServer  == nil then ABS.ApplyToServer  = true end
+    if ABS.CustomId       == nil then ABS.CustomId       = "" end
+
     AntiAim.Functions        = AntiAim.Functions        or {}
 
     --// ===== SERVER POSITION =====
@@ -122,16 +144,13 @@ task.spawn(function()
     --// ===== BHOP / SPIDER normalization =====
     Bhop.Settings            = Bhop.Settings            or {}
     Bhop.Settings.Enabled         = Bhop.Settings.Enabled         or false
-    Bhop.Settings.Mode            = Bhop.Settings.Mode            or "New"       -- "Old" | "New"
+    Bhop.Settings.Mode            = Bhop.Settings.Mode            or "New"
     Bhop.Settings.AutoJumpKey     = Bhop.Settings.AutoJumpKey     or "Space"
     if Bhop.Settings.BypassJump == nil then Bhop.Settings.BypassJump = true end
     Bhop.Settings.JumpCooldown    = Bhop.Settings.JumpCooldown    or 0.05
     if Bhop.Settings.AirBoost == nil   then Bhop.Settings.AirBoost   = true end
     Bhop.Settings.AirBoostDivisor = Bhop.Settings.AirBoostDivisor or 5.9
     if Bhop.Settings.BlockSpaceFromGame == nil then Bhop.Settings.BlockSpaceFromGame = true end
-    --// ВАЖНО: SpaceReleasePulse = false по умолчанию.
-    --// Включение pulse через UI шлёт VirtualInputManager:SendKeyEvent(false, Space),
-    --// который эхо-файрит InputEnded и валит KeyHeld. hookmetamethod сам блокирует Space.
     if Bhop.Settings.SpaceReleasePulse  == nil then Bhop.Settings.SpaceReleasePulse  = false end
 
     Bhop.Settings.Spider            = Bhop.Settings.Spider or {}
@@ -429,6 +448,69 @@ task.spawn(function()
         end })
 
     --// ===========================================================
+    --// ANIMATION BREAKER
+    --// ===========================================================
+    local animPresetList = {
+        "None",
+        "Frozen (frame 0)",
+        "Frozen (frame 0.5s)",
+        "Super Fast (10x)",
+        "Very Fast (5x)",
+        "Super Slow (0.1x)",
+        "Reverse (-1x)",
+        "Zero Speed",
+        "Jitter (chaos)",
+        "Jitter (subtle)",
+        "Custom Animation",
+    }
+    local animModeList = { "None", "Speed", "Freeze", "Jitter", "Custom" }
+
+    local animSec = AntiTab:CreateSection({ Name = "Animation Breaker", Side = "Right" })
+    animSec:AddToggle({ Name = "Enabled", Value = ABS.Enabled,
+        Callback = function(v)
+            ABS.Enabled = v
+            if v then StartAnimBreaker() else StopAnimBreaker() end
+        end })
+    animSec:AddDropdown({ Name = "Preset", Value = ABS.Preset or "None", List = animPresetList,
+        Callback = function(v)
+            ABS.Preset = v
+            local ok = ApplyAnimPreset(v)
+            if not ok then ABS.Preset = "None" end
+        end })
+    animSec:AddDropdown({ Name = "Mode", Value = ABS.Mode or "None", List = animModeList,
+        Callback = function(v) ABS.Mode = v end })
+    animSec:AddTextbox({ Name = "Speed (neg = reverse)", Value = tostring(ABS.Speed or 5),
+        Callback = function(v)
+            local n = tonumber(v)
+            if n then ABS.Speed = n end
+        end })
+    animSec:AddSlider({ Name = "Freeze Frame (s)", Value = ABS.FreezeFrame or 0,
+        Min = 0, Max = 3, Decimals = 2,
+        Callback = function(v) ABS.FreezeFrame = v end })
+    animSec:AddSlider({ Name = "Jitter Interval (s)", Value = ABS.JitterInterval or 0.15,
+        Min = 0.02, Max = 1, Decimals = 2,
+        Callback = function(v) ABS.JitterInterval = v end })
+    animSec:AddTextbox({ Name = "Jitter Min Speed", Value = tostring(ABS.JitterMin or 0.1),
+        Callback = function(v)
+            local n = tonumber(v)
+            if n then ABS.JitterMin = n end
+        end })
+    animSec:AddTextbox({ Name = "Jitter Max Speed", Value = tostring(ABS.JitterMax or 10),
+        Callback = function(v)
+            local n = tonumber(v)
+            if n then ABS.JitterMax = n end
+        end })
+    animSec:AddTextbox({ Name = "Custom Animation ID (rbxassetid://...)", Value = ABS.CustomId or "",
+        Callback = function(v) ABS.CustomId = v end })
+    animSec:AddToggle({ Name = "Apply to Server (SetNetworkOwner)", Value = ABS.ApplyToServer ~= false,
+        Callback = function(v) ABS.ApplyToServer = v end })
+    animSec:AddButton({ Name = "Stop Animation Breaker",
+        Callback = function()
+            StopAnimBreaker()
+            ABS.Enabled = false
+        end })
+
+    --// ===========================================================
     --// MOVEMENT
     --// ===========================================================
     local strafeModes  = { "Legit", "Spam" }
@@ -488,7 +570,6 @@ task.spawn(function()
     flySec:AddToggle({ Name = "Use WASD + Space/Ctrl", Value = Fly.Settings.UseKeys ~= false,
         Callback = function(v) Fly.Settings.UseKeys = v end })
 
-    --// ===== Bhop (Old / New + Space-block fix) =====
     local bhopSec = MovementTab:CreateSection({ Name = "Bhop", Side = "Right" })
     bhopSec:AddToggle({ Name = "Enabled", Value = Bhop.Settings.Enabled,
         Callback = function(v)
@@ -519,7 +600,6 @@ task.spawn(function()
         Min = 1, Max = 30, Decimals = 1,
         Callback = function(v) Bhop.Settings.AirBoostDivisor = v end })
 
-    --// ===== Spider (mode + Default settings) =====
     local spiderSec = MovementTab:CreateSection({ Name = "Spider (Bhop assist)", Side = "Right" })
     spiderSec:AddToggle({ Name = "Enabled", Value = Bhop.Settings.Spider.Enabled,
         Callback = function(v) Bhop.Settings.Spider.Enabled = v end })
@@ -534,7 +614,6 @@ task.spawn(function()
         Min = 4, Max = 24,
         Callback = function(v) Bhop.Settings.Spider.RayCount = v end })
 
-    --// ===== Spider: Pixelwalk =====
     local pxwSec = MovementTab:CreateSection({ Name = "Spider: Pixelwalk", Side = "Right" })
     pxwSec:AddSlider({ Name = "Down Range", Value = Bhop.Settings.Spider.Pixelwalk.DownRange,
         Min = 1, Max = 12, Decimals = 1,
@@ -565,7 +644,6 @@ task.spawn(function()
     pxwSec:AddToggle({ Name = "Require Flat Surface", Value = Bhop.Settings.Spider.Pixelwalk.RequireFlat ~= false,
         Callback = function(v) Bhop.Settings.Spider.Pixelwalk.RequireFlat = v end })
 
-    --// ===== Spider: Wallfucker =====
     local wfkSec = MovementTab:CreateSection({ Name = "Spider: Wallfucker", Side = "Right" })
     wfkSec:AddSlider({ Name = "Chance per Frame (0..1)", Value = Bhop.Settings.Spider.Wallfucker.Chance,
         Min = 0, Max = 1, Decimals = 2,
@@ -582,7 +660,6 @@ task.spawn(function()
         Min = 0, Max = 50, Decimals = 1,
         Callback = function(v) Bhop.Settings.Spider.Wallfucker.PushStrength = v end })
 
-    --// ===== Speed =====
     local speedSec = MovementTab:CreateSection({ Name = "Speed", Side = "Right" })
     speedSec:AddToggle({ Name = "Enabled", Value = Speed.Settings.Enabled,
         Callback = function(v) Speed.Settings.Enabled = v end })
@@ -597,14 +674,12 @@ task.spawn(function()
     speedSec:AddToggle({ Name = "In Air Only", Value = Speed.Settings.InAirOnly or false,
         Callback = function(v) Speed.Settings.InAirOnly = v end })
 
-    --// ===== FastStop =====
     local fsSec = MovementTab:CreateSection({ Name = "FastStop" })
     fsSec:AddToggle({ Name = "Enabled", Value = FastStop.Settings.Enabled,
         Callback = function(v) FastStop.Settings.Enabled = v end })
     fsSec:AddToggle({ Name = "Also stop Y velocity (falling)", Value = FastStop.Settings.StopY or false,
         Callback = function(v) FastStop.Settings.StopY = v end })
 
-    --// ===== Noclip =====
     local noclipSec = MovementTab:CreateSection({ Name = "Noclip", Side = "Right" })
     noclipSec:AddToggle({ Name = "Enabled", Value = Noclip.Settings.Enabled,
         Callback = function(v) Noclip.Settings.Enabled = v end })
