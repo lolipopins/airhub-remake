@@ -1,6 +1,6 @@
 --// AirHub - 07a_ui_core.lua
---// v25: Multi-Point (mesh-accurate, chams-style Silhouette / Grid),
---//      Multi-Point Visuals (points), Aim Line (separate).
+--// v26: WallCheck Method (Raycast / CameraObscuring), Multi-Point v2 UI
+--//      (IncludeAllParts, RefineEdges, OnlyMeshHits), Aim Line separate.
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
 
@@ -52,17 +52,17 @@ FastStop       = orTable(FastStop,       "FastStop")
 AutoStrafer    = orTable(AutoStrafer,    "AutoStrafer")
 Noclip         = orTable(Noclip,         "Noclip")
 
-local CancelLock           = orNoop(Aimbot.CancelLock,                "Aimbot.CancelLock")
-local RemoveAVHook         = orNoop(Aimbot.RemoveAVHook,              "Aimbot.RemoveAVHook")
-local RemoveMHTProxy       = orNoop(Aimbot.RemoveMHTProxy,            "Aimbot.RemoveMHTProxy")
-local ApplyGlowToAll       = orNoop(WallHack.ApplyGlowToAll,          "WallHack.ApplyGlowToAll")
-local StartServerPosition  = orNoop(ServerPosition.Start,             "ServerPosition.Start")
-local StopServerPosition   = orNoop(ServerPosition.Stop,              "ServerPosition.Stop")
-local Fly_ClearInstances   = orNoop(Fly.ClearInstances,               "Fly.ClearInstances")
-local AS_ReleaseAll        = orNoop(AutoStrafer.ReleaseAll,           "AutoStrafer.ReleaseAll")
-local StopDesync           = orNoop(AntiAim.StopDesync,               "AntiAim.StopDesync")
-local StartDesync          = orNoop(AntiAim.StartDesync,              "AntiAim.StartDesync")
-local CleanupAntiAim       = orNoop(AntiAim.CleanupAntiAim,           "AntiAim.CleanupAntiAim")
+local CancelLock           = orNoop(Aimbot.CancelLock,        "Aimbot.CancelLock")
+local RemoveAVHook         = orNoop(Aimbot.RemoveAVHook,      "Aimbot.RemoveAVHook")
+local RemoveMHTProxy       = orNoop(Aimbot.RemoveMHTProxy,    "Aimbot.RemoveMHTProxy")
+local ApplyGlowToAll       = orNoop(WallHack.ApplyGlowToAll,  "WallHack.ApplyGlowToAll")
+local StartServerPosition  = orNoop(ServerPosition.Start,     "ServerPosition.Start")
+local StopServerPosition   = orNoop(ServerPosition.Stop,      "ServerPosition.Stop")
+local Fly_ClearInstances   = orNoop(Fly.ClearInstances,       "Fly.ClearInstances")
+local AS_ReleaseAll        = orNoop(AutoStrafer.ReleaseAll,   "AutoStrafer.ReleaseAll")
+local StopDesync           = orNoop(AntiAim.StopDesync,       "AntiAim.StopDesync")
+local StartDesync          = orNoop(AntiAim.StartDesync,      "AntiAim.StartDesync")
+local CleanupAntiAim       = orNoop(AntiAim.CleanupAntiAim,   "AntiAim.CleanupAntiAim")
 local AA_BIND_NAME         = AntiAim.AA_BIND_NAME or "AirHubAntiAim"
 
 local function ApplyAllEnabledStates()
@@ -81,8 +81,7 @@ local function ApplyAllEnabledStates()
     else
         StopDesync()
     end
-    if Hg.ServerPosition and Hg.ServerPosition.Settings
-       and Hg.ServerPosition.Settings.Enabled then
+    if Hg.ServerPosition and Hg.ServerPosition.Settings and Hg.ServerPosition.Settings.Enabled then
         StopServerPosition()
         task.defer(function()
             if getgenv().AirHub and getgenv().AirHub.ServerPosition
@@ -131,9 +130,6 @@ end
 H._UI = H._UI or {}
 H._UI.ApplyAllEnabledStates = ApplyAllEnabledStates
 
---// ---------------------------------------------------------------------------
---// UI bootstrap
---// ---------------------------------------------------------------------------
 task.delay(math.random(1, 3), function()
     if H.ShuttingDown then return end
     local Library
@@ -160,9 +156,7 @@ task.delay(math.random(1, 3), function()
         if type(Library.Unload) == "function" then pcall(function() Library:Unload() end) return end
         if type(Library.Destroy) == "function" then pcall(function() Library:Destroy() end) return end
     end
-    H._UI.SafeShow   = SafeShow
-    H._UI.SafeHide   = SafeHide
-    H._UI.SafeUnload = SafeUnload
+    H._UI.SafeShow, H._UI.SafeHide, H._UI.SafeUnload = SafeShow, SafeHide, SafeUnload
 
     H._UI.MenuVisible = true
     Track(UserInputService.InputBegan:Connect(function(inp, gpe)
@@ -195,9 +189,7 @@ task.delay(math.random(1, 3), function()
             if WallHack.Visuals.SelfESP then WallHack.Visuals.SelfESP.Enabled = false end
         end
         if AntiAim.Settings then AntiAim.Settings.Enabled = false end
-        if AntiAim.Desync and AntiAim.Desync.Settings then
-            AntiAim.Desync.Settings.Enabled = false
-        end
+        if AntiAim.Desync and AntiAim.Desync.Settings then AntiAim.Desync.Settings.Enabled = false end
         if ServerPosition.Settings then ServerPosition.Settings.Enabled = false end
         if Fly.Settings then Fly.Settings.Enabled = false end
         if Bhop.Settings then Bhop.Settings.Enabled = false end
@@ -206,14 +198,12 @@ task.delay(math.random(1, 3), function()
         if AutoStrafer.Settings then AutoStrafer.Settings.Enabled = false end
         if Noclip.Settings then Noclip.Settings.Enabled = false end
         if Fly.Internal then Fly.Internal.Active = false end
-        if Bhop.Internal then
-            Bhop.Internal.KeyHeld = false
-            Bhop.Internal.Active = false
-        end
+        if Bhop.Internal then Bhop.Internal.KeyHeld = false; Bhop.Internal.Active = false end
         if AutoStrafer.Internal then AutoStrafer.Internal.Active = false end
         if Speed.Internal then Speed.Internal.Active = false end
         if Noclip.Internal then Noclip.Internal.Active = false end
         if FastStop.Internal then FastStop.Internal.LastActive = false end
+
         pcall(function() CancelLock() end)
         pcall(function() if Aimbot.FOVCircle then Aimbot.FOVCircle:Remove() end end)
         pcall(function()
@@ -256,9 +246,7 @@ task.delay(math.random(1, 3), function()
         pcall(function() if H.ErrorText then H.ErrorText:Remove() end end)
         pcall(function()
             if H.ActiveLogs then
-                for _, log in ipairs(H.ActiveLogs) do
-                    if log.text then log.text:Remove() end
-                end
+                for _, log in ipairs(H.ActiveLogs) do if log.text then log.text:Remove() end end
             end
         end)
         H.ActiveLogs = {}
@@ -268,11 +256,8 @@ task.delay(math.random(1, 3), function()
         getgenv().AirHub = nil
         pcall(function()
             local t = Drawing.new("Text")
-            t.Text    = "AirHub unloaded"
-            t.Size    = 20
-            t.Color   = Color3.fromRGB(255, 80, 80)
-            t.Center  = true
-            t.Outline = true
+            t.Text = "AirHub unloaded"; t.Size = 20
+            t.Color = Color3.fromRGB(255, 80, 80); t.Center = true; t.Outline = true
             t.Position = workspace.CurrentCamera.ViewportSize / 2
             task.delay(2, function() t:Remove() end)
         end)
@@ -280,10 +265,8 @@ task.delay(math.random(1, 3), function()
 
     local MainFrame = Library:CreateWindow({
         Name = "AirHub",
-        Themeable = {
-            Image = "96742921028995",
-            Info = "Strafe Helper | Silent Aim | Ghost | Fly | Configs", Credit = false,
-        },
+        Themeable = { Image = "96742921028995",
+            Info = "Strafe Helper | Silent Aim | Ghost | Fly | Configs", Credit = false },
     })
     H._UI.MainFrame   = MainFrame
     H._UI.AimbotTab   = MainFrame:CreateTab({ Name = "Aimbot" })
@@ -296,48 +279,38 @@ task.delay(math.random(1, 3), function()
 
     local teamModes      = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
     local wallCheckModes = { "Fast", "Perfect" }
-
+    local wallCheckMethods = { "Raycast", "CameraObscuring" }
     local silentAimModes = {
         "Camera", "Mouse", "Raycast",
         "FindPartOnRay", "FindPartOnRayWithWhitelist",
         "FindPartOnRayWithIgnoreList", "Mouse.Hit/Target",
     }
-
     local wallbangModes = {
         "RemotePatch", "RemotePatchFull", "RayIgnore", "RayNewHook",
         "MuzzleTeleport", "MouseHit", "ScreenPointToRay", "CameraTP",
     }
-
-    local mpStyles = { "Grid", "Silhouette" }
+    local mpStyles = { "Grid", "Silhouette", "MeshOnly" }
 
     local AS = (Aimbot and Aimbot.Settings) or {}
-    local function aSet(key, val) if Aimbot.Settings then Aimbot.Settings[key] = val end end
-    local function aSetTeam(key, val)
-        if Aimbot.Settings and Aimbot.Settings.TeamCheck then
-            Aimbot.Settings.TeamCheck[key] = val
-        end
+    local function aSet(k, v) if Aimbot.Settings then Aimbot.Settings[k] = v end end
+    local function aSetTeam(k, v)
+        if Aimbot.Settings and Aimbot.Settings.TeamCheck then Aimbot.Settings.TeamCheck[k] = v end
     end
-    local function aSetAS(key, val)
-        if Aimbot.Settings and Aimbot.Settings.AutoShoot then
-            Aimbot.Settings.AutoShoot[key] = val
-        end
+    local function aSetAS(k, v)
+        if Aimbot.Settings and Aimbot.Settings.AutoShoot then Aimbot.Settings.AutoShoot[k] = v end
     end
-    local function aSetFov(key, val)
-        if Aimbot.FOVSettings then Aimbot.FOVSettings[key] = val end
+    local function aSetFov(k, v) if Aimbot.FOVSettings then Aimbot.FOVSettings[k] = v end end
+    local function aSetMP(k, v)
+        if Aimbot.Settings and Aimbot.Settings.MultiPoint then Aimbot.Settings.MultiPoint[k] = v end
     end
-    local function aSetMP(key, val)
-        if Aimbot.Settings and Aimbot.Settings.MultiPoint then
-            Aimbot.Settings.MultiPoint[key] = val
-        end
-    end
-    local function aSetMPV(key, val)
+    local function aSetMPV(k, v)
         if Aimbot.Settings and Aimbot.Settings.MultiPointVisuals then
-            Aimbot.Settings.MultiPointVisuals[key] = val
+            Aimbot.Settings.MultiPointVisuals[k] = v
         end
     end
-    local function aSetLine(key, val)
+    local function aSetLine(k, v)
         if Aimbot.Settings and Aimbot.Settings.AimLineVisuals then
-            Aimbot.Settings.AimLineVisuals[key] = val
+            Aimbot.Settings.AimLineVisuals[k] = v
         end
     end
 
@@ -349,14 +322,17 @@ task.delay(math.random(1, 3), function()
         Callback = function(v) aSet("Toggle", v) end })
     secA:AddToggle({ Name = "360 Ignore FOV", Value = AS.IgnoreFOV or false,
         Callback = function(v) aSet("IgnoreFOV", v) end })
-    secA:AddToggle({ Name = "Check visibility from player on TP", Value = AS.CheckFromPlayerOnTP ~= false,
+    secA:AddToggle({ Name = "Check visibility from player on TP",
+        Value = AS.CheckFromPlayerOnTP ~= false,
         Callback = function(v) aSet("CheckFromPlayerOnTP", v) end })
     secA:AddDropdown({ Name = "Lock Part", Value = AS.LockPart or "Head",
         List = { "Head", "Torso", "Nearest" },
         Callback = function(v) aSet("LockPart", v) end })
-    secA:AddToggle({ Name = "Fallback to visible parts", Value = AS.FallbackToVisible or false,
+    secA:AddToggle({ Name = "Fallback to visible parts",
+        Value = AS.FallbackToVisible or false,
         Callback = function(v) aSet("FallbackToVisible", v) end })
-    secA:AddTextbox({ Name = "Aim Key (MouseButton1/2 or KeyCode)", Value = AS.TriggerKey or "MouseButton2",
+    secA:AddTextbox({ Name = "Aim Key (MouseButton1/2 or KeyCode)",
+        Value = AS.TriggerKey or "MouseButton2",
         Callback = function(v) aSet("TriggerKey", v) end })
     secA:AddDropdown({ Name = "Aim Method", Value = AS.AimMethod or "Smooth",
         List = { "Smooth", "Instant" },
@@ -369,7 +345,8 @@ task.delay(math.random(1, 3), function()
         Callback = function(v) aSet("AimbotHz", v) end })
     secA:AddToggle({ Name = "Target NPCs (rigs/dummies)", Value = AS.TargetNPCs or false,
         Callback = function(v) aSet("TargetNPCs", v) end })
-    secA:AddTextbox({ Name = "NPC name filter (optional, substring)", Value = AS.NPCNameFilter or "",
+    secA:AddTextbox({ Name = "NPC name filter (optional)",
+        Value = AS.NPCNameFilter or "",
         Callback = function(v) aSet("NPCNameFilter", v) end })
 
     --// ==== Prediction ====
@@ -396,14 +373,14 @@ task.delay(math.random(1, 3), function()
     })
     secMP:AddSlider({
         Name = "Density (rays per axis)",
-        Value = MP.Density or 3,
+        Value = MP.Density or 4,
         Min = 2, Max = 8,
         Callback = function(v) aSetMP("Density", math.floor(v)) end,
     })
     secMP:AddSlider({
         Name = "Jitter Sub-rays (per missed cell)",
-        Value = MP.JitterTries or 3,
-        Min = 0, Max = 6,
+        Value = MP.JitterTries or 4,
+        Min = 0, Max = 8,
         Callback = function(v) aSetMP("JitterTries", math.floor(v)) end,
     })
     secMP:AddToggle({
@@ -411,11 +388,26 @@ task.delay(math.random(1, 3), function()
         Value = MP.AdaptiveDensity ~= false,
         Callback = function(v) aSetMP("AdaptiveDensity", v) end,
     })
+    secMP:AddToggle({
+        Name = "Refine edges (silhouette sub-sampling)",
+        Value = MP.RefineEdges ~= false,
+        Callback = function(v) aSetMP("RefineEdges", v) end,
+    })
     secMP:AddSlider({
         Name = "Max rays per part",
-        Value = MP.MaxRaysPerPart or 64,
-        Min = 16, Max = 200,
+        Value = MP.MaxRaysPerPart or 96,
+        Min = 16, Max = 300,
         Callback = function(v) aSetMP("MaxRaysPerPart", math.floor(v)) end,
+    })
+    secMP:AddToggle({
+        Name = "Include ALL parts (R6+R15+accessories)",
+        Value = MP.IncludeAllParts ~= false,
+        Callback = function(v) aSetMP("IncludeAllParts", v) end,
+    })
+    secMP:AddToggle({
+        Name = "Apply to Nearest mode",
+        Value = MP.ApplyToNearest ~= false,
+        Callback = function(v) aSetMP("ApplyToNearest", v) end,
     })
 
     --// ==== Multi-Point Visuals ====
@@ -438,9 +430,21 @@ task.delay(math.random(1, 3), function()
         Callback = function(v) aSetMPV("ShowAllParts", v) end,
     })
     secMPV:AddToggle({
+        Name = "Only Mesh Hits (hide miss dots)",
+        Value = MPV.OnlyMeshHits ~= false,
+        Callback = function(v)
+            aSetMPV("OnlyMeshHits", v)
+            --// keep the old ShowMisses flag in sync
+            aSetMPV("ShowMisses", not v)
+        end,
+    })
+    secMPV:AddToggle({
         Name = "Show Misses",
-        Value = MPV.ShowMisses ~= false,
-        Callback = function(v) aSetMPV("ShowMisses", v) end,
+        Value = MPV.ShowMisses == true,
+        Callback = function(v)
+            aSetMPV("ShowMisses", v)
+            aSetMPV("OnlyMeshHits", not v)
+        end,
     })
     secMPV:AddSlider({
         Name = "Point Radius",
@@ -485,9 +489,15 @@ task.delay(math.random(1, 3), function()
     local secW = H._UI.AimbotTab:CreateSection({ Name = "Visibility", Side = "Right" })
     secW:AddToggle({ Name = "WallCheck", Value = AS.WallCheck or false,
         Callback = function(v) aSet("WallCheck", v) end })
-    secW:AddDropdown({ Name = "WallCheck Mode", Value = AS.WallCheckMode or "Perfect",
+    secW:AddDropdown({ Name = "WallCheck Mode",
+        Value = AS.WallCheckMode or "Perfect",
         List = wallCheckModes,
         Callback = function(v) aSet("WallCheckMode", v) end })
+    --// v29: choose the wall check backend
+    secW:AddDropdown({ Name = "WallCheck Method",
+        Value = AS.WallCheckMethod or "Raycast",
+        List = wallCheckMethods,
+        Callback = function(v) aSet("WallCheckMethod", v) end })
     secW:AddToggle({ Name = "Delay Shot", Value = AS.DelayShot ~= false,
         Callback = function(v) aSet("DelayShot", v) end })
     secW:AddToggle({ Name = "Alive Check", Value = AS.AliveCheck ~= false,
@@ -510,20 +520,19 @@ task.delay(math.random(1, 3), function()
     local modeStatusLabel = nil
     local function refreshModeLabel()
         if not modeStatusLabel then return end
-        local txt = "Mode: " .. tostring(AS.SilentAimMode or "Camera")
-        pcall(function() modeStatusLabel:SetLabel(txt) end)
+        pcall(function()
+            modeStatusLabel:SetLabel("Mode: " .. tostring(AS.SilentAimMode or "Camera"))
+        end)
     end
     secD:AddDropdown({ Name = "Mode", Value = AS.SilentAimMode or "Camera",
         List = silentAimModes,
         Callback = function(v)
             aSet("SilentAimMode", v)
             if Aimbot.Internal then Aimbot.Internal.LastManageKey = nil end
-            local isAVMode = (v == "Raycast"
-                              or v == "Raycast v2"
-                              or v == "FindPartOnRay"
-                              or v == "FindPartOnRayWithWhitelist"
-                              or v == "FindPartOnRayWithIgnoreList")
-            if not isAVMode and Aimbot.RemoveAVHook then pcall(Aimbot.RemoveAVHook) end
+            local isAV = (v == "Raycast" or v == "FindPartOnRay"
+                          or v == "FindPartOnRayWithWhitelist"
+                          or v == "FindPartOnRayWithIgnoreList")
+            if not isAV and Aimbot.RemoveAVHook then pcall(Aimbot.RemoveAVHook) end
             if v ~= "Mouse.Hit/Target" and Aimbot.RemoveMHTProxy then pcall(Aimbot.RemoveMHTProxy) end
             refreshModeLabel()
         end })
@@ -531,19 +540,21 @@ task.delay(math.random(1, 3), function()
         Callback = function(v)
             aSet("UseBacktrack", v)
             if v then
-                local ok = H.Exploits and H.Exploits.Settings and H.Exploits.Settings.BacktrackEnabled
-                if not ok then
-                    warn("[AirHub] Use Backtrack: H.Exploits не загружен или Backtrack не включён в Exploits tab.")
+                local ok2 = H.Exploits and H.Exploits.Settings and H.Exploits.Settings.BacktrackEnabled
+                if not ok2 then
+                    warn("[AirHub] Use Backtrack: H.Exploits не загружен или Backtrack не включён.")
                 end
             end
         end })
-    secD:AddToggle({ Name = "Aim At Ghost (experimental)", Value = AS.BacktrackAimAtGhost or false,
+    secD:AddToggle({ Name = "Aim At Ghost (experimental)",
+        Value = AS.BacktrackAimAtGhost or false,
         Callback = function(v) aSet("BacktrackAimAtGhost", v) end })
     do
-        local okLabel = pcall(function()
-            modeStatusLabel = secD:AddLabel({ Name = "Mode Status", Text = "Mode: " .. tostring(AS.SilentAimMode or "Camera") })
+        local ok2 = pcall(function()
+            modeStatusLabel = secD:AddLabel({ Name = "Mode Status",
+                Text = "Mode: " .. tostring(AS.SilentAimMode or "Camera") })
         end)
-        if not okLabel then modeStatusLabel = nil end
+        if not ok2 then modeStatusLabel = nil end
     end
     task.spawn(function()
         while not H.ShuttingDown do
@@ -554,8 +565,8 @@ task.delay(math.random(1, 3), function()
 
     --// ==== Wallbang ====
     local secWB = H._UI.AimbotTab:CreateSection({ Name = "Wallbang", Side = "Right" })
-    local function aSetWB(key, val)
-        if Aimbot.Settings then Aimbot.Settings[key] = val end
+    local function aSetWB(k, v)
+        if Aimbot.Settings then Aimbot.Settings[k] = v end
     end
     secWB:AddToggle({ Name = "Enabled", Value = AS.WallbangEnabled or false,
         Callback = function(v) aSetWB("WallbangEnabled", v) end })
@@ -577,8 +588,8 @@ task.delay(math.random(1, 3), function()
 
     --// ==== TP Aim ====
     local secTP = H._UI.AimbotTab:CreateSection({ Name = "TP Aim", Side = "Right" })
-    local function aSetTP(key, val)
-        if Aimbot.Settings then Aimbot.Settings[key] = val end
+    local function aSetTP(k, v)
+        if Aimbot.Settings then Aimbot.Settings[k] = v end
     end
     secTP:AddToggle({ Name = "Enabled", Value = AS.TPAimEnabled or false,
         Callback = function(v) aSetTP("TPAimEnabled", v) end })
@@ -587,7 +598,8 @@ task.delay(math.random(1, 3), function()
         Callback = function(v) aSetTP("TPAimMethod", v) end })
     secTP:AddTextbox({ Name = "InfiniteTP Key (KeyCode)", Value = AS.TPAimKey or "E",
         Callback = function(v) if v and v ~= "" then aSetTP("TPAimKey", v) end end })
-    secTP:AddTextbox({ Name = "TP Distance (studs)", Value = tostring(AS.TPAimDistance or 5),
+    secTP:AddTextbox({ Name = "TP Distance (studs)",
+        Value = tostring(AS.TPAimDistance or 5),
         Callback = function(v)
             local n = tonumber(v)
             if n and n > 0 then aSetTP("TPAimDistance", n) end
@@ -598,9 +610,11 @@ task.delay(math.random(1, 3), function()
 
     --// ==== Auto Shoot ====
     local secAS = H._UI.AimbotTab:CreateSection({ Name = "Auto Shoot", Side = "Right" })
-    secAS:AddToggle({ Name = "Enabled", Value = (AS.AutoShoot and AS.AutoShoot.Enabled) or false,
+    secAS:AddToggle({ Name = "Enabled",
+        Value = (AS.AutoShoot and AS.AutoShoot.Enabled) or false,
         Callback = function(v) aSetAS("Enabled", v) end })
-    secAS:AddToggle({ Name = "Only when aiming", Value = (AS.AutoShoot and AS.AutoShoot.OnlyWhenAiming) ~= false,
+    secAS:AddToggle({ Name = "Only when aiming",
+        Value = (AS.AutoShoot and AS.AutoShoot.OnlyWhenAiming) ~= false,
         Callback = function(v) aSetAS("OnlyWhenAiming", v) end })
     secAS:AddTextbox({ Name = "Manual delay (s)",
         Value = tostring((AS.AutoShoot and AS.AutoShoot.FireRate) or 0.05),
