@@ -1,4 +1,6 @@
 --// AirHub - 02_aimbot.lua
+--// v26: Multi-Point targeting (Head/Torso/Arms/Legs presets) + Visuals
+--//      (Drawing.Circle points + Drawing.Line to nearest/locked target).
 --// v25: Logging/Sounds init moved to top so shots log before 07b loads.
 --// H.Sound aliased to H.Sounds. Fallback Util.AddLog if missing.
 --// Modes: Camera / Mouse / Raycast / FindPartOnRay* / Mouse.Hit/Target
@@ -126,6 +128,27 @@ H.Aimbot = {
         IgnoreGameProcessed = true,
         Debug = true,
 
+        --// ==== Multi-Point targeting ====
+        --// Presets: HeadOnly | HeadTorso | HeadTorsoArms | HeadTorsoLegs | Full
+        MultiPoint = {
+            Enabled           = false,
+            Mode              = "HeadTorso",
+            UseNearestToMouse = true,
+        },
+
+        --// ==== Multi-Point + Line visualization ====
+        MultiPointVisuals = {
+            Enabled        = false,
+            PointColor     = Color3.fromRGB(255, 100, 100),
+            PointRadius    = 5,
+            PointFilled    = true,
+            ShowLine       = true,
+            LineColor      = Color3.fromRGB(255, 200, 70),
+            LineThickness  = 2,
+            -- "Mouse" | "Camera" | "PlayerHRP"
+            LineFrom       = "Mouse",
+        },
+
         AutoShoot = {
             Enabled = false,
             ShootKey = "MouseButton1",
@@ -203,6 +226,16 @@ local VISIBLE_PARTS = {
     "Torso", "Left Arm", "Right Arm",
 }
 
+--// ==== Multi-Point presets ====
+local MULTIPOINT_PRESETS = {
+    HeadOnly      = { "Head" },
+    HeadTorso     = { "Head", "UpperTorso", "LowerTorso" },
+    HeadTorsoArms = { "Head", "UpperTorso", "LowerTorso", "Left Arm", "Right Arm" },
+    HeadTorsoLegs = { "Head", "UpperTorso", "LowerTorso", "Left Leg", "Right Leg" },
+    Full          = { "Head", "UpperTorso", "LowerTorso",
+                      "Left Arm", "Right Arm", "Left Leg", "Right Leg" },
+}
+
 local function ShouldBypassWallCheck()
     return Aimbot.Settings.TPAimEnabled or Aimbot.Settings.WallbangEnabled
 end
@@ -278,6 +311,23 @@ local function GetActualPartName(lockPart)
         return { "Torso", "UpperTorso", "LowerTorso" }
     end
     return { lockPart }
+end
+
+--// ==== Multi-Point helpers ====
+local function GetMultiPointParts(char)
+    if not char then return nil end
+    local mp = Aimbot.Settings.MultiPoint
+    if not mp or not mp.Enabled then return nil end
+    local names = MULTIPOINT_PRESETS[mp.Mode or "HeadTorso"] or MULTIPOINT_PRESETS.HeadTorso
+    local out = {}
+    for _, name in ipairs(names) do
+        local p = char:FindFirstChild(name)
+        if p and p:IsA("BasePart") and IsAlive(p) then
+            table.insert(out, p)
+        end
+    end
+    if #out == 0 then return nil end
+    return out
 end
 
 local function GetMousePos()
@@ -468,6 +518,38 @@ local function GetVisiblePointOnPart(origin, part)
     return nil
 end
 
+--// ==== Multi-Point picker: returns (part, point) of best visible point ====
+local function PickMultiPointTarget(char, origin)
+    local parts = GetMultiPointParts(char)
+    if not parts then return nil, nil end
+
+    local mousePos   = GetMousePos()
+    local useNearest = Aimbot.Settings.MultiPoint.UseNearestToMouse ~= false
+    local bestPart, bestPoint, bestDist = nil, nil, math.huge
+
+    for _, p in ipairs(parts) do
+        local pt = GetVisiblePointOnPart(origin, p)
+        if pt then
+            local screen, on = workspace.CurrentCamera:WorldToViewportPoint(pt)
+            if on then
+                local d
+                if useNearest then
+                    d = (mousePos - Vector2.new(screen.X, screen.Y)).Magnitude
+                else
+                    d = (pt - origin).Magnitude
+                end
+                if d < bestDist then
+                    bestDist  = d
+                    bestPart  = p
+                    bestPoint = pt
+                end
+            end
+        end
+    end
+
+    return bestPart, bestPoint
+end
+
 local function FindNearestPartToMouse(char, origin)
     if not char then return nil end
     local mousePos = GetMousePos()
@@ -581,7 +663,13 @@ local function GetClosestPlayer()
         local origin = GetCheckOrigin()
         local lockPart = Aimbot.Settings.LockPart
         local part
-        if lockPart == "Nearest" then
+
+        --// v26: Multi-Point first, then fall back to normal logic.
+        local mpPart, mpPoint = PickMultiPointTarget(targetChar, origin)
+        if mpPart then
+            part = mpPart
+            Aimbot.Internal.CachedAimPos = mpPoint
+        elseif lockPart == "Nearest" then
             part = FindNearestPartToMouse(targetChar, origin)
         else
             local preferred = GetActualPartName(lockPart)
@@ -637,7 +725,12 @@ local function GetClosestPlayer()
             local charTarget = cand.character
             local lockPart = Aimbot.Settings.LockPart
             local targetPart = nil
-            if lockPart == "Nearest" then
+
+            --// v26: Multi-Point first.
+            local mpPart, mpPoint = PickMultiPointTarget(charTarget, origin)
+            if mpPart then
+                targetPart = mpPart
+            elseif lockPart == "Nearest" then
                 targetPart = FindNearestPartToMouse(charTarget, origin)
             else
                 local preferred = GetActualPartName(lockPart)
@@ -679,6 +772,140 @@ local function GetClosestPlayer()
         CancelLock()
     end
 end
+
+--// ===========================================================================
+--// v26: Multi-Point + Line visualization (Drawing API)
+--// ===========================================================================
+local MPV = {
+    Points = {},  -- pool of Drawing.Circle
+    Line   = nil, -- Drawing.Line
+}
+
+local function EnsureMPVPoint(i)
+    local d = MPV.Points[i]
+    if not d then
+        d = Drawing.new("Circle")
+        d.NumSides     = 16
+        d.Thickness    = 1
+        d.Transparency = 1
+        d.ZIndex       = 3
+        MPV.Points[i]  = d
+    end
+    return d
+end
+
+local function EnsureMPVLine()
+    if not MPV.Line then
+        MPV.Line = Drawing.new("Line")
+        MPV.Line.Transparency = 1
+        MPV.Line.ZIndex       = 3
+    end
+    return MPV.Line
+end
+
+local function HideMPV()
+    for _, d in ipairs(MPV.Points) do
+        pcall(function() d.Visible = false end)
+    end
+    if MPV.Line then pcall(function() MPV.Line.Visible = false end) end
+end
+
+local function DrawMultiPointVisuals()
+    local cfg = Aimbot.Settings.MultiPointVisuals
+    if not cfg or not cfg.Enabled then HideMPV() return end
+
+    local char = GetLockedCharacter()
+    if not char then HideMPV() return end
+
+    local mp = Aimbot.Settings.MultiPoint
+    local presetName = (mp and mp.Mode) or "HeadTorso"
+    local names = MULTIPOINT_PRESETS[presetName] or MULTIPOINT_PRESETS.HeadTorso
+
+    local cam   = workspace.CurrentCamera
+    local shown = 0
+
+    for _, name in ipairs(names) do
+        local p = char:FindFirstChild(name)
+        if p and p:IsA("BasePart") and IsAlive(p) then
+            local worldPt = PredictPartPosition(p)
+            local screen, on = cam:WorldToViewportPoint(worldPt)
+            shown = shown + 1
+            local d = EnsureMPVPoint(shown)
+            if on then
+                d.Position = Vector2.new(screen.X, screen.Y)
+                d.Radius   = cfg.PointRadius or 5
+                d.Color    = cfg.PointColor or Color3.fromRGB(255, 100, 100)
+                d.Filled   = cfg.PointFilled ~= false
+                d.Visible  = true
+            else
+                d.Visible  = false
+            end
+        end
+    end
+    -- hide leftover circles from previous frame
+    for i = shown + 1, #MPV.Points do
+        pcall(function() MPV.Points[i].Visible = false end)
+    end
+
+    --// Line to aim point
+    if cfg.ShowLine then
+        local aimPoint = Aimbot.Internal.CachedAimPos
+        if typeof(aimPoint) ~= "Vector3" then
+            local lp = Aimbot.LockPartInstance
+            if lp and IsAlive(lp) then
+                aimPoint = PredictPartPosition(lp)
+            end
+        end
+
+        if typeof(aimPoint) == "Vector3" then
+            local line = EnsureMPVLine()
+            local fromV2
+            local lineFrom = cfg.LineFrom or "Mouse"
+
+            if lineFrom == "PlayerHRP" then
+                local lc = LocalPlayer.Character
+                local hrp = lc and lc:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local s, on = cam:WorldToViewportPoint(hrp.Position)
+                    if on then fromV2 = Vector2.new(s.X, s.Y) end
+                end
+            elseif lineFrom == "Camera" then
+                local s, on = cam:WorldToViewportPoint(cam.CFrame.Position)
+                if on then fromV2 = Vector2.new(s.X, s.Y) end
+            else
+                fromV2 = GetMousePos()  -- "Mouse"
+            end
+
+            local toScreen, toOn = cam:WorldToViewportPoint(aimPoint)
+            if fromV2 and toOn then
+                line.From      = fromV2
+                line.To        = Vector2.new(toScreen.X, toScreen.Y)
+                line.Color     = cfg.LineColor or Color3.fromRGB(255, 200, 70)
+                line.Thickness = cfg.LineThickness or 2
+                line.Visible   = true
+            else
+                line.Visible = false
+            end
+        elseif MPV.Line then
+            MPV.Line.Visible = false
+        end
+    elseif MPV.Line then
+        MPV.Line.Visible = false
+    end
+end
+
+local function DestroyMultiPointVisuals()
+    for _, d in ipairs(MPV.Points) do
+        pcall(function() d:Remove() end)
+    end
+    MPV.Points = {}
+    if MPV.Line then
+        pcall(function() MPV.Line:Remove() end)
+        MPV.Line = nil
+    end
+end
+
+--// ===========================================================================
 
 local function LogShot(targetChar, targetName, startHealth, hitPartName, wasVisible)
     if not targetChar then return end
@@ -1803,6 +2030,9 @@ local function LoadAimbot()
             end
         end
 
+        --// v26: Multi-Point + Line visuals (drawn every frame for smoothness)
+        pcall(DrawMultiPointVisuals)
+
         ManageHooks()
     end))
 
@@ -1989,6 +2219,13 @@ Aimbot.PerformInfiniteTP        = PerformInfiniteTP
 Aimbot.DisableDesyncDuringShot  = DisableDesyncDuringShot
 Aimbot.FireClickNoDesync        = FireClickNoDesync
 
+--// v26: Multi-Point exports
+Aimbot.MULTIPOINT_PRESETS        = MULTIPOINT_PRESETS
+Aimbot.GetMultiPointParts        = GetMultiPointParts
+Aimbot.PickMultiPointTarget      = PickMultiPointTarget
+Aimbot.DrawMultiPointVisuals     = DrawMultiPointVisuals
+Aimbot.DestroyMultiPointVisuals  = DestroyMultiPointVisuals
+
 --// ---------------------------------------------------------------------------
 --// DIAGNOSTICS
 --// ---------------------------------------------------------------------------
@@ -2011,7 +2248,7 @@ local function Diagnose()
     end
 
     warn("==========================================================")
-    warn("          AirHub Aimbot - DIAGNOSTICS (v25)")
+    warn("          AirHub Aimbot - DIAGNOSTICS (v26)")
     warn("==========================================================")
 
     T(H ~= nil, "H (AirHub) exists")
@@ -2053,7 +2290,9 @@ local function Diagnose()
                       "PatchShotArgs", "PatchValueRecursive",
                       "VerifyAndFixHooks", "InvalidateModeCache",
                       "GetWorkingMethods", "CycleAutowork", "DebugPrint",
-                      "RemoveAVHook", "RemoveMHTProxy" }
+                      "RemoveAVHook", "RemoveMHTProxy",
+                      "GetMultiPointParts", "PickMultiPointTarget",
+                      "DrawMultiPointVisuals", "DestroyMultiPointVisuals" }
     for _, name in ipairs(exports) do
         T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
     end
