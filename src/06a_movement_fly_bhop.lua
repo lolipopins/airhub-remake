@@ -1,11 +1,11 @@
 --// AirHub - 06a_movement_fly_bhop.lua
 --// Fly + Bhop (Old / New) + Spider (Default / Pixelwalk / Wallfucker) + TargetOrbit.
 --//
---// FIX: bhop-триггер теперь по умолчанию не Space, а LeftShift.
---//      Игра больше не думает что "пробел зажат" — прыжок работает.
---//      Опция Auto Release Space: если триггер всё-таки Space, скрипт
---//      через VirtualInputManager отправит ключ-ап, чтобы игра не видела
---//      зажатый Space.
+--// Space-bind fix:
+--//   Приоритет 1: hookmetamethod на __namecall — UserInputService:IsKeyDown(Space)
+--//                возвращает false, пока bhop держит Space. Игра не видит зажатия.
+--//   Приоритет 2: VirtualInputManager key-up pulse каждый кадр.
+--//   Приоритет 3: keyrelease(0x20) как fallback.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 06a: core not loaded"); return end
@@ -331,8 +331,8 @@ Fly.ComputeOrbitVelocity = Fly_ComputeOrbitVelocity
 H.Bhop = {
     Settings = {
         Enabled = false,
-        Mode        = "Old",        --// "Old" | "New"
-        AutoJumpKey = "LeftShift",  --// НЕ Space — игра видит зажатый Space и не прыгает
+        Mode        = "Old",       --// "Old" | "New"
+        AutoJumpKey = "Space",     --// Space по умолчанию
         BypassJump  = true,
         JumpCooldown= 0.05,
 
@@ -340,11 +340,9 @@ H.Bhop = {
         AirBoost        = true,
         AirBoostDivisor = 5.9,
 
-        --// FIX: если всё-таки используешь Space — форсим release для игры
-        AutoReleaseSpace = true,
-        --// FIX: дополнительно перехватываем и отпускаем исходный Space
-        --// (для тех экзекуторов, где VirtualInputManager слабый)
-        SwapSpaceToShift = false,
+        --// Space-bind fix:
+        BlockSpaceFromGame = true,   --// hookmetamethod: игра не видит зажатый Space
+        SpaceReleasePulse  = true,   --// fallback: key-up pulse каждый кадр
 
         Spider = {
             Enabled  = false,
@@ -376,38 +374,73 @@ H.Bhop = {
         KeyHeld = false, LastJumpTime = 0, Active = false,
         SpiderTouching = false, WallNormal = nil,
         Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
+        HookInstalled = false,
     },
 }
 local Bhop = H.Bhop
 
 --// ---------------------------------------------------------------------------
---// Auto Release Space — отправляем игре key-up для Space, чтобы она не считала
---// Space «зажатым». Работает через VirtualInputManager.
+--// Space-block через hookmetamethod
+--// Пока bhop активен и Space зажат для bhop, любые вызовы
+--// UserInputService:IsKeyDown(Space) возвращают false.
+--// Это значит: игра физически не может увидеть зажатый Space.
+--// Наш собственный bhop работает через InputBegan/InputEnded — ему всё равно.
 --// ---------------------------------------------------------------------------
-local function Bhop_ForceReleaseSpace()
-    if not VirtualInputManager then return end
-    pcall(function()
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+local function Bhop_InstallSpaceHook()
+    if Bhop.Internal.HookInstalled then return end
+    if not Bhop.Settings.BlockSpaceFromGame then return end
+
+    local hm  = rawget(getfenv(), "hookmetamethod") or hookmetamethod
+    local gnm = rawget(getfenv(), "getnamecallmethod") or getnamecallmethod
+    if type(hm) ~= "function" or type(gnm) ~= "function" then return end
+
+    local ok = pcall(function()
+        local oldNamecall
+        oldNamecall = hm(game, "__namecall", function(self, ...)
+            local method = gnm()
+            if method == "IsKeyDown" then
+                local args = {...}
+                local code = args[1]
+                if code == Enum.KeyCode.Space
+                   and Bhop.Settings.Enabled
+                   and Bhop.Settings.BlockSpaceFromGame
+                   and Bhop.Internal.KeyHeld then
+                    return false
+                end
+            end
+            return oldNamecall(self, ...)
+        end)
     end)
+
+    if ok then
+        Bhop.Internal.HookInstalled = true
+    end
 end
 
---// Также отправляем key-down/up каждые N мс, чтобы игра видела «свежий» прыжок.
---// Это самый надёжный способ обойти блокировку ре-прыжка.
-local function Bhop_SimulateSpaceTap()
-    if not VirtualInputManager then return end
-    pcall(function()
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-    end)
-    task.wait(0.01)
-    pcall(function()
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-    end)
-    task.wait(0.01)
-    pcall(function()
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-    end)
+--// ---------------------------------------------------------------------------
+--// Space release fallback (VirtualInputManager / keyrelease)
+--// ---------------------------------------------------------------------------
+local function Bhop_SpaceReleasePulse()
+    if not Bhop.Settings.SpaceReleasePulse then return end
+
+    --// 1) VirtualInputManager (основной)
+    if VirtualInputManager then
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+        end)
+        return
+    end
+
+    --// 2) keyrelease (fallback)
+    local kr = rawget(getfenv(), "keyrelease")
+    if type(kr) == "function" then
+        pcall(function() kr(0x20) end)  -- 0x20 = VK_SPACE
+    end
 end
 
+--// ---------------------------------------------------------------------------
+--// Input — Space как триггер bhop
+--// ---------------------------------------------------------------------------
 Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     if gpe then return end
     if UserInputService:GetFocusedTextBox() then return end
@@ -416,11 +449,10 @@ Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     local kc = SafeKeyCode(Bhop.Settings.AutoJumpKey)
     if kc and inp.KeyCode == kc then
         Bhop.Internal.KeyHeld = true
-        --// FIX: если триггер = Space и включён AutoReleaseSpace —
-        --// сразу отдаём игре key-up, чтобы игра не видела зажатый Space.
-        if Bhop.Settings.AutoReleaseSpace
-           and inp.KeyCode == Enum.KeyCode.Space then
-            Bhop_ForceReleaseSpace()
+        Bhop_InstallSpaceHook()
+        --// Сразу отдаём игре key-up, чтобы не залипло на кадр
+        if inp.KeyCode == Enum.KeyCode.Space then
+            Bhop_SpaceReleasePulse()
         end
     end
 end))
@@ -460,7 +492,7 @@ local function Spider_DetectWall(char, hrp)
             local angle = i * step
             local dir = Vector3.new(math.cos(angle), 0, math.sin(angle))
             local result = workspace:Raycast(origin, dir * range, rayParams)
-            if result and result.Instance and result.Instance.CanCollide then
+            if result and result.Instance and result.Instance.Collide then
                 Bhop.Internal.WallNormal = result.Normal
                 return true
             end
@@ -651,6 +683,11 @@ end
 --// Bhop main loop — task.spawn + task.wait(0.01)
 --// ===========================================================================
 task.spawn(function()
+    --// Устанавливаем hook при старте, если bhop уже enabled
+    if Bhop.Settings.Enabled and Bhop.Settings.BlockSpaceFromGame then
+        Bhop_InstallSpaceHook()
+    end
+
     while not H.ShuttingDown and task.wait(0.01) do
         local S = Bhop.Settings
         local I = Bhop.Internal
@@ -662,6 +699,11 @@ task.spawn(function()
             I.Pixelwalk_LastThin = 0
             I.Pixelwalk_LastThinNormal = nil
             continue
+        end
+
+        --// Устанавливаем hook на лету, если не получилось при загрузке
+        if not I.HookInstalled and S.BlockSpaceFromGame then
+            Bhop_InstallSpaceHook()
         end
 
         local char = LocalPlayer.Character
@@ -688,17 +730,13 @@ task.spawn(function()
 
         --// Bhop
         if I.KeyHeld then
-            local bmode = S.Mode or "Old"
-
-            --// FIX: если триггер = Space и включён AutoReleaseSpace —
-            --// каждый кадр отдаём игре key-up, чтобы игра видела Space как
-            --// «отпущенный» и разрешала новый прыжок.
-            if S.AutoReleaseSpace then
-                local trigger = SafeKeyCode(S.AutoJumpKey)
-                if trigger == Enum.KeyCode.Space then
-                    Bhop_ForceReleaseSpace()
-                end
+            --// Fallback: пока Space зажат для bhop — пульсируем key-up
+            local trigger = SafeKeyCode(S.AutoJumpKey)
+            if trigger == Enum.KeyCode.Space then
+                Bhop_SpaceReleasePulse()
             end
+
+            local bmode = S.Mode or "Old"
 
             if bmode == "New" then
                 pcall(function() hum.Jump = not hum.Jump end)
@@ -735,13 +773,13 @@ Bhop.Functions = {
         Bhop.Settings = {
             Enabled = false,
             Mode = "Old",
-            AutoJumpKey = "LeftShift",
+            AutoJumpKey = "Space",
             BypassJump = true,
             JumpCooldown = 0.05,
             AirBoost = true,
             AirBoostDivisor = 5.9,
-            AutoReleaseSpace = true,
-            SwapSpaceToShift = false,
+            BlockSpaceFromGame = true,
+            SpaceReleasePulse = true,
             Spider = {
                 Enabled  = false,
                 Mode     = "Default",
@@ -772,6 +810,7 @@ Bhop.Functions = {
             KeyHeld = false, LastJumpTime = 0, Active = false,
             SpiderTouching = false, WallNormal = nil,
             Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
+            HookInstalled = false,
         }
     end,
 }
