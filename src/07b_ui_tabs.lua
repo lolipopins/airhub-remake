@@ -6,6 +6,7 @@
 --//   pulse эхо-файрит InputEnded и валит KeyHeld после первого прыжка).
 --// Spider: 3 modes (Default / Pixelwalk / Wallfucker).
 --// Animation Breaker: Preset = одна анимация; Mode = Speed | RandomFrames;
+--//   Preset "None" + Speed/RandomFrames применяется к игровым анимациям;
 --//   Preset "Custom" = пользовательский ID.
 
 local H = getgenv().AirHub
@@ -493,7 +494,7 @@ task.spawn(function()
         end })
     animSec:AddDropdown({ Name = "Mode", Value = ABS.Mode or "Speed", List = animModeList,
         Callback = function(v) ABS.Mode = v end })
-    animSec:AddTextbox({ Name = "Speed (neg = reverse) [Speed mode]", Value = tostring(ABS.Speed or 1),
+    animSec:AddTextbox({ Name = "Speed (neg = reverse, 0 = freeze)", Value = tostring(ABS.Speed or 1),
         Callback = function(v)
             local n = tonumber(v)
             if n then ABS.Speed = n end
