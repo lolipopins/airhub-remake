@@ -1,7 +1,7 @@
 --// AirHub - 06a_movement_fly_bhop.lua
 --// Fly + Bhop (Old / New) + Spider (Default / Pixelwalk / Wallfucker).
 --//
---// Bhop "New" = точный порт Counter Blox HvH (ImGui) bhop:
+--// Bhop "New" = порт Counter Blox HvH (ImGui) bhop:
 --//   InputBegan(Space)  -> KeyHeld = true
 --//   InputEnded(Space)  -> KeyHeld = false
 --//   RunService.Heartbeat каждый кадр пока KeyHeld:
@@ -9,7 +9,11 @@
 --//     if GetState()==Freefall and MoveDirection.Magnitude>0:
 --//         Character:TranslateBy(MoveDirection / AirBoostDivisor)
 --//
---// Space-bind fix (hookmetamethod + release pulse) — опционально.
+--// FIX 2024: SpaceReleasePulse эхо-файрил InputEnded и убивал KeyHeld после
+--// первого прыжка. Теперь:
+--//   - SpaceReleasePulse по умолчанию = false (hookmetamethod достаточно)
+--//   - pulse пропускается, если hookmetamethod уже установлен
+--//   - pulse защищён counter-guard: свои эхо InputEnded игнорируются
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 06a: core not loaded"); return end
@@ -338,7 +342,7 @@ Fly.ComputeOrbitVelocity = Fly_ComputeOrbitVelocity
 H.Bhop = {
     Settings = {
         Enabled = false,
-        Mode        = "New",       --// "Old" | "New"  (New = Counter Blox port)
+        Mode        = "New",       --// "Old" | "New"
         AutoJumpKey = "Space",
         BypassJump  = true,
         JumpCooldown= 0.05,
@@ -348,8 +352,10 @@ H.Bhop = {
         AirBoostDivisor = 5.9,
 
         --// Space-bind fix:
-        BlockSpaceFromGame = true,
-        SpaceReleasePulse  = true,
+        BlockSpaceFromGame = true,    --// hookmetamethod блокирует Space от игры
+        SpaceReleasePulse  = false,   --// ВАЖНО: default false!
+                                      --// Включать только если hookmetamethod недоступен.
+                                      --// Иначе эхо от SendKeyEvent валит KeyHeld.
 
         Spider = {
             Enabled  = false,
@@ -383,12 +389,13 @@ H.Bhop = {
         Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
         HookInstalled = false,
         Humanoid = nil,
+        PendingPulses = 0,   --// counter-guard для эхо InputEnded от наших пульсов
     },
 }
 local Bhop = H.Bhop
 
 --// ---------------------------------------------------------------------------
---// Space-block через hookmetamethod (опционально)
+--// Space-block через hookmetamethod
 --// ---------------------------------------------------------------------------
 local function Bhop_InstallSpaceHook()
     if Bhop.Internal.HookInstalled then return end
@@ -423,9 +430,25 @@ end
 
 --// ---------------------------------------------------------------------------
 --// Space release fallback
+--//
+--// ВАЖНО: VirtualInputManager:SendKeyEvent(false, Space) в большинстве
+--// эксплоитов эхо-файрит UserInputService.InputEnded. Это сбрасывает
+--// KeyHeld и bhop умирает после первого прыжка. Поэтому:
+--//   1) SpaceReleasePulse = false по умолчанию (hookmetamethod достаточно)
+--//   2) если hookmetamethod установлен — pulse вообще не шлём
+--//   3) если всё же шлём — counter-guard гасит свои эхо в InputEnded
 --// ---------------------------------------------------------------------------
 local function Bhop_SpaceReleasePulse()
     if not Bhop.Settings.SpaceReleasePulse then return end
+    --// Хук уже блокирует Space от игры — пульс не нужен
+    if Bhop.Internal.HookInstalled then return end
+
+    --// Counter-guard: помечаем, что сейчас придёт наше эхо InputEnded
+    Bhop.Internal.PendingPulses = (Bhop.Internal.PendingPulses or 0) + 1
+    --// Защита от утечки счётчика, если эксплоит НЕ файрит InputEnded
+    if Bhop.Internal.PendingPulses > 4 then
+        Bhop.Internal.PendingPulses = 4
+    end
 
     if VirtualInputManager then
         pcall(function()
@@ -441,7 +464,7 @@ local function Bhop_SpaceReleasePulse()
 end
 
 --// ---------------------------------------------------------------------------
---// Input — Space как триггер bhop (Counter Blox style)
+--// Input — Space как триггер bhop
 --// ---------------------------------------------------------------------------
 Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     if gpe then return end
@@ -452,14 +475,18 @@ Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     if kc and inp.KeyCode == kc then
         Bhop.Internal.KeyHeld = true
         Bhop_InstallSpaceHook()
-        if inp.KeyCode == Enum.KeyCode.Space then
-            Bhop_SpaceReleasePulse()
-        end
     end
 end))
 
 Track(UserInputService.InputEnded:Connect(function(inp)
     if inp.UserInputType ~= Enum.UserInputType.Keyboard then return end
+
+    --// Эхо от собственного pulse — проглатываем, не трогаем KeyHeld
+    if (Bhop.Internal.PendingPulses or 0) > 0 then
+        Bhop.Internal.PendingPulses = Bhop.Internal.PendingPulses - 1
+        return
+    end
+
     local kc = SafeKeyCode(Bhop.Settings.AutoJumpKey)
     if kc and inp.KeyCode == kc then
         Bhop.Internal.KeyHeld = false
@@ -474,6 +501,7 @@ Track(LocalPlayer.CharacterAdded:Connect(function()
     Bhop.Internal.Pixelwalk_LastThin = 0
     Bhop.Internal.Pixelwalk_LastThinNormal = nil
     Bhop.Internal.Humanoid = nil
+    Bhop.Internal.PendingPulses = 0
 end))
 
 --// ---------------------------------------------------------------------------
@@ -682,8 +710,7 @@ local function Spider_Wallfucker(char, hrp)
 end
 
 --// ===========================================================================
---// BHOP main tick — RunService.Heartbeat (Counter Blox style)
---// Всё на Heartbeat: InputBegan/Ended только меняют KeyHeld-флаг.
+--// BHOP main tick — RunService.Heartbeat
 --// ===========================================================================
 local function Bhop_Tick()
     if H.ShuttingDown then return end
@@ -691,7 +718,6 @@ local function Bhop_Tick()
     local S = Bhop.Settings
     local I = Bhop.Internal
 
-    --// Disabled -> сброс
     if not S.Enabled then
         I.Active = false
         I.SpiderTouching = false
@@ -701,7 +727,6 @@ local function Bhop_Tick()
         return
     end
 
-    --// Hook устанавливаем на лету, если ещё не встал
     if not I.HookInstalled and S.BlockSpaceFromGame then
         Bhop_InstallSpaceHook()
     end
@@ -731,7 +756,7 @@ local function Bhop_Tick()
 
     if not I.KeyHeld then return end
 
-    --// Space-release pulse (fallback)
+    --// Fallback pulse — только если пользователь включил и hook не встал
     local trigger = SafeKeyCode(S.AutoJumpKey)
     if trigger == Enum.KeyCode.Space then
         Bhop_SpaceReleasePulse()
@@ -740,11 +765,11 @@ local function Bhop_Tick()
     local bmode = S.Mode or "New"
 
     if bmode == "New" then
-        --// === Counter Blox bhop port ===
-        --// 1) toggle jump each frame
-        pcall(function() hum.Jump = not hum.Jump end)
+        --// === Counter Blox bhop (точный порт) ===
+        --// 1) toggle jump каждый кадр
+        hum.Jump = not hum.Jump
 
-        --// 2) air boost while freefalling + moving
+        --// 2) air boost in Freefall while moving
         if S.AirBoost
            and hum:GetState() == Enum.HumanoidStateType.Freefall
            and hum.MoveDirection.Magnitude > 0 then
@@ -756,7 +781,7 @@ local function Bhop_Tick()
             end
         end
     else
-        --// === Old mode: cooldown + bypass ===
+        --// Old mode: cooldown + bypass
         local now = tick()
         if now - (I.LastJumpTime or 0) >= (S.JumpCooldown or 0.05) then
             local bypass = S.BypassJump
@@ -786,7 +811,7 @@ Bhop.Functions = {
             AirBoost = true,
             AirBoostDivisor = 5.9,
             BlockSpaceFromGame = true,
-            SpaceReleasePulse = true,
+            SpaceReleasePulse = false,
             Spider = {
                 Enabled  = false,
                 Mode     = "Default",
@@ -817,7 +842,7 @@ Bhop.Functions = {
             KeyHeld = false, LastJumpTime = 0, Active = false,
             SpiderTouching = false, WallNormal = nil,
             Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
-            HookInstalled = false, Humanoid = nil,
+            HookInstalled = false, Humanoid = nil, PendingPulses = 0,
         }
     end,
 }
