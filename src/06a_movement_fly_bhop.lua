@@ -1,8 +1,9 @@
 --// AirHub - 06a_movement_fly_bhop.lua
 --// Fly + Bhop (Old / New) + Spider (Default / Pixelwalk / Wallfucker) + TargetOrbit.
 --//
---// Old (classic) — ChangeState(Jumping) + hum.Jump = true на RenderStepped.
---// New (legacy)  — Heartbeat + hum.Jump = not hum.Jump + TranslateBy(MoveDirection / 5.9).
+--// Old — ChangeState(Jumping) + hum.Jump = true.
+--// New — точная копия сниппета: hum.Jump = not hum.Jump + TranslateBy(MoveDirection/5.9).
+--// Оба режима крутятся в одном task.spawn(task.wait(0.01)) — как в рабочем 06a.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 06a: core not loaded"); return end
@@ -327,16 +328,15 @@ Fly.ComputeOrbitVelocity = Fly_ComputeOrbitVelocity
 H.Bhop = {
     Settings = {
         Enabled = false,
-        --// "Old" — ChangeState(Jumping) + hum.Jump = true (RenderStepped)
-        --// "New" — Heartbeat + hum.Jump = not hum.Jump + TranslateBy (legacy snippet)
+        --// "Old" | "New"
         Mode        = "Old",
         AutoJumpKey = "Space",
         BypassJump  = true,
         JumpCooldown= 0.05,
 
-        --// Новый режим (из сниппета):
-        AirBoost        = true,   --// TranslateBy в воздухе
-        AirBoostDivisor = 5.9,    --// делитель (5.9 = как в сниппете)
+        --// New mode:
+        AirBoost        = true,
+        AirBoostDivisor = 5.9,
 
         Spider = {
             Enabled  = false,
@@ -368,7 +368,6 @@ H.Bhop = {
         KeyHeld = false, LastJumpTime = 0, Active = false,
         SpiderTouching = false, WallNormal = nil,
         Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
-        HeartbeatConn = nil,
     },
 }
 local Bhop = H.Bhop
@@ -607,100 +606,83 @@ local function Spider_Wallfucker(char, hrp)
 end
 
 --// ===========================================================================
---// Bhop — 2 режима
+--// Bhop main loop (single task.spawn + task.wait — как в рабочем 06a)
 --// ===========================================================================
+task.spawn(function()
+    while not H.ShuttingDown and task.wait(0.01) do
+        local S = Bhop.Settings
+        local I = Bhop.Internal
 
---// --- Old: ChangeState + hum.Jump = true (RenderStepped) ---
-local function Bhop_Tick_Old()
-    if H.ShuttingDown then return end
-    local S = Bhop.Settings
-    local I = Bhop.Internal
-
-    if not S.Enabled or S.Mode ~= "Old" then return end
-
-    local char = LocalPlayer.Character
-    if not char then return end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hum or not hrp then return end
-    if hum.Health <= 0 then return end
-
-    I.Active = true
-    I.SpiderTouching = false
-
-    if S.Spider.Enabled then
-        local mode = S.Spider.Mode or "Default"
-        if mode == "Pixelwalk" then
-            I.SpiderTouching = Spider_Pixelwalk(char, hrp, hum)
-        elseif mode == "Wallfucker" then
-            I.SpiderTouching = Spider_Wallfucker(char, hrp)
-        else
-            I.SpiderTouching = Spider_DetectWall(char, hrp)
+        if not S.Enabled then
+            I.Active = false
+            I.SpiderTouching = false
+            I.WallNormal = nil
+            I.Pixelwalk_LastThin = 0
+            I.Pixelwalk_LastThinNormal = nil
+            continue
         end
-    end
 
-    if I.KeyHeld then
-        local now = tick()
-        if now - (I.LastJumpTime or 0) >= (S.JumpCooldown or 0.05) then
-            local bypass = S.BypassJump
-            if I.SpiderTouching then bypass = true end
-            local isGround = hum.FloorMaterial ~= Enum.Material.Air
-            if bypass or isGround then
-                pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
-                pcall(function() hum.Jump = true end)
-                I.LastJumpTime = now
+        local char = LocalPlayer.Character
+        if not char then continue end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hum or not hrp then continue end
+        if hum.Health <= 0 then continue end
+
+        I.Active = true
+        I.SpiderTouching = false
+
+        --// Spider
+        if S.Spider.Enabled then
+            local smode = S.Spider.Mode or "Default"
+            if smode == "Pixelwalk" then
+                I.SpiderTouching = Spider_Pixelwalk(char, hrp, hum)
+            elseif smode == "Wallfucker" then
+                I.SpiderTouching = Spider_Wallfucker(char, hrp)
+            else
+                I.SpiderTouching = Spider_DetectWall(char, hrp)
+            end
+        end
+
+        --// Bhop
+        if I.KeyHeld then
+            local bmode = S.Mode or "Old"
+
+            if bmode == "New" then
+                --// Точная копия сниппета:
+                --//   hum.Jump = not hum.Jump
+                --//   if Freefall and MoveDirection.Magnitude > 0 then
+                --//       char:TranslateBy(hum.MoveDirection / 5.9)
+                --//   end
+                pcall(function() hum.Jump = not hum.Jump end)
+
+                if S.AirBoost
+                   and hum:GetState() == Enum.HumanoidStateType.Freefall
+                   and hum.MoveDirection.Magnitude > 0 then
+                    local divisor = S.AirBoostDivisor or 5.9
+                    if divisor > 0 then
+                        pcall(function()
+                            char:TranslateBy(hum.MoveDirection / divisor)
+                        end)
+                    end
+                end
+            else
+                --// Old: ChangeState + Jump = true
+                local now = tick()
+                if now - (I.LastJumpTime or 0) >= (S.JumpCooldown or 0.05) then
+                    local bypass = S.BypassJump
+                    if I.SpiderTouching then bypass = true end
+                    local isGround = hum.FloorMaterial ~= Enum.Material.Air
+                    if bypass or isGround then
+                        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+                        pcall(function() hum.Jump = true end)
+                        I.LastJumpTime = now
+                    end
+                end
             end
         end
     end
-end
-
---// --- New: Heartbeat + Jump toggle + TranslateBy (legacy snippet) ---
-local function Bhop_Tick_New()
-    if H.ShuttingDown then return end
-    local S = Bhop.Settings
-    local I = Bhop.Internal
-
-    if not S.Enabled or S.Mode ~= "New" then return end
-
-    local char = LocalPlayer.Character
-    if not char then return end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum then return end
-    if hum.Health <= 0 then return end
-
-    I.Active = true
-
-    --// 1) Jump toggle — как в сниппете
-    if I.KeyHeld then
-        hum.Jump = not hum.Jump
-    end
-
-    --// 2) Доп. ускорение в воздухе — как в сниппете
-    --//    if Freefall and MoveDirection.Magnitude > 0 then
-    --//        Character:TranslateBy(hum.MoveDirection / 5.9)
-    --//    end
-    if S.AirBoost and I.KeyHeld
-       and hum:GetState() == Enum.HumanoidStateType.Freefall
-       and hum.MoveDirection.Magnitude > 0 then
-        local divisor = S.AirBoostDivisor or 5.9
-        if divisor > 0 then
-            pcall(function()
-                char:TranslateBy(hum.MoveDirection / divisor)
-            end)
-        end
-    end
-end
-
---// --- Old loop (RenderStepped) ---
-Track(RunService.RenderStepped:Connect(function()
-    xpcall(Bhop_Tick_Old, HandleError)
-end))
-
---// --- New loop (Heartbeat) ---
-Bhop.Internal.HeartbeatConn = RunService.Heartbeat:Connect(function()
-    xpcall(Bhop_Tick_New, HandleError)
 end)
-Track(Bhop.Internal.HeartbeatConn)
 
 Bhop.Functions = {
     ResetSettings = function()
@@ -738,12 +720,10 @@ Bhop.Functions = {
                 },
             },
         }
-        Bhop.Internal.KeyHeld = false
-        Bhop.Internal.LastJumpTime = 0
-        Bhop.Internal.Active = false
-        Bhop.Internal.SpiderTouching = false
-        Bhop.Internal.WallNormal = nil
-        Bhop.Internal.Pixelwalk_LastThin = 0
-        Bhop.Internal.Pixelwalk_LastThinNormal = nil
+        Bhop.Internal = {
+            KeyHeld = false, LastJumpTime = 0, Active = false,
+            SpiderTouching = false, WallNormal = nil,
+            Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
+        }
     end,
 }
