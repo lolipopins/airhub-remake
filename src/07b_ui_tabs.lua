@@ -1,6 +1,5 @@
 --// AirHub - 07b_ui_tabs.lua
 --// Visuals, Anti-Aim (Body + Desync), Movement, Settings tabs.
---// NEW: Spider modes + Pixelwalk/Wallfucker sections + Advanced Bhop.
 
 local H = getgenv().AirHub
 if not H or not H._UI then warn("[AirHub] 07b: 07a not loaded"); return end
@@ -70,7 +69,7 @@ task.spawn(function()
     local Fly_ClearInstances   = orNoop(Fly.ClearInstances,          "Fly.ClearInstances")
     local StopDesync           = orNoop(AntiAim.StopDesync,          "AntiAim.StopDesync")
     local StartDesync          = orNoop(AntiAim.StartDesync,         "AntiAim.StartDesync")
-    local Bhop_StrafeReleaseAll= orNoop(Bhop.StrafeReleaseAll,       "Bhop.StrafeReleaseAll")
+    local Bhop_VirtualKeyUp    = orNoop(Bhop.VirtualKeyUp,           "Bhop.VirtualKeyUp")
 
     --// ===== VISUALS / WALLHACK normalization =====
     WallHack.Settings        = WallHack.Settings        or {}
@@ -118,21 +117,10 @@ task.spawn(function()
 
     --// ===== BHOP / SPIDER normalization =====
     Bhop.Settings            = Bhop.Settings            or {}
-    --// Advanced bhop (NEW)
-    if Bhop.Settings.UseRenderStep == nil  then Bhop.Settings.UseRenderStep  = true  end
-    if Bhop.Settings.UseRayGround == nil   then Bhop.Settings.UseRayGround   = true  end
-    Bhop.Settings.GroundRayRange  = Bhop.Settings.GroundRayRange  or 3.0
-    Bhop.Settings.JumpBuffer      = Bhop.Settings.JumpBuffer      or 0.15
-    Bhop.Settings.CoyoteTime      = Bhop.Settings.CoyoteTime      or 0.10
-    Bhop.Settings.PredLandDist    = Bhop.Settings.PredLandDist    or 3.0
-    if Bhop.Settings.NoUpwardJump == nil   then Bhop.Settings.NoUpwardJump   = true  end
-    Bhop.Settings.UpwardThreshold = Bhop.Settings.UpwardThreshold or 5.0
-    if Bhop.Settings.AutoStrafe == nil     then Bhop.Settings.AutoStrafe     = false end
-    if Bhop.Settings.AutoStrafeInvert == nil then Bhop.Settings.AutoStrafeInvert = false end
-    Bhop.Settings.StrafeDeadzone  = Bhop.Settings.StrafeDeadzone  or 0.003
     Bhop.Settings.Enabled         = Bhop.Settings.Enabled         or false
+    Bhop.Settings.Mode            = Bhop.Settings.Mode            or "ChangeState"
     Bhop.Settings.AutoJumpKey     = Bhop.Settings.AutoJumpKey     or "Space"
-    if Bhop.Settings.BypassJump == nil     then Bhop.Settings.BypassJump     = true  end
+    if Bhop.Settings.BypassJump == nil then Bhop.Settings.BypassJump = true end
     Bhop.Settings.JumpCooldown    = Bhop.Settings.JumpCooldown    or 0.05
 
     Bhop.Settings.Spider            = Bhop.Settings.Spider or {}
@@ -169,9 +157,9 @@ task.spawn(function()
 
     Bhop.Internal            = Bhop.Internal            or { KeyHeld = false, Active = false }
     Bhop.Functions           = Bhop.Functions           or {}
-    if type(Bhop.StrafeReleaseAll) ~= "function" then
-        Bhop.StrafeReleaseAll = function() end
-        Bhop_StrafeReleaseAll = Bhop.StrafeReleaseAll
+    if type(Bhop.VirtualKeyUp) ~= "function" then
+        Bhop.VirtualKeyUp = function() end
+        Bhop_VirtualKeyUp = Bhop.VirtualKeyUp
     end
 
     --// ===== SPEED / FASTSTOP / STRAFER / NOCLIP =====
@@ -441,6 +429,7 @@ task.spawn(function()
     local flyMethods   = { "BodyVelocity", "LinearVelocity", "Velocity", "CFrame" }
     local flyKeys      = { "F", "G", "H", "V", "B", "N", "Space", "LeftShift" }
     local bhopKeys     = { "Space", "LeftControl", "LeftShift", "C", "X", "Z" }
+    local bhopModes    = { "ChangeState", "VirtualInput" }
     local speedMethods = { "WalkSpeed", "CFrame", "Velocity" }
     local spiderModes  = { "Default", "Pixelwalk", "Wallfucker" }
 
@@ -492,7 +481,7 @@ task.spawn(function()
     flySec:AddToggle({ Name = "Use WASD + Space/Ctrl", Value = Fly.Settings.UseKeys ~= false,
         Callback = function(v) Fly.Settings.UseKeys = v end })
 
-    --// ===== Bhop base =====
+    --// ===== Bhop =====
     local bhopSec = MovementTab:CreateSection({ Name = "Bhop", Side = "Right" })
     bhopSec:AddToggle({ Name = "Enabled", Value = Bhop.Settings.Enabled,
         Callback = function(v)
@@ -501,8 +490,13 @@ task.spawn(function()
                 Bhop.Internal.KeyHeld = false
                 Bhop.Internal.Active = false
                 Bhop.Internal.SpiderTouching = false
-                Bhop_StrafeReleaseAll()
+                Bhop_VirtualKeyUp()
             end
+        end })
+    bhopSec:AddDropdown({ Name = "Mode", Value = Bhop.Settings.Mode or "ChangeState", List = bhopModes,
+        Callback = function(v)
+            Bhop.Settings.Mode = v
+            Bhop_VirtualKeyUp()
         end })
     bhopSec:AddDropdown({ Name = "Jump Key", Value = Bhop.Settings.AutoJumpKey or "Space", List = bhopKeys,
         Callback = function(v) Bhop.Settings.AutoJumpKey = v end })
@@ -511,40 +505,6 @@ task.spawn(function()
     bhopSec:AddSlider({ Name = "Jump Cooldown", Value = Bhop.Settings.JumpCooldown or 0.05,
         Min = 0.01, Max = 0.5, Decimals = 2,
         Callback = function(v) Bhop.Settings.JumpCooldown = v end })
-
-    --// ===== Bhop Advanced (NEW) =====
-    local bhAdv = MovementTab:CreateSection({ Name = "Bhop: Advanced", Side = "Right" })
-    bhAdv:AddToggle({ Name = "RenderStep Loop (frame-perfect)", Value = Bhop.Settings.UseRenderStep ~= false,
-        Callback = function(v) Bhop.Settings.UseRenderStep = v end })
-    bhAdv:AddToggle({ Name = "Ray Ground Detection", Value = Bhop.Settings.UseRayGround ~= false,
-        Callback = function(v) Bhop.Settings.UseRayGround = v end })
-    bhAdv:AddSlider({ Name = "Ground Ray Range", Value = Bhop.Settings.GroundRayRange,
-        Min = 1, Max = 10, Decimals = 1,
-        Callback = function(v) Bhop.Settings.GroundRayRange = v end })
-    bhAdv:AddSlider({ Name = "Jump Buffer (s)", Value = Bhop.Settings.JumpBuffer,
-        Min = 0, Max = 0.5, Decimals = 2,
-        Callback = function(v) Bhop.Settings.JumpBuffer = v end })
-    bhAdv:AddSlider({ Name = "Coyote Time (s)", Value = Bhop.Settings.CoyoteTime,
-        Min = 0, Max = 0.5, Decimals = 2,
-        Callback = function(v) Bhop.Settings.CoyoteTime = v end })
-    bhAdv:AddSlider({ Name = "Predict Land Distance", Value = Bhop.Settings.PredLandDist,
-        Min = 0, Max = 10, Decimals = 1,
-        Callback = function(v) Bhop.Settings.PredLandDist = v end })
-    bhAdv:AddToggle({ Name = "No Upward Jump", Value = Bhop.Settings.NoUpwardJump ~= false,
-        Callback = function(v) Bhop.Settings.NoUpwardJump = v end })
-    bhAdv:AddSlider({ Name = "Upward Threshold (Y)", Value = Bhop.Settings.UpwardThreshold,
-        Min = 0, Max = 50, Decimals = 1,
-        Callback = function(v) Bhop.Settings.UpwardThreshold = v end })
-    bhAdv:AddToggle({ Name = "Auto-Strafe (in air)", Value = Bhop.Settings.AutoStrafe or false,
-        Callback = function(v)
-            Bhop.Settings.AutoStrafe = v
-            if not v then Bhop_StrafeReleaseAll() end
-        end })
-    bhAdv:AddToggle({ Name = "Auto-Strafe Invert", Value = Bhop.Settings.AutoStrafeInvert or false,
-        Callback = function(v) Bhop.Settings.AutoStrafeInvert = v end })
-    bhAdv:AddSlider({ Name = "Strafe Deadzone (rad)", Value = Bhop.Settings.StrafeDeadzone,
-        Min = 0, Max = 0.02, Decimals = 4,
-        Callback = function(v) Bhop.Settings.StrafeDeadzone = v end })
 
     --// ===== Spider (mode + Default settings) =====
     local spiderSec = MovementTab:CreateSection({ Name = "Spider (Bhop assist)", Side = "Right" })
