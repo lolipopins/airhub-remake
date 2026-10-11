@@ -1,5 +1,7 @@
 --// AirHub - 07b_ui_tabs.lua
 --// Visuals, Anti-Aim (Body + Desync), Movement, Settings tabs.
+--// Bhop: 2 modes (Old / New).
+--// Spider: 3 modes (Default / Pixelwalk / Wallfucker).
 
 local H = getgenv().AirHub
 if not H or not H._UI then warn("[AirHub] 07b: 07a not loaded"); return end
@@ -69,8 +71,6 @@ task.spawn(function()
     local Fly_ClearInstances   = orNoop(Fly.ClearInstances,          "Fly.ClearInstances")
     local StopDesync           = orNoop(AntiAim.StopDesync,          "AntiAim.StopDesync")
     local StartDesync          = orNoop(AntiAim.StartDesync,         "AntiAim.StartDesync")
-    local Bhop_VirtualKeyUp    = orNoop(Bhop.VirtualKeyUp,           "Bhop.VirtualKeyUp")
-    local Bhop_StateToggleRestore = orNoop(Bhop.StateToggleRestore,  "Bhop.StateToggleRestore")
 
     --// ===== VISUALS / WALLHACK normalization =====
     WallHack.Settings        = WallHack.Settings        or {}
@@ -119,12 +119,12 @@ task.spawn(function()
     --// ===== BHOP / SPIDER normalization =====
     Bhop.Settings            = Bhop.Settings            or {}
     Bhop.Settings.Enabled         = Bhop.Settings.Enabled         or false
-    Bhop.Settings.Mode            = Bhop.Settings.Mode            or "ChangeState"
+    Bhop.Settings.Mode            = Bhop.Settings.Mode            or "Old"       -- "Old" | "New"
     Bhop.Settings.AutoJumpKey     = Bhop.Settings.AutoJumpKey     or "Space"
     if Bhop.Settings.BypassJump == nil then Bhop.Settings.BypassJump = true end
     Bhop.Settings.JumpCooldown    = Bhop.Settings.JumpCooldown    or 0.05
-    Bhop.Settings.VirtualHoldMs   = Bhop.Settings.VirtualHoldMs   or 20
-    Bhop.Settings.StateToggleHoldMs = Bhop.Settings.StateToggleHoldMs or 100
+    if Bhop.Settings.AirBoost == nil   then Bhop.Settings.AirBoost   = true end
+    Bhop.Settings.AirBoostDivisor = Bhop.Settings.AirBoostDivisor or 5.9
 
     Bhop.Settings.Spider            = Bhop.Settings.Spider or {}
     Bhop.Settings.Spider.Enabled    = Bhop.Settings.Spider.Enabled or false
@@ -160,14 +160,6 @@ task.spawn(function()
 
     Bhop.Internal            = Bhop.Internal            or { KeyHeld = false, Active = false }
     Bhop.Functions           = Bhop.Functions           or {}
-    if type(Bhop.VirtualKeyUp) ~= "function" then
-        Bhop.VirtualKeyUp = function() end
-        Bhop_VirtualKeyUp = Bhop.VirtualKeyUp
-    end
-    if type(Bhop.StateToggleRestore) ~= "function" then
-        Bhop.StateToggleRestore = function() end
-        Bhop_StateToggleRestore = Bhop.StateToggleRestore
-    end
 
     --// ===== SPEED / FASTSTOP / STRAFER / NOCLIP =====
     Speed.Settings           = Speed.Settings           or { Enabled = false, Method = "WalkSpeed", GroundSpeed = 30, AirSpeed = 30, UseAirSpeed = false, InAirOnly = false }
@@ -436,7 +428,7 @@ task.spawn(function()
     local flyMethods   = { "BodyVelocity", "LinearVelocity", "Velocity", "CFrame" }
     local flyKeys      = { "F", "G", "H", "V", "B", "N", "Space", "LeftShift" }
     local bhopKeys     = { "Space", "LeftControl", "LeftShift", "C", "X", "Z" }
-    local bhopModes    = { "ChangeState", "VirtualInput", "Keypress", "HumJump", "JumpState", "StateToggle", "ResetJump", "Hybrid" }
+    local bhopModes    = { "Old", "New" }
     local speedMethods = { "WalkSpeed", "CFrame", "Velocity" }
     local spiderModes  = { "Default", "Pixelwalk", "Wallfucker" }
 
@@ -488,7 +480,7 @@ task.spawn(function()
     flySec:AddToggle({ Name = "Use WASD + Space/Ctrl", Value = Fly.Settings.UseKeys ~= false,
         Callback = function(v) Fly.Settings.UseKeys = v end })
 
-    --// ===== Bhop =====
+    --// ===== Bhop (Old / New) =====
     local bhopSec = MovementTab:CreateSection({ Name = "Bhop", Side = "Right" })
     bhopSec:AddToggle({ Name = "Enabled", Value = Bhop.Settings.Enabled,
         Callback = function(v)
@@ -497,30 +489,22 @@ task.spawn(function()
                 Bhop.Internal.KeyHeld = false
                 Bhop.Internal.Active = false
                 Bhop.Internal.SpiderTouching = false
-                Bhop_VirtualKeyUp()
-                Bhop_StateToggleRestore()
             end
         end })
-    bhopSec:AddDropdown({ Name = "Mode", Value = Bhop.Settings.Mode or "ChangeState", List = bhopModes,
-        Callback = function(v)
-            --// при смене режима сбрасываем всё, что могло залипнуть
-            Bhop_VirtualKeyUp()
-            Bhop_StateToggleRestore()
-            Bhop.Settings.Mode = v
-        end })
+    bhopSec:AddDropdown({ Name = "Mode", Value = Bhop.Settings.Mode or "Old", List = bhopModes,
+        Callback = function(v) Bhop.Settings.Mode = v end })
     bhopSec:AddDropdown({ Name = "Jump Key", Value = Bhop.Settings.AutoJumpKey or "Space", List = bhopKeys,
         Callback = function(v) Bhop.Settings.AutoJumpKey = v end })
     bhopSec:AddToggle({ Name = "Bypass Jump Restrictions", Value = Bhop.Settings.BypassJump ~= false,
         Callback = function(v) Bhop.Settings.BypassJump = v end })
-    bhopSec:AddSlider({ Name = "Jump Cooldown", Value = Bhop.Settings.JumpCooldown or 0.05,
+    bhopSec:AddSlider({ Name = "Jump Cooldown (Old only)", Value = Bhop.Settings.JumpCooldown or 0.05,
         Min = 0.01, Max = 0.5, Decimals = 2,
         Callback = function(v) Bhop.Settings.JumpCooldown = v end })
-    bhopSec:AddSlider({ Name = "Virtual/Keypress Hold (ms)", Value = Bhop.Settings.VirtualHoldMs or 20,
-        Min = 1, Max = 200,
-        Callback = function(v) Bhop.Settings.VirtualHoldMs = v end })
-    bhopSec:AddSlider({ Name = "StateToggle Hold (ms)", Value = Bhop.Settings.StateToggleHoldMs or 100,
-        Min = 10, Max = 500,
-        Callback = function(v) Bhop.Settings.StateToggleHoldMs = v end })
+    bhopSec:AddToggle({ Name = "Air Boost (New only)", Value = Bhop.Settings.AirBoost ~= false,
+        Callback = function(v) Bhop.Settings.AirBoost = v end })
+    bhopSec:AddSlider({ Name = "Air Boost Divisor (New)", Value = Bhop.Settings.AirBoostDivisor or 5.9,
+        Min = 1, Max = 30, Decimals = 1,
+        Callback = function(v) Bhop.Settings.AirBoostDivisor = v end })
 
     --// ===== Spider (mode + Default settings) =====
     local spiderSec = MovementTab:CreateSection({ Name = "Spider (Bhop assist)", Side = "Right" })
