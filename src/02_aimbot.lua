@@ -2299,4 +2299,211 @@ local function LoadAimbot()
                 local targetChar = targetPart.Parent
                 if not targetChar then return end
                 local hum = targetChar:FindFirstChildOfClass("Humanoid")
-                if hum and Aimbot
+                if hum and Aimbot.Settings.AliveCheck and hum.Health <= 0 then CancelLock() return end
+
+                local visiblePoint, nowVisible = WaitForShotPoint(targetPart)
+                if Aimbot.Settings.WallCheck and not visiblePoint
+                   and not ShouldBypassWallCheck() then
+                    CancelLock()
+                    return
+                end
+
+                if Aimbot.Settings.AutoShoot.AutoStop.Enabled then
+                    local char = LocalPlayer.Character
+                    if char then
+                        local humObj = char:FindFirstChildOfClass("Humanoid")
+                        if humObj then
+                            local savedSpeed = humObj.WalkSpeed
+                            humObj.WalkSpeed = 0
+                            task.wait(Aimbot.Settings.AutoShoot.AutoStop.Time)
+                            humObj.WalkSpeed = savedSpeed
+                        end
+                    end
+                end
+
+                local shootBtn = Aimbot.Settings.AutoShoot.ShootKey == "MouseButton1" and 0 or 1
+                if Aimbot.Settings.SilentAim then
+                    PerformSilentShot(targetPart, shootBtn, nowVisible)
+                else
+                    RefreshOldPositionIfNeeded()
+                    FireClickNoDesync(shootBtn, 0.25)
+                end
+                LastShotTime = nowt
+            end, HandleError)
+        end
+    end)
+end
+
+Track(UserInputService.TextBoxFocused:Connect(function() Typing = true end))
+Track(UserInputService.TextBoxFocusReleased:Connect(function() Typing = false end))
+
+Track(UserInputService.InputBegan:Connect(function(inp, gpe)
+    if Typing then return end
+    if not Aimbot.Settings.TPAimEnabled then return end
+    if Aimbot.Settings.TPAimMethod ~= "InfiniteTP" then return end
+    local key = Aimbot.Settings.TPAimKey or "E"
+    local kc = Util.SafeKeyCode(key)
+    if kc and inp.KeyCode == kc then
+        Aimbot.TPAimInternal.KeyHeld = true
+        if Aimbot.LockPartInstance and IsAlive(Aimbot.LockPartInstance) then
+            PerformInfiniteTP(Aimbot.LockPartInstance, 0)
+        end
+    end
+end))
+
+Track(UserInputService.InputEnded:Connect(function(inp)
+    if not Aimbot.Settings.TPAimEnabled then return end
+    if Aimbot.Settings.TPAimMethod ~= "InfiniteTP" then return end
+    local key = Aimbot.Settings.TPAimKey or "E"
+    local kc = Util.SafeKeyCode(key)
+    if kc and inp.KeyCode == kc then
+        Aimbot.TPAimInternal.KeyHeld = false
+    end
+end))
+
+LoadAimbot()
+
+--// ---------------------------------------------------------------------------
+--// Public exports
+--// ---------------------------------------------------------------------------
+Aimbot.CancelLock            = CancelLock
+Aimbot.RemoveAVHook          = RemoveAVHook
+Aimbot.RemoveMHTProxy        = RemoveMHTProxy
+Aimbot.GetVisiblePointOnPart = GetVisiblePointOnPart
+Aimbot.GetMousePos           = GetMousePos
+Aimbot.PredictPartPosition   = PredictPartPosition
+Aimbot.MoveMouseAbs          = MoveMouseAbs
+Aimbot.WorldToMouseVIM       = WorldToMouseVIM
+Aimbot.PatchShotArgs         = PatchShotArgs
+Aimbot.PatchValueRecursive   = PatchValueRecursive
+Aimbot.VerifyAndFixHooks     = VerifyAndFixHooks
+Aimbot.InvalidateModeCache   = InvalidateModeCache
+Aimbot.GetWorkingMethods     = GetWorkingMethods
+Aimbot.CycleAutowork         = CycleAutowork
+Aimbot.GetNPCCharacters      = GetNPCCharacters
+Aimbot.GetLockedCharacter    = GetLockedCharacter
+Aimbot.IsModeAvailable       = IsModeAvailable
+Aimbot.ShouldBypassWallCheck = ShouldBypassWallCheck
+Aimbot.IsBacktrackEnabled    = IsBacktrackEnabled
+Aimbot.IsModeHooked          = IsModeHooked
+Aimbot.ShouldRedirect        = ShouldRedirect
+Aimbot.GetBacktrackGhostTargets = GetBacktrackGhostTargets
+Aimbot.ResolveOwnerCharacter = ResolveOwnerCharacter
+Aimbot.ResolveOwnerPlayer    = ResolveOwnerPlayer
+Aimbot.DebugPrint            = DebugPrint
+
+Aimbot.PerformWallbang          = PerformWallbang
+Aimbot.PerformMagicBullet       = PerformMagicBullet
+Aimbot.PerformInfiniteTP        = PerformInfiniteTP
+Aimbot.DisableDesyncDuringShot  = DisableDesyncDuringShot
+Aimbot.FireClickNoDesync        = FireClickNoDesync
+
+--// v27: Multi-Point / Visuals / Aim Line exports
+Aimbot.SampleVisiblePointsOnPart = SampleVisiblePointsOnPart
+Aimbot.FindNearestPartToMouse    = FindNearestPartToMouse
+Aimbot.DrawMultiPointVisuals     = DrawMultiPointVisuals
+Aimbot.DrawAimLine               = DrawAimLine
+Aimbot.DestroyMultiPointVisuals  = DestroyMultiPointVisuals
+
+--// ---------------------------------------------------------------------------
+--// DIAGNOSTICS
+--// ---------------------------------------------------------------------------
+local function Check(cond, label, detail)
+    local mark = cond and "[OK]  " or "[FAIL]"
+    local line = mark .. " " .. label
+    if detail then line = line .. " — " .. tostring(detail) end
+    warn(line)
+    return cond and 1 or 0
+end
+
+local function Diagnose()
+    local passed, failed = 0, 0
+    local function T(cond, label, detail)
+        if Check(cond, label, detail) == 1 then
+            passed = passed + 1
+        else
+            failed = failed + 1
+        end
+    end
+
+    warn("==========================================================")
+    warn("          AirHub Aimbot - DIAGNOSTICS (v27)")
+    warn("==========================================================")
+
+    T(H ~= nil, "H (AirHub) exists")
+    T(Util ~= nil, "Util module present")
+    T(Players ~= nil, "Players service")
+    T(RunService ~= nil, "RunService")
+    T(UserInputService ~= nil, "UserInputService")
+    T(VirtualInputManager ~= nil, "VirtualInputManager")
+    T(ReplicatedStorage ~= nil, "ReplicatedStorage")
+    T(LocalPlayer ~= nil, "LocalPlayer")
+    T(workspace.CurrentCamera ~= nil, "CurrentCamera")
+
+    local drawingOK = pcall(function() local d = Drawing.new("Circle"); d:Remove() end)
+    T(drawingOK, "Drawing.new available")
+
+    local execs = { "hookmetamethod", "hookfunction", "newcclosure", "checkcaller",
+                    "getrawmetatable", "getnamecallmethod", "mousemoverel", "mousemoveabs" }
+    for _, name in ipairs(execs) do
+        T(getExec(name) ~= nil, "executor: " .. name)
+    end
+
+    --// Multi-Point self-test: sample on a floating part, check structure
+    do
+        local testOK, testErr = pcall(function()
+            local p = Instance.new("Part")
+            p.Size = Vector3.new(2, 2, 2)
+            p.Anchored = true
+            p.CanCollide = false
+            p.Parent = workspace
+            local r = SampleVisiblePointsOnPart(p, 3)
+            p:Destroy()
+            assert(type(r) == "table" and type(r.samples) == "table",
+                "SampleVisiblePointsOnPart returned bad structure")
+            assert(#r.samples > 0, "SampleVisiblePointsOnPart returned no samples")
+        end)
+        T(testOK, "Multi-Point: SampleVisiblePointsOnPart works", testErr)
+    end
+
+    InvalidateModeCache()
+    if Aimbot.IsModeAvailable then
+        local modes = { "Camera", "Mouse", "Raycast", "FindPartOnRay",
+                        "FindPartOnRayWithWhitelist", "FindPartOnRayWithIgnoreList",
+                        "Mouse.Hit/Target" }
+        for _, m in ipairs(modes) do
+            local ok, reason = Aimbot.IsModeAvailable(m)
+            T(ok, "hook: " .. m, reason)
+        end
+    end
+
+    local exports = { "CancelLock", "GetVisiblePointOnPart", "PredictPartPosition",
+                      "IsModeAvailable", "ShouldBypassWallCheck",
+                      "IsBacktrackEnabled", "IsModeHooked", "ShouldRedirect",
+                      "GetBacktrackGhostTargets", "ResolveOwnerCharacter", "ResolveOwnerPlayer",
+                      "PerformWallbang", "PerformMagicBullet", "PerformInfiniteTP",
+                      "DisableDesyncDuringShot", "FireClickNoDesync",
+                      "PatchShotArgs", "PatchValueRecursive",
+                      "VerifyAndFixHooks", "InvalidateModeCache",
+                      "GetWorkingMethods", "CycleAutowork", "DebugPrint",
+                      "RemoveAVHook", "RemoveMHTProxy",
+                      "SampleVisiblePointsOnPart", "FindNearestPartToMouse",
+                      "DrawMultiPointVisuals", "DrawAimLine",
+                      "DestroyMultiPointVisuals" }
+    for _, name in ipairs(exports) do
+        T(type(Aimbot[name]) == "function", "export: Aimbot." .. name)
+    end
+
+    warn("==========================================================")
+    warn(string.format("  RESULT: %d passed, %d failed", passed, failed))
+    warn("==========================================================")
+
+    return passed, failed
+end
+
+Aimbot.Diagnose = Diagnose
+
+task.delay(1, function()
+    if H.ShuttingDown then return end
+    pcall(Diagnose)
+end)
