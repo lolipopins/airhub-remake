@@ -1,5 +1,5 @@
 --// AirHub - 06a_movement_fly_bhop.lua
---// Fly + Bhop + Spider (Default / Pixelwalk / Wallfucker) + TargetOrbit.
+--// Fly + Bhop (advanced) + Spider (Default / Pixelwalk / Wallfucker) + TargetOrbit.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 06a: core not loaded"); return end
@@ -12,6 +12,7 @@ local Track = Util.Track
 local HandleError = Util.HandleError
 local SafeKeyCode = Util.SafeKeyCode
 local RAY_FILTER = Util.RAY_FILTER
+local VirtualInputManager = Util.VirtualInputManager
 
 H.Fly = {
     Settings = {
@@ -319,14 +320,28 @@ Fly.GetAimbotTargetPos = Fly_GetAimbotTargetPos
 Fly.ComputeOrbitVelocity = Fly_ComputeOrbitVelocity
 
 --// ===========================================================================
---// BHOP + SPIDER
+--// BHOP (advanced) + SPIDER
 --// ===========================================================================
 H.Bhop = {
     Settings = {
         Enabled = false,
         AutoJumpKey = "Space",
         BypassJump = true,
-        JumpCooldown = 0.1,
+        JumpCooldown = 0.05,
+
+        --// ==== Advanced (NEW) ====
+        UseRenderStep  = true,      --// цикл на RenderStepped вместо task.wait
+        UseRayGround   = true,      --// ground детект через рейкаст (без задержки FloorMaterial)
+        GroundRayRange = 3.0,       --// длина рейкаста вниз
+        JumpBuffer     = 0.15,      --// окно буфера прыжка после тапа (s)
+        CoyoteTime     = 0.10,      --// окно после схода с края (s)
+        PredLandDist   = 3.0,       --// предсказание посадки — если рейкаст ближе — буфер взведён
+        NoUpwardJump   = true,      --// не спамить прыжок пока Velocity.Y > threshold
+        UpwardThreshold= 5.0,       --// порог Velocity.Y для NoUpwardJump
+        AutoStrafe     = false,     --// авто-стрейф A/D по дельте камеры
+        AutoStrafeInvert = false,   --// инверсия направления авто-стрейфа
+        StrafeDeadzone = 0.003,     --// мёртвая зона дельты yaw (rad/frame)
+
         Spider = {
             Enabled  = false,
             Mode     = "Default",
@@ -357,10 +372,21 @@ H.Bhop = {
         KeyHeld = false, LastJumpTime = 0, Active = false,
         SpiderTouching = false, WallNormal = nil,
         Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
+
+        --// NEW bhop internals
+        LastKeyDownTime = 0,
+        LastGroundTime  = 0,
+        LastJumpFrame   = 0,
+        LastYaw         = nil,
+        StrafeKeyA      = false,
+        StrafeKeyD      = false,
     },
 }
 local Bhop = H.Bhop
 
+--// ---------------------------------------------------------------
+--// Input
+--// ---------------------------------------------------------------
 Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     if gpe then return end
     if UserInputService:GetFocusedTextBox() then return end
@@ -368,6 +394,7 @@ Track(UserInputService.InputBegan:Connect(function(inp, gpe)
     local kc = SafeKeyCode(Bhop.Settings.AutoJumpKey)
     if inp.UserInputType == Enum.UserInputType.Keyboard and kc and inp.KeyCode == kc then
         Bhop.Internal.KeyHeld = true
+        Bhop.Internal.LastKeyDownTime = tick()
     end
 end))
 
@@ -378,18 +405,118 @@ Track(UserInputService.InputEnded:Connect(function(inp)
     end
 end))
 
-Track(LocalPlayer.CharacterAdded:Connect(function()
-    Bhop.Internal.KeyHeld = false
-    Bhop.Internal.Active = false
-    Bhop.Internal.SpiderTouching = false
-    Bhop.Internal.WallNormal = nil
-    Bhop.Internal.Pixelwalk_LastThin = 0
-    Bhop.Internal.Pixelwalk_LastThinNormal = nil
-end))
+--// ---------------------------------------------------------------
+--// Auto-strafe helpers
+--// ---------------------------------------------------------------
+local function Bhop_StrafeReleaseAll()
+    local I = Bhop.Internal
+    if VirtualInputManager then
+        if I.StrafeKeyA then
+            pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.A, false, game) end)
+        end
+        if I.StrafeKeyD then
+            pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.D, false, game) end)
+        end
+    end
+    I.StrafeKeyA = false
+    I.StrafeKeyD = false
+    I.LastYaw = nil
+end
 
---// ---------------------------------------------------------------------------
+local function Bhop_StrafePressA()
+    local I = Bhop.Internal
+    if not VirtualInputManager then return end
+    if I.StrafeKeyA then return end
+    if UserInputService:IsKeyDown(Enum.KeyCode.A) then return end
+    pcall(function() VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.A, false, game) end)
+    I.StrafeKeyA = true
+end
+
+local function Bhop_StrafeReleaseA()
+    local I = Bhop.Internal
+    if not I.StrafeKeyA then return end
+    if VirtualInputManager then
+        pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.A, false, game) end)
+    end
+    I.StrafeKeyA = false
+end
+
+local function Bhop_StrafePressD()
+    local I = Bhop.Internal
+    if not VirtualInputManager then return end
+    if I.StrafeKeyD then return end
+    if UserInputService:IsKeyDown(Enum.KeyCode.D) then return end
+    pcall(function() VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.D, false, game) end)
+    I.StrafeKeyD = true
+end
+
+local function Bhop_StrafeReleaseD()
+    local I = Bhop.Internal
+    if not I.StrafeKeyD then return end
+    if VirtualInputManager then
+        pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.D, false, game) end)
+    end
+    I.StrafeKeyD = false
+end
+
+local function Bhop_StrafeTick()
+    local S = Bhop.Settings
+    local I = Bhop.Internal
+    if not S.AutoStrafe or not VirtualInputManager then
+        Bhop_StrafeReleaseAll()
+        return
+    end
+    local camera = workspace.CurrentCamera
+    if not camera then Bhop_StrafeReleaseAll(); return end
+    local look = camera.CFrame.LookVector
+    local yaw = math.atan2(look.X, look.Z)
+    if not I.LastYaw then I.LastYaw = yaw; return end
+    local delta = yaw - I.LastYaw
+    while delta > math.pi do delta = delta - math.pi * 2 end
+    while delta < -math.pi do delta = delta + math.pi * 2 end
+    I.LastYaw = yaw
+
+    local dz = S.StrafeDeadzone or 0.003
+    local turningRight = delta > dz
+    local turningLeft  = delta < -dz
+    if S.AutoStrafeInvert then
+        turningRight, turningLeft = turningLeft, turningRight
+    end
+
+    if turningRight then
+        Bhop_StrafePressA(); Bhop_StrafeReleaseD()
+    elseif turningLeft then
+        Bhop_StrafePressD(); Bhop_StrafeReleaseA()
+    else
+        Bhop_StrafeReleaseA(); Bhop_StrafeReleaseD()
+    end
+end
+
+--// ---------------------------------------------------------------
+--// Ground detection
+--// ---------------------------------------------------------------
+local function Bhop_GroundRayDist(char, hrp)
+    local params = RaycastParams.new()
+    params.FilterDescendantsInstances = { char }
+    params.FilterType = RAY_FILTER
+    params.IgnoreWater = true
+    local range = Bhop.Settings.GroundRayRange or 3.0
+    local hit = workspace:Raycast(hrp.Position, Vector3.new(0, -range, 0), params)
+    if hit then return hit.Distance end
+    return nil
+end
+
+local function Bhop_IsOnGround(char, hrp, hum)
+    if hum and hum.FloorMaterial ~= Enum.Material.Air then return true end
+    if Bhop.Settings.UseRayGround then
+        return Bhop_GroundRayDist(char, hrp) ~= nil
+    end
+    return false
+end
+
+--// ---------------------------------------------------------------
 --// Spider — Default
---// ---------------------------------------------------------------------------
+--// ---------------------------------------------------------------
 local function Spider_DetectWall(char, hrp)
     local rayParams = RaycastParams.new()
     rayParams.FilterDescendantsInstances = { char }
@@ -415,10 +542,9 @@ local function Spider_DetectWall(char, hrp)
     return false
 end
 
---// ---------------------------------------------------------------------------
+--// ---------------------------------------------------------------
 --// Spider — Pixelwalk (v2)
---// Multi-origin + predictive cast + coyote time + fall limiter.
---// ---------------------------------------------------------------------------
+--// ---------------------------------------------------------------
 local function Spider_Pixelwalk(char, hrp, hum)
     local P = Bhop.Settings.Spider.Pixelwalk or {}
     local I = Bhop.Internal
@@ -541,9 +667,9 @@ local function Spider_Pixelwalk(char, hrp, hum)
     return true
 end
 
---// ---------------------------------------------------------------------------
+--// ---------------------------------------------------------------
 --// Spider — Wallfucker
---// ---------------------------------------------------------------------------
+--// ---------------------------------------------------------------
 local function Spider_Wallfucker(char, hrp)
     local W = Bhop.Settings.Spider.Wallfucker or {}
     local chance   = math.clamp(W.Chance or 0.5, 0, 1)
@@ -593,58 +719,152 @@ local function Spider_Wallfucker(char, hrp)
     return true
 end
 
-task.spawn(function()
-    while not H.ShuttingDown and task.wait(0.01) do
-        if not Bhop.Settings.Enabled then
-            Bhop.Internal.Active = false
-            Bhop.Internal.SpiderTouching = false
-            Bhop.Internal.WallNormal = nil
-            Bhop.Internal.Pixelwalk_LastThin = 0
-            Bhop.Internal.Pixelwalk_LastThinNormal = nil
-            continue
-        end
-        local char = LocalPlayer.Character
-        if not char then continue end
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        if not hum or not hrp then continue end
-        Bhop.Internal.Active = true
-        Bhop.Internal.SpiderTouching = false
+--// ---------------------------------------------------------------
+--// Main Tick
+--// ---------------------------------------------------------------
+local function Bhop_Tick()
+    if H.ShuttingDown then return end
+    local S = Bhop.Settings
+    local I = Bhop.Internal
 
-        if Bhop.Settings.Spider.Enabled then
-            local mode = Bhop.Settings.Spider.Mode or "Default"
-            if mode == "Pixelwalk" then
-                Bhop.Internal.SpiderTouching = Spider_Pixelwalk(char, hrp, hum)
-            elseif mode == "Wallfucker" then
-                Bhop.Internal.SpiderTouching = Spider_Wallfucker(char, hrp)
-            else
-                Bhop.Internal.SpiderTouching = Spider_DetectWall(char, hrp)
+    if not S.Enabled then
+        if I.Active then
+            I.Active = false
+            I.SpiderTouching = false
+            I.WallNormal = nil
+            I.Pixelwalk_LastThin = 0
+            I.Pixelwalk_LastThinNormal = nil
+            Bhop_StrafeReleaseAll()
+        end
+        return
+    end
+
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp then return end
+    if hum.Health <= 0 then
+        Bhop_StrafeReleaseAll()
+        return
+    end
+
+    I.Active = true
+    I.SpiderTouching = false
+
+    --// ===== Spider =====
+    if S.Spider.Enabled then
+        local mode = S.Spider.Mode or "Default"
+        if mode == "Pixelwalk" then
+            I.SpiderTouching = Spider_Pixelwalk(char, hrp, hum)
+        elseif mode == "Wallfucker" then
+            I.SpiderTouching = Spider_Wallfucker(char, hrp)
+        else
+            I.SpiderTouching = Spider_DetectWall(char, hrp)
+        end
+    end
+
+    --// ===== Ground / air =====
+    local now = tick()
+    local groundDist = Bhop_GroundRayDist(char, hrp)
+    local isGround = (hum.FloorMaterial ~= Enum.Material.Air)
+        or (groundDist ~= nil)
+    if isGround then
+        I.LastGroundTime = now
+    end
+    local inCoyote = (now - I.LastGroundTime) < (S.CoyoteTime or 0.10)
+
+    --// ===== Auto-strafe (в воздухе) =====
+    if S.AutoStrafe and not isGround then
+        Bhop_StrafeTick()
+    elseif I.StrafeKeyA or I.StrafeKeyD then
+        Bhop_StrafeReleaseAll()
+    end
+
+    --// ===== Jump buffer =====
+    local bufferTime = S.JumpBuffer or 0.15
+    local keyHeld = I.KeyHeld
+    local bufferActive = keyHeld
+        or ((now - (I.LastKeyDownTime or 0)) < bufferTime)
+
+    --// Предсказание посадки: рейкаст близко + падаем → тоже взведём буфер
+    if not bufferActive and keyHeld ~= true then
+        if groundDist and groundDist <= (S.PredLandDist or 3.0)
+           and hrp.Velocity.Y < -1 then
+            bufferActive = true
+        end
+    end
+
+    --// ===== Auto-jump =====
+    if bufferActive then
+        local canJump = isGround or inCoyote
+        if S.NoUpwardJump and not isGround then
+            if hrp.Velocity.Y > (S.UpwardThreshold or 5.0) then
+                canJump = false
             end
         end
-
-        if Bhop.Internal.KeyHeld then
-            local now = tick()
-            if now - Bhop.Internal.LastJumpTime >= Bhop.Settings.JumpCooldown then
-                local bypass = Bhop.Settings.BypassJump
-                if Bhop.Internal.SpiderTouching then bypass = true end
-                if bypass then
-                    hum:ChangeState(Enum.HumanoidStateType.Jumping)
-                    Bhop.Internal.LastJumpTime = now
-                else
-                    if hum.FloorMaterial ~= Enum.Material.Air then
+        if canJump then
+            local cooldown = S.JumpCooldown or 0.05
+            if now - (I.LastJumpTime or 0) >= cooldown then
+                --// Primary: Jump flag — физика съест ровно в тик касания
+                pcall(function() hum.Jump = true end)
+                --// Bypass: ChangeState обходит FloorMaterial-проверку
+                if S.BypassJump or isGround then
+                    pcall(function()
                         hum:ChangeState(Enum.HumanoidStateType.Jumping)
-                        Bhop.Internal.LastJumpTime = now
-                    end
+                    end)
                 end
+                I.LastJumpTime = now
             end
         end
     end
-end)
+end
+
+--// ---------------------------------------------------------------
+--// Loop (RenderStepped or task.wait fallback)
+--// ---------------------------------------------------------------
+if Bhop.Settings.UseRenderStep ~= false then
+    Track(RunService.RenderStepped:Connect(function()
+        xpcall(Bhop_Tick, HandleError)
+    end))
+else
+    task.spawn(function()
+        while not H.ShuttingDown and task.wait(0.01) do
+            xpcall(Bhop_Tick, HandleError)
+        end
+    end)
+end
+
+--// Character reset
+Track(LocalPlayer.CharacterAdded:Connect(function()
+    local I = Bhop.Internal
+    I.KeyHeld = false
+    I.Active = false
+    I.SpiderTouching = false
+    I.WallNormal = nil
+    I.Pixelwalk_LastThin = 0
+    I.Pixelwalk_LastThinNormal = nil
+    I.LastKeyDownTime = 0
+    I.LastGroundTime = 0
+    Bhop_StrafeReleaseAll()
+end))
 
 Bhop.Functions = {
     ResetSettings = function()
+        Bhop_StrafeReleaseAll()
         Bhop.Settings = {
-            Enabled = false, AutoJumpKey = "Space", BypassJump = true, JumpCooldown = 0.1,
+            Enabled = false, AutoJumpKey = "Space", BypassJump = true, JumpCooldown = 0.05,
+            UseRenderStep  = true,
+            UseRayGround   = true,
+            GroundRayRange = 3.0,
+            JumpBuffer     = 0.15,
+            CoyoteTime     = 0.10,
+            PredLandDist   = 3.0,
+            NoUpwardJump   = true,
+            UpwardThreshold= 5.0,
+            AutoStrafe     = false,
+            AutoStrafeInvert = false,
+            StrafeDeadzone = 0.003,
             Spider = {
                 Enabled  = false,
                 Mode     = "Default",
@@ -675,6 +895,10 @@ Bhop.Functions = {
             KeyHeld = false, LastJumpTime = 0, Active = false,
             SpiderTouching = false, WallNormal = nil,
             Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
+            LastKeyDownTime = 0, LastGroundTime = 0, LastJumpFrame = 0,
+            LastYaw = nil, StrafeKeyA = false, StrafeKeyD = false,
         }
     end,
+    StrafeReleaseAll = Bhop_StrafeReleaseAll,
 }
+Bhop.StrafeReleaseAll = Bhop_StrafeReleaseAll
