@@ -1,5 +1,5 @@
 --// AirHub - 06a_movement_fly_bhop.lua
---// Fly + Bhop (2 modes) + Spider (Default / Pixelwalk / Wallfucker) + TargetOrbit.
+--// Fly + Bhop (8 modes) + Spider (Default / Pixelwalk / Wallfucker) + TargetOrbit.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 06a: core not loaded"); return end
@@ -320,18 +320,28 @@ Fly.GetAimbotTargetPos = Fly_GetAimbotTargetPos
 Fly.ComputeOrbitVelocity = Fly_ComputeOrbitVelocity
 
 --// ===========================================================================
---// BHOP (2 modes) + SPIDER
+--// BHOP (8 modes) + SPIDER
 --// ===========================================================================
 H.Bhop = {
     Settings = {
         Enabled = false,
-        --// "ChangeState" | "VirtualInput"
-        --//   ChangeState  — Humanoid:ChangeState(Jumping) + hum.Jump = true
-        --//   VirtualInput — эмулирует нажатие Space через VirtualInputManager
+        --// Режимы:
+        --//   "ChangeState"  — ChangeState(Jumping) + hum.Jump = true
+        --//   "VirtualInput" — VirtualInputManager:SendKeyEvent(Space)
+        --//   "Keypress"     — global keypress/keyrelease (0x20 = Space)
+        --//   "HumJump"      — только hum.Jump = true
+        --//   "JumpState"    — только ChangeState(Jumping), без флага
+        --//   "StateToggle"  — временно отключить Freefall/Landed/FallingDown
+        --//   "ResetJump"    — ChangeState(Reset) → ChangeState(Jumping)
+        --//   "Hybrid"       — ChangeState + VirtualInput одновременно
         Mode = "ChangeState",
         AutoJumpKey = "Space",
         BypassJump = true,
         JumpCooldown = 0.05,
+        --// Для VirtualInput / Keypress / Hybrid:
+        VirtualHoldMs = 20,     --// сколько держать клавишу перед release
+        --// Для StateToggle:
+        StateToggleHoldMs = 100,--// сколько держать состояния отключёнными
         Spider = {
             Enabled  = false,
             Mode     = "Default",
@@ -363,6 +373,7 @@ H.Bhop = {
         SpiderTouching = false, WallNormal = nil,
         Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
         VirtualKeyDown = false,
+        StateToggleActive = false,
     },
 }
 local Bhop = H.Bhop
@@ -392,6 +403,7 @@ Track(LocalPlayer.CharacterAdded:Connect(function()
     Bhop.Internal.Pixelwalk_LastThin = 0
     Bhop.Internal.Pixelwalk_LastThinNormal = nil
     Bhop.Internal.VirtualKeyDown = false
+    Bhop.Internal.StateToggleActive = false
 end))
 
 --// ---------------------------------------------------------------------------
@@ -599,9 +611,11 @@ local function Spider_Wallfucker(char, hrp)
     return true
 end
 
---// ---------------------------------------------------------------------------
---// Virtual-input helpers (Mode = "VirtualInput")
---// ---------------------------------------------------------------------------
+--// ===========================================================================
+--// Bhop Mode Implementations
+--// ===========================================================================
+
+--// -- VirtualInput helpers (используется в VirtualInput / Hybrid) --
 local function Bhop_VirtualKeyDown()
     local I = Bhop.Internal
     if I.VirtualKeyDown then return end
@@ -620,6 +634,107 @@ local function Bhop_VirtualKeyUp()
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
     end)
     I.VirtualKeyDown = false
+end
+
+--// -- Keypress helpers (используется в Keypress) --
+local function Bhop_KeypressDown()
+    if type(keypress) ~= "function" then return end
+    pcall(function() keypress(0x20) end)  -- 0x20 = Space (VK_SPACE)
+end
+
+local function Bhop_KeypressUp()
+    if type(keyrelease) ~= "function" then return end
+    pcall(function() keyrelease(0x20) end)
+end
+
+--// -- StateToggle helpers --
+local STATE_TOGGLE_LIST = {
+    Enum.HumanoidStateType.Freefall,
+    Enum.HumanoidStateType.Landed,
+    Enum.HumanoidStateType.FallingDown,
+}
+
+local function Bhop_StateToggle_Disable(hum)
+    if not hum then return end
+    for _, st in ipairs(STATE_TOGGLE_LIST) do
+        pcall(function() hum:SetStateEnabled(st, false) end)
+    end
+end
+
+local function Bhop_StateToggle_Restore(hum)
+    if not hum then return end
+    for _, st in ipairs(STATE_TOGGLE_LIST) do
+        pcall(function() hum:SetStateEnabled(st, true) end)
+    end
+end
+
+--// -- Dispatch: выполняет прыжок выбранным режимом --
+local function Bhop_DoJump(mode, hum)
+    if not hum then return end
+    local S = Bhop.Settings
+    local holdMs = S.VirtualHoldMs or 20
+
+    if mode == "ChangeState" then
+        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+        pcall(function() hum.Jump = true end)
+
+    elseif mode == "VirtualInput" then
+        if VirtualInputManager then
+            Bhop_VirtualKeyDown()
+            task.delay(holdMs / 1000, Bhop_VirtualKeyUp)
+        else
+            --// fallback
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+            pcall(function() hum.Jump = true end)
+        end
+
+    elseif mode == "Keypress" then
+        if type(keypress) == "function" then
+            Bhop_KeypressDown()
+            task.delay(holdMs / 1000, Bhop_KeypressUp)
+        else
+            --// fallback
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+            pcall(function() hum.Jump = true end)
+        end
+
+    elseif mode == "HumJump" then
+        pcall(function() hum.Jump = true end)
+
+    elseif mode == "JumpState" then
+        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+
+    elseif mode == "StateToggle" then
+        if Bhop.Internal.StateToggleActive then return end
+        Bhop.Internal.StateToggleActive = true
+        Bhop_StateToggle_Disable(hum)
+        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+        pcall(function() hum.Jump = true end)
+        task.delay((S.StateToggleHoldMs or 100) / 1000, function()
+            Bhop_StateToggle_Restore(hum)
+            Bhop.Internal.StateToggleActive = false
+        end)
+
+    elseif mode == "ResetJump" then
+        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Reset) end)
+        task.defer(function()
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+            pcall(function() hum.Jump = true end)
+        end)
+
+    elseif mode == "Hybrid" then
+        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+        pcall(function() hum.Jump = true end)
+        if VirtualInputManager then
+            Bhop_VirtualKeyDown()
+            task.delay(holdMs / 1000, Bhop_VirtualKeyUp)
+        end
+
+    else
+        --// fallback = ChangeState
+        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+        pcall(function() hum.Jump = true end)
+    end
 end
 
 --// ---------------------------------------------------------------------------
@@ -671,41 +786,10 @@ local function Bhop_Tick()
             local bypass = S.BypassJump
             if I.SpiderTouching then bypass = true end
 
-            local mode = S.Mode or "ChangeState"
-
-            if mode == "VirtualInput" then
-                --// Эмулируем нажатие Space
-                if VirtualInputManager then
-                    Bhop_VirtualKeyDown()
-                    --// Отпустим через пол-кадра, чтобы игра успела засечь нажатие
-                    task.delay(0.02, Bhop_VirtualKeyUp)
-                    I.LastJumpTime = now
-                else
-                    --// fallback если VirtualInputManager недоступен
-                    if bypass or hum.FloorMaterial ~= Enum.Material.Air then
-                        pcall(function()
-                            hum:ChangeState(Enum.HumanoidStateType.Jumping)
-                        end)
-                        I.LastJumpTime = now
-                    end
-                end
-            else
-                --// ChangeState — основной метод
-                if bypass then
-                    pcall(function()
-                        hum:ChangeState(Enum.HumanoidStateType.Jumping)
-                    end)
-                    pcall(function() hum.Jump = true end)
-                    I.LastJumpTime = now
-                else
-                    if hum.FloorMaterial ~= Enum.Material.Air then
-                        pcall(function()
-                            hum:ChangeState(Enum.HumanoidStateType.Jumping)
-                        end)
-                        pcall(function() hum.Jump = true end)
-                        I.LastJumpTime = now
-                    end
-                end
+            local isGround = hum.FloorMaterial ~= Enum.Material.Air
+            if bypass or isGround then
+                Bhop_DoJump(S.Mode or "ChangeState", hum)
+                I.LastJumpTime = now
             end
         end
     else
@@ -720,12 +804,19 @@ end))
 Bhop.Functions = {
     ResetSettings = function()
         Bhop_VirtualKeyUp()
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then Bhop_StateToggle_Restore(hum) end
+        end
         Bhop.Settings = {
             Enabled = false,
             Mode = "ChangeState",
             AutoJumpKey = "Space",
             BypassJump = true,
             JumpCooldown = 0.05,
+            VirtualHoldMs = 20,
+            StateToggleHoldMs = 100,
             Spider = {
                 Enabled  = false,
                 Mode     = "Default",
@@ -757,8 +848,18 @@ Bhop.Functions = {
             SpiderTouching = false, WallNormal = nil,
             Pixelwalk_LastThin = 0, Pixelwalk_LastThinNormal = nil,
             VirtualKeyDown = false,
+            StateToggleActive = false,
         }
     end,
     VirtualKeyUp = Bhop_VirtualKeyUp,
+    StateToggleRestore = function()
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then Bhop_StateToggle_Restore(hum) end
+        end
+        Bhop.Internal.StateToggleActive = false
+    end,
 }
 Bhop.VirtualKeyUp = Bhop_VirtualKeyUp
+Bhop.StateToggleRestore = Bhop.Functions.StateToggleRestore
