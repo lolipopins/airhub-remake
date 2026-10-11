@@ -1,8 +1,7 @@
 --// AirHub - 07a_ui_core.lua
---// v23: Multi-Point section (grid sampling on part surface) + Multi-Point
---//      Visuals (draw sampled points + line to nearest/aim target).
---// v22: Silent Aim modes = Camera / Mouse / Raycast / Raycast v2
---//      / FindPartOnRay* / Mouse.Hit/Target.
+--// v24: Multi-Point (mesh-accurate sampling) + Multi-Point Visuals (points)
+--//      + Aim Line (separate feature).
+--// v22: Silent Aim modes = Camera / Mouse / Raycast / FindPartOnRay* / Mouse.Hit/Target.
 
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
@@ -190,6 +189,7 @@ task.delay(math.random(1, 3), function()
             Aimbot.Settings.WallbangEnabled = false
             if Aimbot.Settings.MultiPoint then Aimbot.Settings.MultiPoint.Enabled = false end
             if Aimbot.Settings.MultiPointVisuals then Aimbot.Settings.MultiPointVisuals.Enabled = false end
+            if Aimbot.Settings.AimLineVisuals then Aimbot.Settings.AimLineVisuals.Enabled = false end
         end
         if Aimbot.FOVSettings then Aimbot.FOVSettings.Enabled = false end
         if Aimbot.CancelAutoScan then pcall(Aimbot.CancelAutoScan) end
@@ -359,6 +359,11 @@ task.delay(math.random(1, 3), function()
             Aimbot.Settings.MultiPointVisuals[key] = val
         end
     end
+    local function aSetLine(key, val)
+        if Aimbot.Settings and Aimbot.Settings.AimLineVisuals then
+            Aimbot.Settings.AimLineVisuals[key] = val
+        end
+    end
 
     --// ==== Main ====
     local secA = H._UI.AimbotTab:CreateSection({ Name = "Main" })
@@ -410,25 +415,15 @@ task.delay(math.random(1, 3), function()
 
     local MP = AS.MultiPoint or {}
     secMP:AddToggle({
-        Name = "Enabled (grid sampling on body surface)",
+        Name = "Enabled (aim at closest VISIBLE mesh point)",
         Value = MP.Enabled or false,
         Callback = function(v) aSetMP("Enabled", v) end,
     })
     secMP:AddSlider({
-        Name = "Density (grid subdivisions per axis)",
+        Name = "Density (rays per axis)",
         Value = MP.Density or 3,
         Min = 2, Max = 6,
         Callback = function(v) aSetMP("Density", math.floor(v)) end,
-    })
-    secMP:AddToggle({
-        Name = "Apply to Nearest mode",
-        Value = MP.ApplyToNearest ~= false,
-        Callback = function(v) aSetMP("ApplyToNearest", v) end,
-    })
-    secMP:AddToggle({
-        Name = "Only camera-facing points",
-        Value = MP.FrontFacingOnly ~= false,
-        Callback = function(v) aSetMP("FrontFacingOnly", v) end,
     })
 
     --// ==== Multi-Point Visuals ====
@@ -456,22 +451,27 @@ task.delay(math.random(1, 3), function()
         Value = MPV.PointFilled ~= false,
         Callback = function(v) aSetMPV("PointFilled", v) end,
     })
-    secMPV:AddToggle({
+
+    --// ==== Aim Line (separate feature) ====
+    local secLine = H._UI.AimbotTab:CreateSection({ Name = "Aim Line" })
+
+    local AL = AS.AimLineVisuals or {}
+    secLine:AddToggle({
         Name = "Show Line to Aim Target",
-        Value = MPV.ShowLine ~= false,
-        Callback = function(v) aSetMPV("ShowLine", v) end,
+        Value = AL.Enabled or false,
+        Callback = function(v) aSetLine("Enabled", v) end,
     })
-    secMPV:AddDropdown({
+    secLine:AddDropdown({
         Name = "Line From",
-        Value = MPV.LineFrom or "Mouse",
+        Value = AL.LineFrom or "Mouse",
         List = { "Mouse", "Camera", "PlayerHRP" },
-        Callback = function(v) aSetMPV("LineFrom", v) end,
+        Callback = function(v) aSetLine("LineFrom", v) end,
     })
-    secMPV:AddSlider({
+    secLine:AddSlider({
         Name = "Line Thickness",
-        Value = MPV.LineThickness or 2,
+        Value = AL.Thickness or 2,
         Min = 1, Max = 6,
-        Callback = function(v) aSetMPV("LineThickness", v) end,
+        Callback = function(v) aSetLine("Thickness", v) end,
     })
 
     --// ==== Visibility ====
