@@ -1,15 +1,4 @@
 --// AirHub - 02_aimbot.lua
---// v31: Target Lock — sticky targeting with configurable duration (frames/seconds)
---// v30: Multi-Point v3 — Hierarchical Silhouette Sampling
---//   * Phased ray budget (50% grid / 30% refine / 20% jitter)
---//   * Quadtree boundary refinement (up to 4 levels, min-cell=2px)
---//   * Screen positions snapped to actual raycast hits
---//   * Per-part sampling cache (50ms TTL, invalidated on camera/part move)
---//   * Phyllotaxis jitter patterns (golden-angle spiral)
---//   * Part-priority weighted aim-point scoring (Head > Torso > Limbs)
---//   * Front-facing filter via raycast normal
---//   * Adaptive density by perimeter/area thinness ratio
---// v29: Multi-Point v2, WallCheck Method (Raycast/CameraObscuring)
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then
     warn("[AirHub] 02_aimbot: core not loaded")
