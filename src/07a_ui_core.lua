@@ -1,6 +1,4 @@
 --// AirHub - 07a_ui_core.lua
---// v27: Target Lock UI section (Enabled / Duration Mode / Frames / Seconds / Stick Beyond FOV)
---// v26: WallCheck Method, Multi-Point v2 UI
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
 
