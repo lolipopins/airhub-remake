@@ -1,18 +1,4 @@
 --// AirHub - 06a_movement_fly_bhop.lua
---// Fly + Bhop (Old / New) + Spider (Default / Pixelwalk / Wallfucker).
---//
---// Bhop "New" = порт Counter Blox HvH (ImGui) bhop:
---//   InputBegan(Space)  -> KeyHeld = true    (БЕЗ gpe-фильтра!)
---//   InputEnded(Space)  -> KeyHeld = false
---//   RunService.Heartbeat каждый кадр пока KeyHeld:
---//     Humanoid.Jump = not Humanoid.Jump
---//     if GetState()==Freefall and MoveDirection.Magnitude>0:
---//         Character:TranslateBy(MoveDirection / AirBoostDivisor)
---//
---// FIX: gameProcessedEvent для Space = true (игра обрабатывает прыжок),
---// поэтому фильтр "if gpe then return end" полностью ломал bhop.
---// Убран. Остальные проверки (textbox, keyboard) сохранены.
-
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 06a: core not loaded"); return end
 
