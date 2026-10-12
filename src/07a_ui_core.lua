@@ -1,6 +1,6 @@
 --// AirHub - 07a_ui_core.lua
---// v26: WallCheck Method (Raycast / CameraObscuring), Multi-Point v2 UI
---//      (IncludeAllParts, RefineEdges, OnlyMeshHits), Aim Line separate.
+--// v27: Target Lock UI section (Enabled / Duration Mode / Frames / Seconds / Stick Beyond FOV)
+--// v26: WallCheck Method, Multi-Point v2 UI
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 07a: core not loaded"); return end
 
@@ -177,6 +177,12 @@ task.delay(math.random(1, 3), function()
             if Aimbot.Settings.MultiPoint then Aimbot.Settings.MultiPoint.Enabled = false end
             if Aimbot.Settings.MultiPointVisuals then Aimbot.Settings.MultiPointVisuals.Enabled = false end
             if Aimbot.Settings.AimLineVisuals then Aimbot.Settings.AimLineVisuals.Enabled = false end
+            --// v31: reset TargetLock
+            if Aimbot.Settings.TargetLock then Aimbot.Settings.TargetLock.Enabled = false end
+        end
+        if Aimbot.Internal and Aimbot.Internal.TargetLock then
+            Aimbot.Internal.TargetLock.Active = false
+            Aimbot.Internal.TargetLock.Remaining = 0
         end
         if Aimbot.FOVSettings then Aimbot.FOVSettings.Enabled = false end
         if Aimbot.CancelAutoScan then pcall(Aimbot.CancelAutoScan) end
@@ -277,10 +283,10 @@ task.delay(math.random(1, 3), function()
     H._UI.ExploitsTab = MainFrame:CreateTab({ Name = "Exploits" })
     H._UI.SettingsTab = MainFrame:CreateTab({ Name = "Settings" })
 
-    local teamModes      = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
-    local wallCheckModes = { "Fast", "Perfect" }
+    local teamModes        = { "Enemies", "Allies", "All", "IgnoreNeutrals" }
+    local wallCheckModes   = { "Fast", "Perfect" }
     local wallCheckMethods = { "Raycast", "CameraObscuring" }
-    local silentAimModes = {
+    local silentAimModes   = {
         "Camera", "Mouse", "Raycast",
         "FindPartOnRay", "FindPartOnRayWithWhitelist",
         "FindPartOnRayWithIgnoreList", "Mouse.Hit/Target",
@@ -289,7 +295,8 @@ task.delay(math.random(1, 3), function()
         "RemotePatch", "RemotePatchFull", "RayIgnore", "RayNewHook",
         "MuzzleTeleport", "MouseHit", "ScreenPointToRay", "CameraTP",
     }
-    local mpStyles = { "Grid", "Silhouette", "MeshOnly" }
+    local mpStyles   = { "Grid", "Silhouette", "MeshOnly" }
+    local tlModes    = { "Frames", "Seconds" }
 
     local AS = (Aimbot and Aimbot.Settings) or {}
     local function aSet(k, v) if Aimbot.Settings then Aimbot.Settings[k] = v end end
@@ -311,6 +318,12 @@ task.delay(math.random(1, 3), function()
     local function aSetLine(k, v)
         if Aimbot.Settings and Aimbot.Settings.AimLineVisuals then
             Aimbot.Settings.AimLineVisuals[k] = v
+        end
+    end
+    --// v31: TargetLock setters
+    local function aSetTL(k, v)
+        if Aimbot.Settings and Aimbot.Settings.TargetLock then
+            Aimbot.Settings.TargetLock[k] = v
         end
     end
 
@@ -348,6 +361,38 @@ task.delay(math.random(1, 3), function()
     secA:AddTextbox({ Name = "NPC name filter (optional)",
         Value = AS.NPCNameFilter or "",
         Callback = function(v) aSet("NPCNameFilter", v) end })
+
+    --// ==== v31: Target Lock ====
+    local secTL = H._UI.AimbotTab:CreateSection({ Name = "Target Lock" })
+    local TL = AS.TargetLock or {}
+    secTL:AddToggle({
+        Name = "Enabled (stick to one player)",
+        Value = TL.Enabled or false,
+        Callback = function(v) aSetTL("Enabled", v) end,
+    })
+    secTL:AddDropdown({
+        Name = "Duration Mode",
+        Value = TL.DurationMode or "Frames",
+        List = tlModes,
+        Callback = function(v) aSetTL("DurationMode", v) end,
+    })
+    secTL:AddSlider({
+        Name = "Frames (aimbot update cycles)",
+        Value = TL.Frames or 60,
+        Min = 1, Max = 600,
+        Callback = function(v) aSetTL("Frames", math.floor(v)) end,
+    })
+    secTL:AddSlider({
+        Name = "Seconds",
+        Value = TL.Seconds or 1.0,
+        Min = 0.1, Max = 10, Decimals = 2,
+        Callback = function(v) aSetTL("Seconds", v) end,
+    })
+    secTL:AddToggle({
+        Name = "Stick Beyond FOV (keep target off-screen)",
+        Value = TL.StickBeyondFOV ~= false,
+        Callback = function(v) aSetTL("StickBeyondFOV", v) end,
+    })
 
     --// ==== Prediction ====
     local predSec = H._UI.AimbotTab:CreateSection({ Name = "Prediction" })
@@ -395,8 +440,8 @@ task.delay(math.random(1, 3), function()
     })
     secMP:AddSlider({
         Name = "Max rays per part",
-        Value = MP.MaxRaysPerPart or 96,
-        Min = 16, Max = 300,
+        Value = MP.MaxRaysPerPart or 128,
+        Min = 16, Max = 400,
         Callback = function(v) aSetMP("MaxRaysPerPart", math.floor(v)) end,
     })
     secMP:AddToggle({
@@ -408,6 +453,11 @@ task.delay(math.random(1, 3), function()
         Name = "Apply to Nearest mode",
         Value = MP.ApplyToNearest ~= false,
         Callback = function(v) aSetMP("ApplyToNearest", v) end,
+    })
+    secMP:AddToggle({
+        Name = "Front-facing only (skip back faces)",
+        Value = MP.FrontFacingOnly ~= false,
+        Callback = function(v) aSetMP("FrontFacingOnly", v) end,
     })
 
     --// ==== Multi-Point Visuals ====
@@ -434,9 +484,13 @@ task.delay(math.random(1, 3), function()
         Value = MPV.OnlyMeshHits ~= false,
         Callback = function(v)
             aSetMPV("OnlyMeshHits", v)
-            --// keep the old ShowMisses flag in sync
             aSetMPV("ShowMisses", not v)
         end,
+    })
+    secMPV:AddToggle({
+        Name = "Show Refined Points (edge sub-samples)",
+        Value = MPV.ShowRefined ~= false,
+        Callback = function(v) aSetMPV("ShowRefined", v) end,
     })
     secMPV:AddToggle({
         Name = "Show Misses",
@@ -464,7 +518,7 @@ task.delay(math.random(1, 3), function()
         Callback = function(v) aSetMPV("MaxPoints", math.floor(v)) end,
     })
 
-    --// ==== Aim Line (separate feature) ====
+    --// ==== Aim Line ====
     local secLine = H._UI.AimbotTab:CreateSection({ Name = "Aim Line" })
     local AL = AS.AimLineVisuals or {}
     secLine:AddToggle({
@@ -493,7 +547,6 @@ task.delay(math.random(1, 3), function()
         Value = AS.WallCheckMode or "Perfect",
         List = wallCheckModes,
         Callback = function(v) aSet("WallCheckMode", v) end })
-    --// v29: choose the wall check backend
     secW:AddDropdown({ Name = "WallCheck Method",
         Value = AS.WallCheckMethod or "Raycast",
         List = wallCheckMethods,
