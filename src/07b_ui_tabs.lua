@@ -1,15 +1,4 @@
 --// AirHub - 07b_ui_tabs.lua
---// Visuals, Anti-Aim (Body + Desync + Animation Breaker), Movement, Settings tabs.
---// Bhop: 2 modes (Old / New) + Space-block fix (hookmetamethod / release pulse).
---//   New = Counter Blox port (Heartbeat + Jump toggle + TranslateBy airboost).
---//   SpaceReleasePulse default = false (hookmetamethod достаточно;
---//   pulse эхо-файрит InputEnded и валит KeyHeld после первого прыжка).
---// Spider: 3 modes (Default / Pixelwalk / Wallfucker).
---// Animation Breaker: Preset = одна анимация; Mode = Speed | RandomFrames;
---//   Preset "None" + Speed/RandomFrames применяется к игровым анимациям;
---//   Preset "Custom" = пользовательский ID.
---//   Кастомные пресеты: Tornado / AntiAim / Moving AntiAim.
-
 local H = getgenv().AirHub
 if not H or not H._UI then warn("[AirHub] 07b: 07a not loaded"); return end
 
