@@ -1,6 +1,4 @@
 --// AirHub - 06b_movement_speed_strafer.lua
---// Speed + FastStop + AutoStrafer + Noclip.
-
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 06b: core not loaded"); return end
 
