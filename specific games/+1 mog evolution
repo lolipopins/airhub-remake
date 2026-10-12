@@ -104,7 +104,6 @@ LocalPlayer.CharacterAdded:Connect(function()
             -- повторно применим через задержку, если музыка подгрузилась позже
             task.wait(2)
             if Config.Player.MuteMusic then
-                -- удаляем MusicClient у игрока
                 pcall(function()
                     local ps = LocalPlayer:FindFirstChild("PlayerScripts")
                     local core = ps and ps:FindFirstChild("Core")
@@ -171,10 +170,9 @@ local function WipeMusicOnce()
         if mc then mc:Destroy() end
     end)
 
-    -- 1b. Резервный путь через Players.iaaaiu.PlayerScripts.Core.MusicClient
+    -- 1b. Резервный путь через Players.<имя>.PlayerScripts.Core.MusicClient
     pcall(function()
-        local playerName = LocalPlayer.Name
-        local plr = Players:FindFirstChild(playerName)
+        local plr = Players:FindFirstChild(LocalPlayer.Name)
         local ps  = plr and plr:FindFirstChild("PlayerScripts")
         local core = ps and ps:FindFirstChild("Core")
         local mc = core and core:FindFirstChild("MusicClient")
@@ -207,18 +205,6 @@ local function WipeMusicOnce()
         local core = sps and sps:FindFirstChild("Core")
         local mc = core and core:FindFirstChild("MusicClient")
         if mc then mc:Destroy() end
-    end)
-
-    -- 5. На всякий случай — заглушить всё в SoundService
-    pcall(function()
-        for _, obj in ipairs(SoundService:GetDescendants()) do
-            if obj:IsA("Sound") then
-                obj.Volume = 0
-                obj.Playing = false
-            elseif obj:IsA("SoundGroup") then
-                obj.Volume = 0
-            end
-        end
     end)
 end
 
