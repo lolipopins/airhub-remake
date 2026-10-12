@@ -1,15 +1,4 @@
---// ============================================================================
 --// AirHub — 03_antiaim.lua
---// Anti-Aim (body) + Desync (client-side) + Animation Breaker.
---// Desync modes: Default / OldPosition / Void / InPlayer
---// Desync methods: CFrame / Position / Velocity / Motor6D / HipHeight / Network
---// Animation Breaker:
---//   Preset = одна из встроенных анимаций, либо "None" (обычные анимации),
---//            либо "Custom" (свой ID).
---//   Mode   = Speed (множитель) | RandomFrames (прыжки в случайный кадр).
---//   Preset=None + Mode=Speed  → модифицирует скорость игровых анимаций.
---//   Preset=<набор> + Mode=*   → наш трек Action4 поверх всего.
---// ============================================================================
 local H = getgenv().AirHub
 if not H or not H._CoreLoaded then warn("[AirHub] 03_antiaim: core not loaded") return end
 if H.AntiAim then warn("[AirHub] AntiAim already loaded") return end
