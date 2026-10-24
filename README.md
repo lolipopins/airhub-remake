@@ -1,3 +1,3 @@
 # airhub remake
-discontinued
+discontinued                                                  
 loadstring(game:HttpGet("https://raw.githubusercontent.com/lolipopins/airhub-remake/main/loader.lua"))()
